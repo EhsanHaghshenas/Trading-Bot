@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//| WaveBot - API (no pivots, global inside-skip, Hunter integrated) |
+//| WaveBot - API (no pivots, global inside-skip, Hunter simple)     |
 //+------------------------------------------------------------------+
 #ifndef WAVEBOT_API_MQH
 #define WAVEBOT_API_MQH
@@ -43,7 +43,7 @@ bool FindMostRecentWave2(const string sym, const ENUM_TIMEFRAMES tf,
    return true;
 }
 
-// اسکن کامل W2→W3 + Hunter (بدون پیوت)
+// اسکن کامل W2→W3 + Hunter (Hunter صرفاً نشانه‌گذاری عبور از ext lq)
 int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf,
                                       const datetime from_time, const datetime to_time)
 {
@@ -85,41 +85,19 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
    bool   wickBreakActive=false;
    int    wickBreakIdx=-1; double wickBreakHigh=DBL_MIN;
 
-   // Hunter
-   Hunter_ResetState();
-
    while(idx < n)
    {
-      // اگر Hunter فعّال است
-      if(Hunter_IsActive())
-      {
-         bool progressed=false;
-         for(int j=idx; j<n; ++j)
-         {
-            if(insideHL[j]) continue; // کندل داخل خوشه
-
-            if(Hunter_ProcessBar(rates, insideHL, bodyLowEff, bodyHighEff, n, j))
-            {
-               Hunter_OnPairConfirmed(j);
-               idx=j; state=SEARCH_W2; ++pairs; progressed=true; break;
-            }
-         }
-         if(!progressed) break;
-         continue;
-      }
-
-      // جستجوی W2
+      // -------- جستجوی W2
       if(state==SEARCH_W2)
       {
          bool found=false;
          for(int i=idx; i<n; ++i)
          {
-            if(insideHL[i]) continue;
-
-            // تریگر Hunter با عبور از ext lq
+            // Hunter (ساده): هر عبور از ext lq را همان لحظه مارک کن
             if(Hunter_IsExtLQCross(rates[i]))
-               if(Hunter_TryActivateOnCross(rates, insideHL, bodyLowEff, bodyHighEff, n, i))
-               { idx=i; found=true; break; }
+               Hunter_MarkSimple(rates, n, i, InpMaxBarsInWave);
+
+            if(insideHL[i]) continue;
 
             int i2=-1,i3=-1,i4=-1;
             if(!CheckWave2_FromIndex_LocalOnly(rates, insideHL, bodyLowEff, bodyHighEff, n, i, i2, i3, i4))
@@ -147,7 +125,7 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
          }
          if(!found) break;
       }
-      // تایید W3 + بریک با بدنه
+      // -------- تایید W3 + بریک با بدنه
       else
       {
          const double H1_W2 = rates[c1].high;
@@ -156,12 +134,11 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
 
          for(int j=idx; j<n; ++j)
          {
-            if(insideHL[j]) continue;
-
-            // تریگر Hunter در مسیر تایید
+            // Hunter (ساده) در فاز تایید
             if(Hunter_IsExtLQCross(rates[j]))
-               if(Hunter_TryActivateOnCross(rates, insideHL, bodyLowEff, bodyHighEff, n, j))
-               { idx=j; progressed=true; break; }
+               Hunter_MarkSimple(rates, n, j, InpMaxBarsInWave);
+
+            if(insideHL[j]) continue;
 
             // کاندید C1_W3 = کمترین Low پس از cend
             if(j>cend && (w3_cand<0 || rates[j].low < w3_cand_low))
@@ -193,7 +170,7 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
             // بریک با بدنه مستقیم
             if(!have_break && rates[j].close > H1_W2) have_break=true;
 
-            // تایید نهایی: هم شمارش W3 و هم بریک با بدنه
+            // تایید نهایی W2→W3
             if(have_break && have_w3)
             {
                MarkV("W3_"+tag+"_C1", rates[w3_c1].time,  clrLime);
@@ -202,7 +179,6 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
                if(k4>=0) MarkV("W3_"+tag+"_C4", rates[k4].time, clrSeaGreen);
 
                ExtLQ_Set(rates[w3_c1].low, rates[w3_c1].time);
-               Hunter_OnPairConfirmed(j);
 
                if(InpDebugPrints) Print("#",tag," Pair OK | ext lq=",DoubleToString(ExtLQ_Get(),_Digits),
                                         " @ ",T(ExtLQ_Time())," | break-by-body @ ",T(rates[j].time));
@@ -215,7 +191,7 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
    }
 
    if(InpDebugPrints)
-      Print("STRICT pairs (no pivots) + Hunter + global inside-skip: ",pairs,
+      Print("STRICT pairs (no pivots) + Hunter(simple) + global inside-skip: ",pairs,
             (ExtLQ_Has()? StringFormat(" | ext lq=%.5f",ExtLQ_Get()) : " | ext lq: n/a"));
 
    return pairs;
