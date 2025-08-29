@@ -179,6 +179,7 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
                if(k4>=0) MarkV("W3_"+tag+"_C4", rates[k4].time, clrSeaGreen);
 
                ExtLQ_Set(rates[w3_c1].low, rates[w3_c1].time);
+               Hunter_OnExtLQUpdated();
 
                if(InpDebugPrints) Print("#",tag," Pair OK | ext lq=",DoubleToString(ExtLQ_Get(),_Digits),
                                         " @ ",T(ExtLQ_Time())," | break-by-body @ ",T(rates[j].time));
