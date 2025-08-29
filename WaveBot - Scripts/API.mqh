@@ -93,6 +93,7 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
          bool found=false;
          for(int i=idx; i<n; ++i)
          {
+            ExtLQ_OnBar(rates[i]);
             // Hunter (ساده): هر عبور از ext lq را همان لحظه مارک کن
             if(Hunter_IsExtLQCross(rates[i]))
                Hunter_MarkSimple(rates, n, i, InpMaxBarsInWave);
@@ -134,6 +135,7 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
 
          for(int j=idx; j<n; ++j)
          {
+            ExtLQ_OnBar(rates[j]);
             // Hunter (ساده) در فاز تایید
             if(Hunter_IsExtLQCross(rates[j]))
                Hunter_MarkSimple(rates, n, j, InpMaxBarsInWave);
@@ -178,7 +180,7 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
                MarkV("W3_"+tag+"_C3", rates[k3].time,     clrTeal);
                if(k4>=0) MarkV("W3_"+tag+"_C4", rates[k4].time, clrSeaGreen);
 
-               ExtLQ_Set(rates[w3_c1].low, rates[w3_c1].time);
+               ExtLQ_Set(rates[w3_c1].low, rates[w3_c1].time); // سطح جدید
                Hunter_OnExtLQUpdated();
 
                if(InpDebugPrints) Print("#",tag," Pair OK | ext lq=",DoubleToString(ExtLQ_Get(),_Digits),
