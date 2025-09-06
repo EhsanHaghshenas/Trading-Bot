@@ -208,8 +208,12 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
                startIdx = anchorC1;
             else
             {                            // مسیر بریکِ مستقیم: کمترین Low تا این لحظه
-               if(j>cend && (w3_cand<0 || rates[j].low < w3_cand_low))
-               { w3_cand = j; w3_cand_low = rates[j].low; have_w3=false; }
+               if(j >= cend && (w3_cand < 0 || rates[j].low < w3_cand_low))
+               {
+                  w3_cand      = j;            // اجازه شروع از cend (C3 یا C4 موج۲ صعودی)
+                  w3_cand_low  = rates[j].low;
+                  have_w3      = false;
+               }
                startIdx = w3_cand;
             }
       
