@@ -280,15 +280,18 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
                   MarkV("W3_"+tag+"_C3", rates[k3].time,     clrGreen);
                   if(k4>=0) MarkV("W3_"+tag+"_C4", rates[k4].time, clrDarkGreen);
                }
-
-               // ext lq (UP) = Low(C1_W3) و اطلاع به Hunter
+            
+               // ext lq جدید (UP)
                ExtLQ_Set(rates[w3_c1].low, rates[w3_c1].time);
                Hunter_OnExtLQUpdated();
-
+            
+               // --- NEW: Strong Wave (UP) بر اساس بذر ثبت‌شده توسط Hunter
+               SW_UP_TryMarkOnConfirmedW3(rates, n, w3_c1, bodyBreakIdx);
+            
                if(InpDebugPrints)
                   Print("#",tag," Pair(UP) OK | W3 C1=",T(rates[w3_c1].time),
                         " | body-break @ ",T(rates[bodyBreakIdx>=0?bodyBreakIdx:idx].time));
-
+            
                idx=j; state=SEARCH_W2; ++pairs; progressed=true; break;
             }
          }

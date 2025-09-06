@@ -275,15 +275,18 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
                   MarkV("W3_"+tag+"_C3", rates[k3].time,     clrBrown);
                   if(k4>=0) MarkV("W3_"+tag+"_C4", rates[k4].time, clrMaroon);
                }
-
-               // new ext lq (DOWN) = High of W3_C1
+            
+               // ext lq جدید (DOWN)
                ExtLQ_Down_Set(rates[w3_c1].high, rates[w3_c1].time);
                Hunter_Down_OnExtLQUpdated();
-
+            
+               // --- NEW: Strong Wave (DOWN) بر اساس بذر Hunter
+               SW_DOWN_TryMarkOnConfirmedW3(rates, n, w3_c1, bodyBreakIdx);
+            
                if(InpDebugPrints)
                   Print("#",tag," Pair(DOWN) OK | W3 C1=",T(rates[w3_c1].time),
                         " | body-break @ ",T(rates[bodyBreakIdx>=0?bodyBreakIdx:idx].time));
-
+            
                idx=j; state=SEARCH_W2; ++pairs; progressed=true; break;
             }
          }

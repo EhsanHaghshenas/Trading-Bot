@@ -5,21 +5,26 @@
 #include <WaveBot/ExtLQ_Down.mqh>
 #include <WaveBot/Utils.mqh>
 
-// شمارنده
+// ---------------- Hunter (DOWN) state ----------------
 static int      g_hw_counter_d     = 0;
-
-// وضعیت ext lq (DOWN)
 static datetime g_lq_time_seen_d   = 0;
 static bool     g_marked_for_lq_d  = false;
 
-// وقتی ext lq (DOWN) به‌روزرسانی شد
+// ---------------- Strong Wave (DOWN) seed ----------------
+static bool     g_sw_seed_d_active = false;
+static int      g_sw_seed_d_c1     = -1;     // اندیس C1 هانتر
+static datetime g_sw_seed_d_xtime  = 0;      // زمان کراس ext lq
+static double   g_sw_seed_d_level  = 0.0;    // Low(C1 هانتر)
+static int      g_sw_counter_d     = 0;
+
+// ext lq جدید ثبت شد
 inline void Hunter_Down_OnExtLQUpdated()
 {
    g_lq_time_seen_d  = ExtLQ_Down_Has() ? ExtLQ_Down_Time() : 0;
    g_marked_for_lq_d = false;
 }
 
-// عبور از ext lq برای جهت نزولی ⇒ cross-up (بدنه یا شدو)
+// عبور از ext lq (DOWN) ⇒ کراس به بالا (بدنه یا شدو)
 inline bool Hunter_Down_IsExtLQCross(const MqlRates &r)
 {
    if(!ExtLQ_Down_Has()) return false;
@@ -27,8 +32,7 @@ inline bool Hunter_Down_IsExtLQCross(const MqlRates &r)
    return (r.high >= lq || r.close > lq);
 }
 
-// ابطال Hunter (DOWN) قبل از شکست ext lq:
-// اگر از بعد C1 تا قبل cross، Low < Low(C1) رخ بدهد ⇒ Hunter باطل.
+// ابطال Hunter قبل از کراس: اگر تا پیش از کراس، Low < Low(C1) شود ⇒ Hunter نامعتبر
 inline bool Hunter_IsC1Invalidated_BeforeCross_DOWN(const MqlRates &rates[], const int n,
                                                     const int c1_index, const int cross_idx)
 {
@@ -37,13 +41,28 @@ inline bool Hunter_IsC1Invalidated_BeforeCross_DOWN(const MqlRates &rates[], con
 
    const double lC1 = rates[c1_index].low;
    for(int i=c1_index+1; i<cross_idx; ++i)
-   {
       if(rates[i].low < lC1) return true;
-   }
+
    return false;
 }
 
-// فقط «اولین عبور معتبر» را نمایش بده
+// فعال‌سازی بذر SW پس از Hunter معتبر
+inline void SW_DOWN_ActivateSeed(const MqlRates &rates[], const int n,
+                                 const int c1_index, const int cross_idx)
+{
+   g_sw_seed_d_active = true;
+   g_sw_seed_d_c1     = c1_index;
+   g_sw_seed_d_xtime  = rates[cross_idx].time;
+   g_sw_seed_d_level  = rates[c1_index].low;
+}
+
+// دسترسی به بذر SW-DOWN
+inline bool     SW_DOWN_SeedActive()      { return g_sw_seed_d_active; }
+inline double   SW_DOWN_Level()           { return g_sw_seed_d_level;  }
+inline datetime SW_DOWN_SeedTime()        { return g_sw_seed_d_xtime;  }
+inline void     SW_DOWN_ClearSeed()       { g_sw_seed_d_active=false;  }
+
+// ثبت Hunter در لحظه‌ی «کراس»
 inline void Hunter_Down_TryMarkIfValid(const MqlRates &rates[], const int n,
                                        const int c1_index, const int cross_idx)
 {
@@ -53,7 +72,6 @@ inline void Hunter_Down_TryMarkIfValid(const MqlRates &rates[], const int n,
    if(lqt != g_lq_time_seen_d){ g_lq_time_seen_d = lqt; g_marked_for_lq_d = false; }
    if(g_marked_for_lq_d) return;
 
-   // اگر قبل از شکست ext lq، Low(C1) شکسته شده ⇒ باطل
    if(Hunter_IsC1Invalidated_BeforeCross_DOWN(rates, n, c1_index, cross_idx))
       return;
 
@@ -67,10 +85,43 @@ inline void Hunter_Down_TryMarkIfValid(const MqlRates &rates[], const int n,
    }
    g_marked_for_lq_d = true;
 
+   // بذر SW نزولی را فعال کن (Lowِ C1 هانتر)
+   SW_DOWN_ActivateSeed(rates, n, c1_index, cross_idx);
+
    if(InpDebugPrints)
       Print("[Hunter-DOWN] OK | C1=",T(rates[c1_index].time),
             " | CROSS=",T(rates[cross_idx].time),
-            " | ext lq=",DoubleToString(ExtLQ_Down_Get(),_Digits));
+            " | ext lq=",DoubleToString(ExtLQ_Down_Get(),_Digits),
+            " | SW seed Lvl(L)= ",DoubleToString(g_sw_seed_d_level,_Digits));
+}
+
+// هنگام تایید یک W3 نزولی، بررسی کن آیا شرایط SW برقرار است
+inline void SW_DOWN_TryMarkOnConfirmedW3(const MqlRates &rates[], const int n,
+                                         const int w3_c1, const int bodyBreakIdx)
+{
+   if(!g_sw_seed_d_active) return;
+   if(w3_c1 < 0 || bodyBreakIdx < 0)     return;
+   if(rates[w3_c1].time < g_sw_seed_d_xtime) return;
+
+   // شرط SW: کندل بریکِ W3 پایین‌تر از Low(C1_Hunter) «با بدنه» بسته شود
+   if(rates[bodyBreakIdx].close < g_sw_seed_d_level)
+   {
+      ++g_sw_counter_d;
+      string tag = IntegerToString(g_sw_counter_d);
+
+      if(InpDrawMarkers)
+      {
+         MarkV("SW_"+tag+"_C1", rates[w3_c1].time,    clrOrangeRed);
+         MarkV("SW_"+tag+"_B" , rates[bodyBreakIdx].time, clrDarkOrange);
+      }
+
+      if(InpDebugPrints)
+         Print("[SW-DOWN] OK | W3_C1=",T(rates[w3_c1].time),
+               " | BODY-BREAK=",T(rates[bodyBreakIdx].time),
+               " | < L(HW_C1)=",DoubleToString(g_sw_seed_d_level,_Digits));
+
+      g_sw_seed_d_active = false; // بذر مصرف شد
+   }
 }
 
 #endif // WAVEBOT_HUNTER_DOWN_MQH
