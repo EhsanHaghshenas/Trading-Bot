@@ -5,42 +5,57 @@
 #include <WaveBot/ExtLQ_Down.mqh>
 #include <WaveBot/Utils.mqh>
 
-// شمارنده‌ی نام‌گذاری
-static int g_hw_counter_d = 0;
+// شمارنده
+static int      g_hw_counter_d     = 0;
 
-// «فقط اولین عبور برای هر ext lq»
-static datetime g_lq_time_seen_d  = 0;
-static bool     g_marked_for_lq_d = false;
+// وضعیت ext lq (DOWN)
+static datetime g_lq_time_seen_d   = 0;
+static bool     g_marked_for_lq_d  = false;
 
+// وقتی ext lq (DOWN) به‌روزرسانی شد
 inline void Hunter_Down_OnExtLQUpdated()
 {
    g_lq_time_seen_d  = ExtLQ_Down_Has() ? ExtLQ_Down_Time() : 0;
    g_marked_for_lq_d = false;
 }
 
+// عبور از ext lq برای جهت نزولی ⇒ cross-up (بدنه یا شدو)
 inline bool Hunter_Down_IsExtLQCross(const MqlRates &r)
 {
    if(!ExtLQ_Down_Has()) return false;
    const double lq = ExtLQ_Down_Get();
-   return (r.high >= lq || r.close > lq); // بدنه یا شدو (cross-up)
+   return (r.high >= lq || r.close > lq);
 }
 
-// مارک Hunter با C1 داده‌شده (C1 همان C1 موج۲)
-inline void Hunter_Down_MarkWithC1(const MqlRates &rates[], const int n,
-                                   const int c1_index, const int cross_idx)
+// ابطال Hunter (DOWN) قبل از شکست ext lq:
+// اگر از بعد C1 تا قبل cross، Low < Low(C1) رخ بدهد ⇒ Hunter باطل.
+inline bool Hunter_IsC1Invalidated_BeforeCross_DOWN(const MqlRates &rates[], const int n,
+                                                    const int c1_index, const int cross_idx)
+{
+   if(c1_index < 0 || cross_idx < 0 || c1_index >= n || cross_idx >= n) return true;
+   if(cross_idx <= c1_index) return true;
+
+   const double lC1 = rates[c1_index].low;
+   for(int i=c1_index+1; i<cross_idx; ++i)
+   {
+      if(rates[i].low < lC1) return true;
+   }
+   return false;
+}
+
+// فقط «اولین عبور معتبر» را نمایش بده
+inline void Hunter_Down_TryMarkIfValid(const MqlRates &rates[], const int n,
+                                       const int c1_index, const int cross_idx)
 {
    if(!ExtLQ_Down_Has()) return;
 
    const datetime lqt = ExtLQ_Down_Time();
-   if(lqt != g_lq_time_seen_d){ g_lq_time_seen_d=lqt; g_marked_for_lq_d=false; }
+   if(lqt != g_lq_time_seen_d){ g_lq_time_seen_d = lqt; g_marked_for_lq_d = false; }
    if(g_marked_for_lq_d) return;
 
-   if(c1_index<0 || c1_index>=n || cross_idx<0 || cross_idx>=n) return;
-   if(c1_index > cross_idx) return;
-
-   const double lq = ExtLQ_Down_Get();
-   const MqlRates rx = rates[cross_idx];
-   if(!(rx.high >= lq || rx.close > lq)) return; // واقعاً عبور کرده باشد
+   // اگر قبل از شکست ext lq، Low(C1) شکسته شده ⇒ باطل
+   if(Hunter_IsC1Invalidated_BeforeCross_DOWN(rates, n, c1_index, cross_idx))
+      return;
 
    ++g_hw_counter_d;
    string tag = IntegerToString(g_hw_counter_d);
@@ -53,9 +68,9 @@ inline void Hunter_Down_MarkWithC1(const MqlRates &rates[], const int n,
    g_marked_for_lq_d = true;
 
    if(InpDebugPrints)
-      Print("[Hunter-DOWN] with C1 | C1=",T(rates[c1_index].time),
+      Print("[Hunter-DOWN] OK | C1=",T(rates[c1_index].time),
             " | CROSS=",T(rates[cross_idx].time),
-            " | ext lq=",DoubleToString(lq,_Digits));
+            " | ext lq=",DoubleToString(ExtLQ_Down_Get(),_Digits));
 }
 
 #endif // WAVEBOT_HUNTER_DOWN_MQH

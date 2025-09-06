@@ -1,5 +1,15 @@
 //+------------------------------------------------------------------+
-//| WaveBot - API_Down (mirror: no pivots, global inside, Hunter)   |
+//| WaveBot - API_Down (DOWN side)                                   |
+//| Scan W2 -> wait W3 (count + body-break), STRICT gate             |
+//| Rules summary (DOWN):                                            |
+//|  - Overlap: W3 may start from cend (j >= cend).                  |
+//|  - PRE body-break (non-wick NEW): if H > H(C1_W3) before body-   |
+//|    break -> RESET W3 (restart from the same breaking bar).       |
+//|  - PRE body-break (wick-path OLD): if rose above locked C1 while |
+//|    wickActive -> INVALIDATE W2 and restart from first wick bar.  |
+//|  - POST body-break (OLD): after body-break below L1_W2 but       |
+//|    BEFORE W3 finishes, if H > H(C1_W3) -> INVALIDATE W2 and      |
+//|    restart from the body-break bar.                              |
 //+------------------------------------------------------------------+
 #ifndef WAVEBOT_API_DOWN_MQH
 #define WAVEBOT_API_DOWN_MQH
@@ -13,9 +23,9 @@
 #include <WaveBot/ExtLQ_Down.mqh>
 #include <WaveBot/Hunter_Down.mqh>
 
-// بیشینه High (leftmost) در بازه [from..to] با اسکیپ inside-bar
-int IndexOfLeftmostMaxHigh_ExInside(const MqlRates &rates[], const bool &insideHL[],
-                                    const int from, const int to)
+// helper: leftmost max-high in [from..to] excluding inside bars
+inline int IndexOfLeftmostMaxHigh_ExInside(const MqlRates &rates[], const bool &insideHL[],
+                                           const int from, const int to)
 {
    if(from>to) return -1;
    double mx = -DBL_MAX; int idx = -1;
@@ -29,10 +39,10 @@ int IndexOfLeftmostMaxHigh_ExInside(const MqlRates &rates[], const bool &insideH
    return idx;
 }
 
-// نزدیک‌ترین W2 صرفاً برای نمایش سریع (سمت نزولی)
+// quick display (signature unchanged)
 bool FindMostRecentWave2_Down(const string sym, const ENUM_TIMEFRAMES tf,
-                              const int lookback, int &c1, int &c2, int &c3, int &c4,
-                              MqlRates &rates[], int &n)
+                                     const int lookback, int &c1, int &c2, int &c3, int &c4,
+                                     MqlRates &rates[], int &n)
 {
    n = LoadRates(sym, tf, lookback, rates);
    if(n<=0){ if(InpDebugPrints) Print("LoadRates failed"); return false; }
@@ -47,10 +57,10 @@ bool FindMostRecentWave2_Down(const string sym, const ENUM_TIMEFRAMES tf,
       if(insideHL[i]) continue;
 
       int a2=-1,a3=-1,a4=-1;
-      if(!CheckWave2_FromIndex_LocalOnly_Down(rates, insideHL, bodyLowEff, bodyHighEff, n, i, a2, a3, a4))
+      if(!CheckWave2_FromIndex_LocalOnly_Down(rates,insideHL,bodyLowEff,bodyHighEff,n,i,a2,a3,a4))
          continue;
 
-      int end=(a4>=0? a4:a3);
+      const int end=(a4>=0? a4:a3);
       if(end>lastEnd){ lastEnd=end; bc1=i; bc2=a2; bc3=a3; bc4=a4; }
       i=end;
    }
@@ -59,13 +69,12 @@ bool FindMostRecentWave2_Down(const string sym, const ENUM_TIMEFRAMES tf,
    return true;
 }
 
-// ======================================================================
-//  API_Down_RunScanSequential_W2W3_Hunter  (نسخه‌ی به‌روزشده با قوانین جدید)
-// ======================================================================
+// full scan (DOWN)
 int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf,
                                            const datetime from_time, const datetime to_time)
 {
    const int tfsec = PeriodSeconds(tf);
+
    const int HISTORY_SKIP_BARS = 3;
    datetime effective_start = from_time + (HISTORY_SKIP_BARS * tfsec);
    datetime from_adj = from_time - tfsec*10;
@@ -84,21 +93,22 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
 
    int pairs=0;
 
-   // --- موج۲ جاری
+   // current W2 (DOWN)
    int c1=-1,c2=-1,c3=-1,c4=-1, cend=-1;
 
-   // --- وضعیت موج۳ (DOWN)
-   bool   have_w3=false;     // آیا شمارش W3 تکمیل شده؟
-   int    w3_c1=-1, k2=-1, k3=-1, k4=-1, w3_end=-1;
+   // W3 state (DOWN)
+   bool   have_w3=false;                 // fully counted?
+   int    w3_c1=-1, k2=-1,k3=-1,k4=-1, w3_end=-1;
 
-   // --- کاندید C1 در مسیر بدون-شدو (بزرگ‌ترین High از cend به بعد)
+   // direct-path candidate for C1 (largest High from cend onward)
    int    w3_cand=-1; double w3_cand_high=-DBL_MAX;
 
-   // --- تبصره شدو/ارتقای سطح بریک
+   // wick-path & body-break management
    bool   wickActive=false;
    int    firstWickIdx=-1, wickBreakIdx=-1;
-   double bodyBreakLevel=0.0;     // سطح بریک با بدنه (زیر L1_W2 + ارتقای شدویی)
+   double bodyBreakLevel=0.0;            // must break BELOW by body
    bool   breakAchieved=false;
+   int    bodyBreakIdx=-1;               // remember bar index of the body-break
 
    while(idx < n)
    {
@@ -129,13 +139,14 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
             }
             if(InpDebugPrints) Print("#",tag," W2(DOWN) found @ ",T(rates[c1].time));
 
-            // ریست وضعیت W3
+            // reset W3 state
             have_w3=false; w3_c1=-1; k2=k3=k4=-1; w3_end=-1;
             w3_cand=-1;   w3_cand_high=-DBL_MAX;
 
             wickActive=false; firstWickIdx=-1; wickBreakIdx=-1;
-            bodyBreakLevel = rates[c1].low; // L1_W2
+            bodyBreakLevel = rates[c1].low;  // L1_W2
             breakAchieved  = false;
+            bodyBreakIdx   = -1;
 
             idx=cend; state=WAIT_CONFIRM; found=true; break;
          }
@@ -149,82 +160,104 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
 
          for(int j=idx; j<n; ++j)
          {
-            ExtLQ_Down_OnBar(rates[j]);                     // ext lq رزرو/بروز
-            if(Hunter_Down_IsExtLQCross(rates[j]))          // Hunter: فقط «اولین عبور»
-               Hunter_Down_MarkWithC1(rates, n, c1, j);
+            ExtLQ_Down_OnBar(rates[j]);
+            if(Hunter_Down_IsExtLQCross(rates[j]))
+               Hunter_Down_TryMarkIfValid(rates, n, c1, j);
 
-            // داخل-بار سراسری: همیشه اسکیپ
             if(insideHL[j]) continue;
 
-            // --- ارتقای سطح بریک با شدو (قبل از شمارش W3)
+            // wick escalation (DOWN)
             if(!breakAchieved)
             {
                if(rates[j].low < bodyBreakLevel)
                {
                   if(rates[j].close < bodyBreakLevel)
                   {
-                     breakAchieved = true;                  // بریک با بدنه زیر سطح
+                     breakAchieved = true;      // BODY-BREAK under level
+                     bodyBreakIdx  = j;
                   }
                   else
                   {
-                     bodyBreakLevel = rates[j].low;         // ارتقای سطح با شدو (رو به پایین)
+                     bodyBreakLevel = rates[j].low; // wick escalation
                      if(firstWickIdx < 0)
                      {
                         firstWickIdx = j;
                         wickBreakIdx = j;
                         wickActive   = true;
 
-                        // قفل C1 اولیه در سناریوی شدو (بزرگ‌ترین High بین پایان W2 تا اولین شدو)
+                        // lock C1 on wick-path
                         int anchorC1 = IndexOfLeftmostMaxHigh_ExInside(rates, insideHL, cend, firstWickIdx);
                         have_w3=false; w3_c1 = anchorC1;
-                        w3_cand = -1;  w3_cand_high = -DBL_MAX;
+
+                        w3_cand=-1; w3_cand_high=-DBL_MAX;
                      }
                   }
                }
             }
 
-            // --- قانون جدید: ابطال W3 اگر Highِ C1 قبل از بریک با بدنه شکسته شد
-            // این قاعده هم برای مسیر شدویی (w3_c1 قفل) و هم مسیر بدون شدو صدق می‌کند.
-            if(!breakAchieved && w3_c1>=0 && rates[j].high > rates[w3_c1].high)
+            // PRE body-break (wick-path): rise above locked C1 -> invalidate W2
+            if(wickActive && w3_c1>=0 && !breakAchieved && rates[j].high > rates[w3_c1].high)
             {
                if(InpDebugPrints)
-                  Print("#",tag," W3(DOWN) invalidated (H > H(C1) before body-break). Restart W3.");
-
-               // ابطال فقط موج۳، موج۲ حفظ می‌شود (STRICT GATE)
-               have_w3=false; w3_end=-1; k2=k3=k4=-1;
-
-               // C1 قبلی دیگر معتبر نیست
-               w3_c1 = -1;
-
-               // از همین کندل به‌عنوان بزرگ‌ترین Highِ جدید شروع کن
-               w3_cand      = j;
-               w3_cand_high = rates[j].high;
-
-               // در حالت ابطال، در همین state/loop ادامه بده
-               continue;
+                  Print("#",tag," W2(DOWN) invalidated (rose above locked C1 before body-break).");
+               idx=wickBreakIdx; state=SEARCH_W2; progressed=true; break;
             }
 
-            // --- مسیر بدون شدو: انتخاب کاندید C1 از خود cend به بعد (j >= cend)
+            // ===== NEW: PRE body-break (non-wick) — reset W3 if H > H(C1_W3) =====
+            if(!wickActive && !breakAchieved)
+            {
+               int c1_eff = (w3_c1>=0 ? w3_c1 : w3_cand);
+               if(c1_eff >= 0 && rates[j].high > rates[c1_eff].high)
+               {
+                  if(InpDebugPrints)
+                     Print("#",tag," W3(DOWN) RESET (non-wick): H > H(C1) before body-break. Restart W3 from this bar.");
+                  // reset ONLY W3 and restart from the very bar that caused invalidation
+                  have_w3=false; w3_end=-1; k2=k3=k4=-1;
+                  w3_c1 = -1;
+                  w3_cand      = j;
+                  w3_cand_high = rates[j].high;
+                  continue;
+               }
+            }
+            // =====================================================================
+
+            // POST body-break but BEFORE W3 finishes: H > H(C1_W3) -> invalidate W2
+            if(breakAchieved && !have_w3)
+            {
+               int c1_eff = (w3_c1>=0 ? w3_c1 : w3_cand);
+               if(c1_eff >= 0 && rates[j].high > rates[c1_eff].high)
+               {
+                  if(InpDebugPrints)
+                     Print("#",tag," W2(DOWN) INVALIDATED after body-break: H > H(C1_W3). Restart @ ",T(rates[bodyBreakIdx>=0?bodyBreakIdx:j].time));
+                  idx = (bodyBreakIdx>=0 ? bodyBreakIdx : j);
+                  state = SEARCH_W2;
+                  progressed = true;
+                  break;
+               }
+            }
+
+            // direct-path candidate (no wick): choose largest High from cend onward
             if(!wickActive)
             {
                if(j >= cend && (w3_cand < 0 || rates[j].high > w3_cand_high))
                {
-                  w3_cand      = j;               // اجازه: C1 می‌تواند خودِ cend هم باشد
+                  w3_cand      = j;            // may be j == cend (overlap)
                   w3_cand_high = rates[j].high;
                   have_w3      = false;
                }
             }
 
-            // --- تعیین نقطه‌ی شروع شمارش W3
+            // choose start index for W3 counting
             int startIdx = -1;
-            if(w3_c1 >= 0)          startIdx = w3_c1;   // مسیر شدویی (قفل)
-            else if(w3_cand >= 0)   startIdx = w3_cand; // مسیر مستقیم
+            if(w3_c1  >= 0)       startIdx = w3_c1;     // wick-path (locked C1)
+            else if(w3_cand >= 0) startIdx = w3_cand;   // direct-path
 
-            // --- شمارش قدم‌های W3 نزولی (با اسکیپ همه‌ی inside ها و گاردِ barrier)
+            // count W3 (DOWN)
             if(!have_w3 && startIdx >= 0 && !insideHL[startIdx])
             {
                int a2=-1,a3=-1,a4=-1, w3e=-1;
-               if(CheckWave3CountOnly_Local_Down(rates, insideHL, bodyLowEff, bodyHighEff, n, startIdx, a2, a3, a4, w3e))
+               if(CheckWave3CountOnly_Local_Down(rates, insideHL, bodyLowEff, bodyHighEff, n,
+                                                 startIdx, a2, a3, a4, w3e))
                {
                   have_w3=true;
                   if(w3_c1 < 0) w3_c1 = startIdx;
@@ -232,7 +265,7 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
                }
             }
 
-            // --- نهایی‌سازی: هر دو شرط «شمارش W3» و «بریک با بدنه» لازم است
+            // finalize only when BOTH conditions are met
             if(have_w3 && breakAchieved)
             {
                if(InpDrawMarkers)
@@ -243,13 +276,13 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
                   if(k4>=0) MarkV("W3_"+tag+"_C4", rates[k4].time, clrMaroon);
                }
 
-               // ext lq جدید: Highِ C1_W3 (Down)  + Hunter reset
+               // new ext lq (DOWN) = High of W3_C1
                ExtLQ_Down_Set(rates[w3_c1].high, rates[w3_c1].time);
                Hunter_Down_OnExtLQUpdated();
 
                if(InpDebugPrints)
                   Print("#",tag," Pair(DOWN) OK | W3 C1=",T(rates[w3_c1].time),
-                        " | body-break @ ",T(rates[j].time));
+                        " | body-break @ ",T(rates[bodyBreakIdx>=0?bodyBreakIdx:idx].time));
 
                idx=j; state=SEARCH_W2; ++pairs; progressed=true; break;
             }
@@ -258,7 +291,8 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
          if(!progressed)
          {
             if(InpDebugPrints)
-               Print("W2(DOWN) @ ",T(rates[c1].time)," NOT confirmed (no body-break or W3 reset). STRICT gate holds.");
+               Print("W2(DOWN) @ ",T(rates[c1].time),
+                     " NOT confirmed (W3 not done / reset / W2 invalidated). STRICT gate.");
             break;
          }
       }
@@ -267,12 +301,10 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
    if(InpDebugPrints)
       Print("STRICT(DOWN): pairs=",pairs,
             (ExtLQ_Down_Has()? StringFormat(" | ext lq=%.5f",ExtLQ_Down_Get()) : " | ext lq:n/a"));
-
    return pairs;
 }
 
-
-// نمایش سریع
+// quick show on [0..now]
 void API_Down_ShowMostRecent_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf, const int /*lookback*/)
 {
    datetime start=0, stop=TimeCurrent();
