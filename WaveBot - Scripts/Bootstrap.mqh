@@ -1,41 +1,55 @@
 #ifndef WAVEBOT_BOOTSTRAP_MQH
 #define WAVEBOT_BOOTSTRAP_MQH
 
-#include <WaveBot/Types.mqh>   // Direction اینجا تعریف شده
+#include <WaveBot/Types.mqh>   // Direction
 #include <WaveBot/Utils.mqh>
 #include <WaveBot/Data.mqh>
 #include <WaveBot/Bodies.mqh>
-#include <WaveBot/Wave2.mqh>         // UP W2
-#include <WaveBot/Wave3.mqh>         // UP W3
-#include <WaveBot/Wave2_Down.mqh>    // DOWN W2
-#include <WaveBot/Wave3_Down.mqh>    // DOWN W3
 
-// خروجی بوت‌استرپ (همان‌طور که قبلاً استفاده می‌کردیم)
+// --- Way B: برای دسترسی مستقیم به توابع کمکی قفل C1 و Hunter/ExtLQ ---
+#include <WaveBot/API.mqh>        // UP helpers (IndexOfLeftmostMinLow_ExInside, Hunter_*, ExtLQ_*)
+#include <WaveBot/API_Down.mqh>   // DOWN helpers (IndexOfLeftmostMaxHigh_ExInside, Hunter_Down_*, ExtLQ_Down_*)
+// ----------------------------------------------------------------------
+
+// خروجی بوت‌استرپ (غنی‌شده برای رسم جفت برنده)
 struct BootOutcome
 {
    bool      ok;
    Direction mode;
-   int       complete_index;   // ایندکس کندل body-break
+   int       complete_index;   // اندیس کندل body-break
    datetime  complete_time;    // زمان body-break
+
+   // امضاهای موجِ برنده برای نمایش روی چارت (زمان‌ها کافی‌اند)
+   datetime  w2_c1, w2_c2, w2_c3, w2_c4, w2_end;
+   datetime  w3_c1, w3_c2, w3_c3, w3_c4, w3_end;
 };
+
+// مقداردهی پیش‌فرض
+inline void BootOutcome_Reset(BootOutcome &b)
+{
+   b.ok=false; b.mode=DIR_UP; b.complete_index=-1; b.complete_time=0;
+   b.w2_c1=b.w2_c2=b.w2_c3=b.w2_c4=b.w2_end=0;
+   b.w3_c1=b.w3_c2=b.w3_c3=b.w3_c4=b.w3_end=0;
+}
 
 // ------------------------ اسکن «فقط اولین جفت کامل‌شده» (UP) ------------------------
 bool Boot_FindFirstPair_UP(const string sym, const ENUM_TIMEFRAMES tf,
                            const datetime from_time, const datetime to_time,
-                           int &out_bodyBreakIdx, datetime &out_bodyBreakTime)
+                           BootOutcome &det)   // ← جزئیات در det ذخیره می‌شود
 {
-   out_bodyBreakIdx = -1; out_bodyBreakTime = 0;
+   BootOutcome_Reset(det);
+   det.mode = DIR_UP;
 
    const int tfsec = PeriodSeconds(tf);
    const int HISTORY_SKIP_BARS = 3;
    datetime effective_start = from_time + (HISTORY_SKIP_BARS * tfsec);
-   datetime from_adj = from_time - tfsec*10;
+   datetime from_adj        = from_time - tfsec*10;
 
    MqlRates rates[]; int n = LoadRatesRange(sym, tf, from_adj, to_time, rates);
    if(n<=0) return false;
 
    double bodyLowEff[], bodyHighEff[]; BuildEffectiveBodies(rates, n, bodyLowEff, bodyHighEff);
-   bool insideHL[];                    BuildInsideClusterFlagsHL(rates, n, insideHL);
+   bool   insideHL[];                   BuildInsideClusterFlagsHL(rates, n, insideHL);
 
    int first_eff=0; while(first_eff<n && rates[first_eff].time<effective_start) first_eff++;
    int idx = MathMax(0, first_eff-2);
@@ -43,17 +57,17 @@ bool Boot_FindFirstPair_UP(const string sym, const ENUM_TIMEFRAMES tf,
    enum State { SEARCH_W2, WAIT_CONFIRM };
    State state = SEARCH_W2;
 
-   // W2 جاری
+   // W2 جاری (UP)
    int c1=-1,c2=-1,c3=-1,c4=-1, cend=-1;
 
-   // وضعیت W3 (UP)
+   // W3 state (UP)
    bool   have_w3=false;
    int    w3_c1=-1, k2=-1,k3=-1,k4=-1, w3_end=-1;
 
-   // مسیر مستقیم (کمترین Low از cend به بعد)
+   // direct-path candidate (کمترین Low از cend به بعد)
    int    w3_cand=-1; double w3_cand_low=DBL_MAX;
 
-   // مدیریت بریک/ویک
+   // wick-path & body-break
    bool   wickActive=false;
    int    firstWickIdx=-1, wickBreakIdx=-1;
    double bodyBreakLevel=0.0;  // باید با «بدنه» به بالا شکسته شود
@@ -74,14 +88,11 @@ bool Boot_FindFirstPair_UP(const string sym, const ENUM_TIMEFRAMES tf,
                continue;
 
             c1=i; c2=i2; c3=i3; c4=i4; cend=(c4>=0?c4:c3);
-
-            if(rates[c1].time<effective_start || rates[c1].time>to_time)
-            { idx=cend+1; continue; }
+            if(rates[c1].time<effective_start || rates[c1].time>to_time){ idx=cend+1; continue; }
 
             // ریست W3/wick
             have_w3=false; w3_c1=-1; k2=k3=k4=-1; w3_end=-1;
             w3_cand=-1;   w3_cand_low=DBL_MAX;
-
             wickActive=false; firstWickIdx=-1; wickBreakIdx=-1;
             bodyBreakLevel = rates[c1].high;   // H1_W2
             breakAchieved  = false;
@@ -93,22 +104,17 @@ bool Boot_FindFirstPair_UP(const string sym, const ENUM_TIMEFRAMES tf,
       }
       else // ============================ WAIT_CONFIRM (UP) ============================
       {
-         const double H1_W2 = rates[c1].high;
-         const double L1_W2 = rates[c1].low;
-
          bool progressed=false;
-
          for(int j=idx; j<n; ++j)
          {
             if(insideHL[j]) continue;
 
-            // ارتقای سطح بریک با شدو (رو به بالا)
+            // ارتقای سطح بریک با شدو
             if(!breakAchieved)
             {
                if(rates[j].high > bodyBreakLevel)
                {
-                  if(rates[j].close > bodyBreakLevel)
-                  { breakAchieved = true; bodyBreakIdx = j; }
+                  if(rates[j].close > bodyBreakLevel) { breakAchieved=true; bodyBreakIdx=j; }
                   else
                   {
                      bodyBreakLevel = rates[j].high; // ارتقا با شدو
@@ -118,21 +124,14 @@ bool Boot_FindFirstPair_UP(const string sym, const ENUM_TIMEFRAMES tf,
                         // قفل C1: کمترین Low بین [cend..firstWickIdx]، با اسکیپ inside
                         int anchorC1 = IndexOfLeftmostMinLow_ExInside(rates, insideHL, cend, firstWickIdx);
                         have_w3=false; w3_c1 = anchorC1;
-                        // مسیر مستقیم را کنار بگذار
-                        w3_cand=-1; w3_cand_low=DBL_MAX;
+                        w3_cand=-1;   w3_cand_low=DBL_MAX;
                      }
                   }
                }
             }
 
-            // ابطال W2 قبل از بریک (سناریوی ویک: wick-up سپس شکست L1)
-            if(!breakAchieved && firstWickIdx>=0 &&
-               (rates[j].low < L1_W2 || rates[j].close < L1_W2))
-            {
-               idx = firstWickIdx; state = SEARCH_W2; progressed = true; break;
-            }
-
-            // RESET W3 (قبل از body-break، غیر-ویکی): L < L(C1_W3)
+            // PRE body-break (wick): زیرِ C1ِ قفل‌شده ⇒ invalidate W2 (برای UP نیست)
+            // RESET W3 قبل از body-break (غیر ویکی): L < L(C1_W3)
             if(!wickActive && !breakAchieved)
             {
                int c1_eff = (w3_c1>=0 ? w3_c1 : w3_cand);
@@ -159,10 +158,10 @@ bool Boot_FindFirstPair_UP(const string sym, const ENUM_TIMEFRAMES tf,
 
             // انتخاب startIdx برای شمارش W3
             int startIdx = -1;
-            if(w3_c1  >= 0)       startIdx = w3_c1;     // مسیر ویکی
-            else if(w3_cand >= 0) startIdx = w3_cand;   // مسیر مستقیم
+            if(w3_c1  >= 0)       startIdx = w3_c1;     // wick-path
+            else if(w3_cand >= 0) startIdx = w3_cand;   // direct-path
 
-            // شمارش W3 (UP)
+            // شمارش W3 (UP) — منطق بدون تغییر
             if(!have_w3 && startIdx >= 0 && !insideHL[startIdx])
             {
                int a2=-1,a3=-1,a4=-1, w3e=-1;
@@ -174,7 +173,7 @@ bool Boot_FindFirstPair_UP(const string sym, const ENUM_TIMEFRAMES tf,
                }
             }
 
-            // ابطال W2 پس از بریک و قبل از اتمام W3: L < L(C1_W3)
+            // ابطال W2 پس از بریک و قبل از اتمام W3
             if(breakAchieved && !have_w3)
             {
                int c1_eff = (w3_c1>=0 ? w3_c1 : w3_cand);
@@ -185,15 +184,29 @@ bool Boot_FindFirstPair_UP(const string sym, const ENUM_TIMEFRAMES tf,
                }
             }
 
-            // نهایی‌سازی: هر دو شرط لازم (شمارش W3 + بریک با بدنه)
+            // نهایی‌سازی: هر دو شرط (W3 کامل + بریک با بدنه)
             if(have_w3 && breakAchieved)
             {
-               out_bodyBreakIdx  = (bodyBreakIdx>=0? bodyBreakIdx : j);
-               out_bodyBreakTime = rates[out_bodyBreakIdx].time;
+               det.ok             = true;
+               det.complete_index = (bodyBreakIdx>=0 ? bodyBreakIdx : j);
+               det.complete_time  = rates[det.complete_index].time;
+
+               // پر کردن امضای W2/W3 برای نمایش
+               det.w2_c1  = rates[c1].time;
+               det.w2_c2  = rates[c2].time;
+               det.w2_c3  = rates[c3].time;
+               det.w2_c4  = (c4>=0 ? rates[c4].time : 0);
+               det.w2_end = rates[(c4>=0?c4:c3)].time;
+
+               det.w3_c1  = (w3_c1>=0 ? rates[w3_c1].time : 0);
+               det.w3_c2  = (k2>=0    ? rates[k2].time    : 0);
+               det.w3_c3  = (k3>=0    ? rates[k3].time    : 0);
+               det.w3_c4  = (k4>=0    ? rates[k4].time    : 0);
+               det.w3_end = (w3_end>=0? rates[w3_end].time: 0);
+
                return true; // فقط اولین جفت
             }
          }
-
          if(!progressed) break;
       }
    }
@@ -203,20 +216,21 @@ bool Boot_FindFirstPair_UP(const string sym, const ENUM_TIMEFRAMES tf,
 // ------------------------ اسکن «فقط اولین جفت کامل‌شده» (DOWN) ------------------------
 bool Boot_FindFirstPair_DOWN(const string sym, const ENUM_TIMEFRAMES tf,
                              const datetime from_time, const datetime to_time,
-                             int &out_bodyBreakIdx, datetime &out_bodyBreakTime)
+                             BootOutcome &det)   // ← جزئیات در det ذخیره می‌شود
 {
-   out_bodyBreakIdx = -1; out_bodyBreakTime = 0;
+   BootOutcome_Reset(det);
+   det.mode = DIR_DOWN;
 
    const int tfsec = PeriodSeconds(tf);
    const int HISTORY_SKIP_BARS = 3;
    datetime effective_start = from_time + (HISTORY_SKIP_BARS * tfsec);
-   datetime from_adj = from_time - tfsec*10;
+   datetime from_adj        = from_time - tfsec*10;
 
    MqlRates rates[]; int n = LoadRatesRange(sym, tf, from_adj, to_time, rates);
    if(n<=0) return false;
 
    double bodyLowEff[], bodyHighEff[]; BuildEffectiveBodies(rates, n, bodyLowEff, bodyHighEff);
-   bool insideHL[];                    BuildInsideClusterFlagsHL(rates, n, insideHL);
+   bool   insideHL[];                   BuildInsideClusterFlagsHL(rates, n, insideHL);
 
    int first_eff=0; while(first_eff<n && rates[first_eff].time<effective_start) first_eff++;
    int idx = MathMax(0, first_eff-2);
@@ -224,20 +238,20 @@ bool Boot_FindFirstPair_DOWN(const string sym, const ENUM_TIMEFRAMES tf,
    enum State { SEARCH_W2, WAIT_CONFIRM };
    State state = SEARCH_W2;
 
-   // current W2 (DOWN)
+   // W2 جاری (DOWN)
    int c1=-1,c2=-1,c3=-1,c4=-1, cend=-1;
 
    // W3 state (DOWN)
    bool   have_w3=false;
    int    w3_c1=-1, k2=-1,k3=-1,k4=-1, w3_end=-1;
 
-   // direct-path candidate for C1 (بزرگ‌ترین High از cend به بعد)
+   // direct-path candidate (بزرگ‌ترین High از cend به بعد)
    int    w3_cand=-1; double w3_cand_high=-DBL_MAX;
 
    // wick-path & body-break
    bool   wickActive=false;
    int    firstWickIdx=-1, wickBreakIdx=-1;
-   double bodyBreakLevel=0.0;     // باید با بدنه زیر سطح بسته شود
+   double bodyBreakLevel=0.0;     // باید با بدنه زیرِ سطح بسته شود
    bool   breakAchieved=false;
    int    bodyBreakIdx=-1;
 
@@ -255,14 +269,11 @@ bool Boot_FindFirstPair_DOWN(const string sym, const ENUM_TIMEFRAMES tf,
                continue;
 
             c1=i; c2=i2; c3=i3; c4=i4; cend=(c4>=0?c4:c3);
+            if(rates[c1].time<effective_start || rates[c1].time>to_time){ idx=cend+1; continue; }
 
-            if(rates[c1].time<effective_start || rates[c1].time>to_time)
-            { idx=cend+1; continue; }
-
-            // reset W3 state
+            // ریست W3/wick
             have_w3=false; w3_c1=-1; k2=k3=k4=-1; w3_end=-1;
             w3_cand=-1;   w3_cand_high=-DBL_MAX;
-
             wickActive=false; firstWickIdx=-1; wickBreakIdx=-1;
             bodyBreakLevel = rates[c1].low;  // L1_W2
             breakAchieved  = false;
@@ -274,10 +285,7 @@ bool Boot_FindFirstPair_DOWN(const string sym, const ENUM_TIMEFRAMES tf,
       }
       else // ============================ WAIT_CONFIRM (DOWN) ============================
       {
-         const double L1_W2 = rates[c1].low;
-
          bool progressed=false;
-
          for(int j=idx; j<n; ++j)
          {
             if(insideHL[j]) continue;
@@ -287,15 +295,14 @@ bool Boot_FindFirstPair_DOWN(const string sym, const ENUM_TIMEFRAMES tf,
             {
                if(rates[j].low < bodyBreakLevel)
                {
-                  if(rates[j].close < bodyBreakLevel)
-                  { breakAchieved = true; bodyBreakIdx = j; }
+                  if(rates[j].close < bodyBreakLevel) { breakAchieved=true; bodyBreakIdx=j; }
                   else
                   {
                      bodyBreakLevel = rates[j].low; // ارتقا با شدو
                      if(firstWickIdx < 0)
                      {
                         firstWickIdx = j; wickBreakIdx = j; wickActive = true;
-                        // lock C1: بیشترین High بین [cend..firstWickIdx]، با اسکیپ inside
+                        // قفل C1: بیشترین High بین [cend..firstWickIdx]، با اسکیپ inside
                         int anchorC1 = IndexOfLeftmostMaxHigh_ExInside(rates, insideHL, cend, firstWickIdx);
                         have_w3=false; w3_c1 = anchorC1;
                         w3_cand=-1;   w3_cand_high=-DBL_MAX;
@@ -304,13 +311,11 @@ bool Boot_FindFirstPair_DOWN(const string sym, const ENUM_TIMEFRAMES tf,
                }
             }
 
-            // PRE body-break (wick): بالاتر از C1 قفل‌شده ⇒ invalidate W2
+            // PRE body-break (wick): بالاتر از C1ِ قفل‌شده ⇒ invalidate W2
             if(wickActive && w3_c1>=0 && !breakAchieved && rates[j].high > rates[w3_c1].high)
-            {
-               idx=wickBreakIdx; state=SEARCH_W2; progressed=true; break;
-            }
+            { idx=wickBreakIdx; state=SEARCH_W2; progressed=true; break; }
 
-            // RESET W3 (قبل از body-break، غیر-ویکی): H > H(C1_W3)
+            // RESET W3 قبل از body-break (غیر ویکی): H > H(C1_W3)
             if(!wickActive && !breakAchieved)
             {
                int c1_eff = (w3_c1>=0 ? w3_c1 : w3_cand);
@@ -337,10 +342,10 @@ bool Boot_FindFirstPair_DOWN(const string sym, const ENUM_TIMEFRAMES tf,
 
             // انتخاب startIdx برای شمارش W3
             int startIdx = -1;
-            if(w3_c1  >= 0)       startIdx = w3_c1;     // مسیر ویکی
-            else if(w3_cand >= 0) startIdx = w3_cand;   // مسیر مستقیم
+            if(w3_c1  >= 0)       startIdx = w3_c1;     // wick-path
+            else if(w3_cand >= 0) startIdx = w3_cand;   // direct-path
 
-            // شمارش W3 (DOWN)
+            // شمارش W3 (DOWN) — منطق بدون تغییر
             if(!have_w3 && startIdx >= 0 && !insideHL[startIdx])
             {
                int a2=-1,a3=-1,a4=-1, w3e=-1;
@@ -363,41 +368,52 @@ bool Boot_FindFirstPair_DOWN(const string sym, const ENUM_TIMEFRAMES tf,
                }
             }
 
-            // نهایی‌سازی: هر دو شرط لازم (شمارش W3 + بریک با بدنه)
+            // نهایی‌سازی: هر دو شرط (W3 کامل + بریک با بدنه)
             if(have_w3 && breakAchieved)
             {
-               out_bodyBreakIdx  = (bodyBreakIdx>=0? bodyBreakIdx : j);
-               out_bodyBreakTime = rates[out_bodyBreakIdx].time;
+               det.ok             = true;
+               det.complete_index = (bodyBreakIdx>=0 ? bodyBreakIdx : j);
+               det.complete_time  = rates[det.complete_index].time;
+
+               // پر کردن امضای W2/W3 برای نمایش
+               det.w2_c1  = rates[c1].time;
+               det.w2_c2  = rates[c2].time;
+               det.w2_c3  = rates[c3].time;
+               det.w2_c4  = (c4>=0 ? rates[c4].time : 0);
+               det.w2_end = rates[(c4>=0?c4:c3)].time;
+
+               det.w3_c1  = (w3_c1>=0 ? rates[w3_c1].time : 0);
+               det.w3_c2  = (k2>=0    ? rates[k2].time    : 0);
+               det.w3_c3  = (k3>=0    ? rates[k3].time    : 0);
+               det.w3_c4  = (k4>=0    ? rates[k4].time    : 0);
+               det.w3_end = (w3_end>=0? rates[w3_end].time: 0);
+
                return true; // فقط اولین جفت
             }
          }
-
          if(!progressed) break;
       }
    }
    return false;
 }
 
-// ----------------------------- ریس و تشخیص Mode اولیه -----------------------------
+// ----------------------------- رِیس و تشخیص Mode اولیه -----------------------------
 BootOutcome Bootstrap_RaceDetect(const string sym, const ENUM_TIMEFRAMES tf,
                                  const datetime from_time, const datetime to_time)
 {
-   BootOutcome out; out.ok=false; out.mode=DIR_UP; out.complete_index=-1; out.complete_time=0;
+   BootOutcome up, dn; BootOutcome_Reset(up); BootOutcome_Reset(dn);
 
-   int u_idx=-1, d_idx=-1; datetime u_t=0, d_t=0;
-   bool up_ok   = Boot_FindFirstPair_UP(sym, tf, from_time, to_time, u_idx, u_t);
-   bool down_ok = Boot_FindFirstPair_DOWN(sym, tf, from_time, to_time, d_idx, d_t);
+   bool up_ok   = Boot_FindFirstPair_UP  (sym, tf, from_time, to_time, up);
+   bool down_ok = Boot_FindFirstPair_DOWN(sym, tf, from_time, to_time, dn);
 
-   if(!up_ok && !down_ok) return out;
+   if(!up_ok && !down_ok) return up; // ok=false
 
-   if( up_ok && !down_ok){ out.ok=true; out.mode=DIR_UP;   out.complete_index=u_idx; out.complete_time=u_t; return out; }
-   if(!up_ok &&  down_ok){ out.ok=true; out.mode=DIR_DOWN; out.complete_index=d_idx; out.complete_time=d_t; return out; }
+   if( up_ok && !down_ok) return up;
+   if(!up_ok &&  down_ok) return dn;
 
-   // هر دو پیدا شدند: هر کدام زودتر body-break داده، برنده است
-   if(u_t <= d_t){ out.ok=true; out.mode=DIR_UP;   out.complete_index=u_idx; out.complete_time=u_t; }
-   else          { out.ok=true; out.mode=DIR_DOWN; out.complete_index=d_idx; out.complete_time=d_t; }
-
-   return out;
+   // هر دو پیدا شدند: هر کدام زودتر body-break داد، برنده است
+   if(up.complete_time <= dn.complete_time) return up;
+   return dn;
 }
 
 #endif // WAVEBOT_BOOTSTRAP_MQH
