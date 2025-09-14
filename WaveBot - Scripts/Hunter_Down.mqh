@@ -4,6 +4,10 @@
 #include <WaveBot/Markers.mqh>
 #include <WaveBot/ExtLQ_Down.mqh>
 #include <WaveBot/Utils.mqh>
+#include <WaveBot/Switch.mqh>
+
+static datetime g_trans_armed_lq_time_d = 0;
+static bool     g_trans_armed_d         = false;
 
 // ---------------- Hunter (DOWN) state ----------------
 static int      g_hw_counter_d     = 0;
@@ -87,6 +91,11 @@ inline void Hunter_Down_TryMarkIfValid(const MqlRates &rates[], const int n,
 
    // بذر SW نزولی را فعال کن (Lowِ C1 هانتر)
    SW_DOWN_ActivateSeed(rates, n, c1_index, cross_idx);
+   g_trans_armed_lq_time_d = ExtLQ_Down_Time();
+   g_trans_armed_d         = true;
+   
+   if(rates[cross_idx].close > ExtLQ_Down_Get())
+      Switch_RequestEnter_FromDOWN(rates[cross_idx].time);
 
    if(InpDebugPrints)
       Print("[Hunter-DOWN] OK | C1=",T(rates[c1_index].time),
@@ -122,6 +131,14 @@ inline void SW_DOWN_TryMarkOnConfirmedW3(const MqlRates &rates[], const int n,
 
       g_sw_seed_d_active = false; // بذر مصرف شد
    }
+}
+
+inline void Hunter_OnBar_CheckTransition_DOWN(const MqlRates &r)
+{
+   if(!ExtLQ_Down_Has() || !g_trans_armed_d || Switch_IsActive()) return;
+   if(ExtLQ_Down_Time() != g_trans_armed_lq_time_d) return;
+   if(r.close > ExtLQ_Down_Get())
+      Switch_RequestEnter_FromDOWN(r.time);
 }
 
 #endif // WAVEBOT_HUNTER_DOWN_MQH

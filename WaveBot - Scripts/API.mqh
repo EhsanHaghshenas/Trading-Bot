@@ -1,16 +1,3 @@
-//+------------------------------------------------------------------+
-//| WaveBot - API (UP)                                               |
-//| Scan W2 -> wait W3 (count + body-break), STRICT gate             |
-//| Rules (UP):                                                      |
-//|  • Overlap: W3 can start from cend (j >= cend).                  |
-//|  • NEW (pre body-break, non-wick): if L < L(C1_W3) before body-  |
-//|    break -> RESET W3 and restart from the same breaking bar.     |
-//|  • Pre body-break (wick case): wick-up above H1 then L1 breaks   |
-//|    down (wick/body) -> INVALIDATE W2 and restart from wick bar.  |
-//|  • Post body-break: after body-break above H1_W2 but BEFORE W3   |
-//|    finishes, if L < L(C1_W3) -> INVALIDATE W2 and restart from   |
-//|    the body-break bar.                                           |
-//+------------------------------------------------------------------+
 #ifndef WAVEBOT_API_MQH
 #define WAVEBOT_API_MQH
 
@@ -22,32 +9,7 @@
 #include <WaveBot/Wave3.mqh>    // UP W3
 #include <WaveBot/ExtLQ.mqh>    // UP ext lq (cross-down)
 #include <WaveBot/Hunter.mqh>   // UP hunter
-
-// --- Transition Trigger (UP) ---
-// شرط: در Mode=UP، Hunter صعودی ext lq را به سمت پایین «با بدنه» بشکند.
-struct TransitionTrigger_UP
-{
-   bool     armed;
-   bool     fired;
-   datetime lq_time;
-   bool     saw_wick;
-   double   body_target; // پایین‌ترین Low پس از اولین شدو
-   int      fire_index;
-   datetime fire_time;
-};
-static TransitionTrigger_UP g_trig_up = {false,false,0,false,DBL_MAX,-1,0};
-
-inline void TR_UP_Arm()
-{
-   g_trig_up.armed       = true;
-   g_trig_up.fired       = false;
-   g_trig_up.lq_time     = ExtLQ_Has()? ExtLQ_Time() : 0;
-   g_trig_up.saw_wick    = false;
-   g_trig_up.body_target = DBL_MAX;
-   g_trig_up.fire_index  = -1;
-   g_trig_up.fire_time   = 0;
-}
-inline void TR_UP_Disarm(){ g_trig_up.armed=false; }
+#include <WaveBot/Switch.mqh>
 
 // قفل C1 در سناریوی شدو (کمترین Low در بازه، با اسکیپ inside)
 inline int IndexOfLeftmostMinLow_ExInside(const MqlRates &rates[], const bool &insideHL[],
@@ -190,40 +152,10 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
             if(Hunter_IsExtLQCross(rates[j]))
                Hunter_TryMarkIfValid(rates, n, c1, j);
 
-            // ---- NEW: Transition Trigger Watch (UP) ----
-            if(g_trig_up.armed)
-            {
-               if(!ExtLQ_Has() || ExtLQ_Time()!=g_trig_up.lq_time){ TR_UP_Disarm(); }
-               else
-               {
-                  const double lq = ExtLQ_Get();
-            
-                  // 1) بریک مستقیم با بدنه (به پایین)
-                  if(rates[j].close < lq)
-                  {
-                     g_trig_up.fired     = true;
-                     g_trig_up.fire_index= j;
-                     g_trig_up.fire_time = rates[j].time;
-                     return pairs; // تحویل کنترل به Coordinator
-                  }
-            
-                  // 2) شدو → ارتقا هدف → بریک با بدنه زیرِ هدف
-                  if(rates[j].low <= lq && rates[j].close >= lq)
-                  {
-                     g_trig_up.saw_wick = true;
-                     if(rates[j].low < g_trig_up.body_target) g_trig_up.body_target = rates[j].low;
-                  }
-                  if(g_trig_up.saw_wick && rates[j].close < g_trig_up.body_target)
-                  {
-                     g_trig_up.fired     = true;
-                     g_trig_up.fire_index= j;
-                     g_trig_up.fire_time = rates[j].time;
-                     return pairs;
-                  }
-               }
-            }
-
             if(insideHL[j]) continue;
+            
+            Hunter_OnBar_CheckTransition_UP(rates[j]);
+            if(Switch_IsActive()) return pairs;
 
             // ارتقای سطح بریک با شدو (رو به بالا)
             if(!breakAchieved)
@@ -312,7 +244,7 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
                   k2=a2; k3=a3; k4=a4; w3_end=w3e;
                }
             }
-
+            
             // ابطال W2 پس از بریک (قبل از اتمام W3): L < L(C1_W3)
             if(breakAchieved && !have_w3)
             {
@@ -376,21 +308,6 @@ void API_ShowMostRecent_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf, 
 {
    datetime start=0, stop=TimeCurrent();
    API_RunScanSequential_W2W3_Hunter(sym, tf, start, stop);
-}
-
-// اجرای API تا وقتی «تریگر ورود به ترنزیشن» آتش شود؛
-// در غیر اینصورت تا پایان بازه ادامه می‌دهد.
-// خروجی: trig=true و زمان/ایندکس کندل تریگر.
-int API_RunScanSequential_W2W3_Hunter_UntilTransitionTrigger(const string sym, const ENUM_TIMEFRAMES tf,
-                                                             const datetime from_t, const datetime to_t,
-                                                             bool &trig, datetime &trig_time, int &trig_index)
-{
-   trig=false; trig_time=0; trig_index=-1;
-   TR_UP_Arm();
-   int pairs = API_RunScanSequential_W2W3_Hunter(sym, tf, from_t, to_t);
-   if(g_trig_up.fired){ trig=true; trig_time=g_trig_up.fire_time; trig_index=g_trig_up.fire_index; }
-   TR_UP_Disarm();
-   return pairs;
 }
 
 #endif // WAVEBOT_API_MQH

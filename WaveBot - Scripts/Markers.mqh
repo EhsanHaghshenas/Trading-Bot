@@ -11,4 +11,8 @@ void MarkV(const string name, const datetime t, const color col)
    ObjectSetInteger(0,name,OBJPROP_WIDTH,1);
 }
 
+// --- NEW: MTC markers (mode turn change)
+inline void Mark_MTC_Up(const datetime t){ if(InpDrawMarkers) MarkV("MTC_UP",   t, clrDodgerBlue); }
+inline void Mark_MTC_Down(const datetime t){ if(InpDrawMarkers) MarkV("MTC_DOWN", t, clrOrange);   }
+
 #endif // WAVEBOT_MARKERS_MQH

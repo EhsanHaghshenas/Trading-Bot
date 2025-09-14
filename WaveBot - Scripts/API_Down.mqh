@@ -1,16 +1,3 @@
-//+------------------------------------------------------------------+
-//| WaveBot - API_Down (DOWN side)                                   |
-//| Scan W2 -> wait W3 (count + body-break), STRICT gate             |
-//| Rules summary (DOWN):                                            |
-//|  - Overlap: W3 may start from cend (j >= cend).                  |
-//|  - PRE body-break (non-wick NEW): if H > H(C1_W3) before body-   |
-//|    break -> RESET W3 (restart from the same breaking bar).       |
-//|  - PRE body-break (wick-path OLD): if rose above locked C1 while |
-//|    wickActive -> INVALIDATE W2 and restart from first wick bar.  |
-//|  - POST body-break (OLD): after body-break below L1_W2 but       |
-//|    BEFORE W3 finishes, if H > H(C1_W3) -> INVALIDATE W2 and      |
-//|    restart from the body-break bar.                              |
-//+------------------------------------------------------------------+
 #ifndef WAVEBOT_API_DOWN_MQH
 #define WAVEBOT_API_DOWN_MQH
 
@@ -22,32 +9,7 @@
 #include <WaveBot/Wave3_Down.mqh>
 #include <WaveBot/ExtLQ_Down.mqh>
 #include <WaveBot/Hunter_Down.mqh>
-
-// --- Transition Trigger (DOWN) ---
-// شرط: در Mode=DOWN، Hunter نزولی ext lq را به سمت بالا «با بدنه» بشکند.
-struct TransitionTrigger_DOWN
-{
-   bool     armed;
-   bool     fired;
-   datetime lq_time;
-   bool     saw_wick;
-   double   body_target; // بالاترین High پس از اولین شدو
-   int      fire_index;
-   datetime fire_time;
-};
-static TransitionTrigger_DOWN g_trig_down = {false,false,0,false,-DBL_MAX,-1,0};
-
-inline void TR_DN_Arm()
-{
-   g_trig_down.armed       = true;
-   g_trig_down.fired       = false;
-   g_trig_down.lq_time     = ExtLQ_Down_Has()? ExtLQ_Down_Time() : 0;
-   g_trig_down.saw_wick    = false;
-   g_trig_down.body_target = -DBL_MAX;
-   g_trig_down.fire_index  = -1;
-   g_trig_down.fire_time   = 0;
-}
-inline void TR_DN_Disarm(){ g_trig_down.armed=false; }
+#include <WaveBot/Switch.mqh>
 
 // helper: leftmost max-high in [from..to] excluding inside bars
 inline int IndexOfLeftmostMaxHigh_ExInside(const MqlRates &rates[], const bool &insideHL[],
@@ -190,40 +152,10 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
             if(Hunter_Down_IsExtLQCross(rates[j]))
                Hunter_Down_TryMarkIfValid(rates, n, c1, j);
 
-            // ---- NEW: Transition Trigger Watch (DOWN) ----
-            if(g_trig_down.armed)
-            {
-               if(!ExtLQ_Down_Has() || ExtLQ_Down_Time()!=g_trig_down.lq_time){ TR_DN_Disarm(); }
-               else
-               {
-                  const double lq = ExtLQ_Down_Get();
-            
-                  // 1) بریک مستقیم با بدنه (به بالا)
-                  if(rates[j].close > lq)
-                  {
-                     g_trig_down.fired     = true;
-                     g_trig_down.fire_index= j;
-                     g_trig_down.fire_time = rates[j].time;
-                     return pairs;
-                  }
-            
-                  // 2) شدو → ارتقا هدف → بریک با بدنه بالایِ هدف
-                  if(rates[j].high >= lq && rates[j].close <= lq)
-                  {
-                     g_trig_down.saw_wick = true;
-                     if(rates[j].high > g_trig_down.body_target) g_trig_down.body_target = rates[j].high;
-                  }
-                  if(g_trig_down.saw_wick && rates[j].close > g_trig_down.body_target)
-                  {
-                     g_trig_down.fired     = true;
-                     g_trig_down.fire_index= j;
-                     g_trig_down.fire_time = rates[j].time;
-                     return pairs;
-                  }
-               }
-            }
-            
             if(insideHL[j]) continue;
+            
+            Hunter_OnBar_CheckTransition_DOWN(rates[j]);
+            if(Switch_IsActive()) return pairs;
 
             // wick escalation (DOWN)
             if(!breakAchieved)
@@ -323,7 +255,7 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
                   k2=a2; k3=a3; k4=a4; w3_end=w3e;
                }
             }
-
+            
             // finalize only when BOTH conditions are met
             if(have_w3 && breakAchieved)
             {
@@ -371,18 +303,6 @@ void API_Down_ShowMostRecent_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES
 {
    datetime start=0, stop=TimeCurrent();
    API_Down_RunScanSequential_W2W3_Hunter(sym, tf, start, stop);
-}
-
-int API_Down_RunScanSequential_W2W3_Hunter_UntilTransitionTrigger(const string sym, const ENUM_TIMEFRAMES tf,
-                                                                  const datetime from_t, const datetime to_t,
-                                                                  bool &trig, datetime &trig_time, int &trig_index)
-{
-   trig=false; trig_time=0; trig_index=-1;
-   TR_DN_Arm();
-   int pairs = API_Down_RunScanSequential_W2W3_Hunter(sym, tf, from_t, to_t);
-   if(g_trig_down.fired){ trig=true; trig_time=g_trig_down.fire_time; trig_index=g_trig_down.fire_index; }
-   TR_DN_Disarm();
-   return pairs;
 }
 
 #endif // WAVEBOT_API_DOWN_MQH
