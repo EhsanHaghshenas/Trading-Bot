@@ -141,4 +141,10 @@ inline void Hunter_OnBar_CheckTransition_DOWN(const MqlRates &r)
       Switch_RequestEnter_FromDOWN(r.time);
 }
 
+inline void Hunter_ClearTransitionArm_DOWN()
+{
+   g_trans_armed_d = false;
+   g_trans_armed_lq_time_d = 0;
+}
+
 #endif // WAVEBOT_HUNTER_DOWN_MQH

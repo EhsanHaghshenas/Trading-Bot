@@ -221,58 +221,36 @@ bool Boot_FindFirstPair_UP_Details(const string sym, const ENUM_TIMEFRAMES tf,
    int first_eff=0; while(first_eff<n && rates[first_eff].time<effective_start) first_eff++;
    int idx = MathMax(0, first_eff-2);
 
-   enum State { SEARCH_W2, WAIT_CONFIRM };
-   State state = SEARCH_W2;
-
    for(int i=idx; i<n; ++i)
    {
-      // --- پیدا کردن W2 و سپس انتظار تایید W3 (منطق همان تابع اصلی است)
-      int c1=-1,c2=-1,c3=-1,c4=-1;
-      if(!insideHL[i])
+      if(insideHL[i]) continue;
+
+      int c2=-1,c3=-1,c4=-1;
+      if(CheckWave2_FromIndex_LocalOnly(rates, insideHL, bodyLowEff, bodyHighEff, n, i, c2, c3, c4))
       {
-         if(CheckWave2_FromIndex_LocalOnly(rates, insideHL, bodyLowEff, bodyHighEff, n, i, c2, c3, c4)) // موج2 در UP
+         int j=i+1, w3_c1=i, w3e=-1;
+         int a2=-1,a3=-1,a4=-1;
+
+        // بریک بدنه بالای High(C1_W2)
+         int bodyBreakIdx=-1;
+         for(; j<n; ++j)
          {
-            int j=i+1, w3_c1=-1, k2=-1,k3=-1,k4=-1, w3_end=-1, bodyBreakIdx=-1;
-            bool have_w3=false, breakAch=false;
+            if(insideHL[j]) continue;
+            const double H1_W2 = rates[i].high;
+            if(bodyBreakIdx<0 && rates[j].close > H1_W2) bodyBreakIdx=j;
 
-            // قفل C1 در مسیر شدو و مسیر مستقیم (مطابق API.mqh)
-            int cend = (c4>=0? c4 : (c3>=0? c3 : c2));
-            bool wickActive=false; int w3_cand=-1; double w3_cand_low=DBL_MAX;
-
-            for(; j<n; ++j)
+            if(CheckWave3CountOnly_Local(rates, insideHL, bodyLowEff, bodyHighEff, n, w3_c1, a2,a3,a4,w3e))
             {
-               if(insideHL[j]) continue;
-
-               // شرط بریک با بدنه: Close[j] > High(C1_W2)ـ ارتقای سطح با شدو در APی پوشش داده می‌شود
-               if(!breakAch)
+               if(bodyBreakIdx>=0)
                {
-                  // سطح بریک W2 از Wave2 موجود بازخوانی شود (Highِ C1_W2 را از rates[i].high بگیر)
-                  const double H1_W2 = rates[i].high;
-                  if(rates[j].close > H1_W2) { breakAch=true; bodyBreakIdx=j; }
-               }
-
-               // شمارش W3
-               if(!have_w3)
-               {
-                  int a2=-1,a3=-1,a4=-1, w3e=-1;
-                  if(CheckWave3CountOnly_Local(rates, insideHL, bodyLowEff, bodyHighEff, n, (w3_c1>=0?w3_c1:i), a2,a3,a4,w3e))
-                  {
-                     have_w3=true; if(w3_c1<0) w3_c1=(i); // C1 همان i (Overlap مجاز)
-                     k2=a2; k3=a3; k4=a4; w3_end=w3e;
-                  }
-               }
-
-               if(have_w3 && breakAch)
-               {
-                  out_w3_c1_idx  = (w3_c1>=0? w3_c1 : i);
-                  out_w3_c1_time = rates[out_w3_c1_idx].time;
+                  out_w3_c1_idx  = w3_c1;
+                  out_w3_c1_time = rates[w3_c1].time;
                   out_bodyBreakIdx   = bodyBreakIdx;
                   out_bodyBreakTime  = rates[bodyBreakIdx].time;
                   out_bodyBreakClose = rates[bodyBreakIdx].close;
                   return true;
                }
             }
-            // اگر تاییدی نشد، ادامه حلقه بیرونی
          }
       }
    }
@@ -480,36 +458,27 @@ bool Boot_FindFirstPair_DOWN_Details(const string sym, const ENUM_TIMEFRAMES tf,
 
    for(int i=idx; i<n; ++i)
    {
-      int c1=-1,c2=-1,c3=-1,c4=-1;
-      if(!insideHL[i])
+      if(insideHL[i]) continue;
+
+      int c2=-1,c3=-1,c4=-1;
+      if(CheckWave2_FromIndex_LocalOnly_Down(rates, insideHL, bodyLowEff, bodyHighEff, n, i, c2, c3, c4))
       {
-         if(CheckWave2_FromIndex_LocalOnly_Down(rates, insideHL, bodyLowEff, bodyHighEff, n, i, c2, c3, c4))
+         int j=i+1, w3_c1=i, w3e=-1;
+         int a2=-1,a3=-1,a4=-1;
+
+         int bodyBreakIdx=-1;
+         for(; j<n; ++j)
          {
-            int j=i+1, w3_c1=-1, k2=-1,k3=-1,k4=-1, w3_end=-1, bodyBreakIdx=-1;
-            bool have_w3=false, breakAch=false;
+            if(insideHL[j]) continue;
+            const double L1_W2 = rates[i].low;
+            if(bodyBreakIdx<0 && rates[j].close < L1_W2) bodyBreakIdx=j;
 
-            for(; j<n; ++j)
+            if(CheckWave3CountOnly_Local_Down(rates, insideHL, bodyLowEff, bodyHighEff, n, w3_c1, a2,a3,a4,w3e))
             {
-               if(insideHL[j]) continue;
-
-               // بریک با بدنه رو به پایین
-               const double L1_W2 = rates[i].low;
-               if(!breakAch && rates[j].close < L1_W2){ breakAch=true; bodyBreakIdx=j; }
-
-               if(!have_w3)
+               if(bodyBreakIdx>=0)
                {
-                  int a2=-1,a3=-1,a4=-1, w3e=-1;
-                  if(CheckWave3CountOnly_Local_Down(rates, insideHL, bodyLowEff, bodyHighEff, n, (w3_c1>=0?w3_c1:i), a2,a3,a4,w3e))
-                  {
-                     have_w3=true; if(w3_c1<0) w3_c1=(i);
-                     k2=a2; k3=a3; k4=a4; w3_end=w3e;
-                  }
-               }
-
-               if(have_w3 && breakAch)
-               {
-                  out_w3_c1_idx  = (w3_c1>=0? w3_c1 : i);
-                  out_w3_c1_time = rates[out_w3_c1_idx].time;
+                  out_w3_c1_idx  = w3_c1;
+                  out_w3_c1_time = rates[w3_c1].time;
                   out_bodyBreakIdx   = bodyBreakIdx;
                   out_bodyBreakTime  = rates[bodyBreakIdx].time;
                   out_bodyBreakClose = rates[bodyBreakIdx].close;
