@@ -9,7 +9,7 @@
 #include <WaveBot/Wave3.mqh>    // UP W3
 #include <WaveBot/ExtLQ.mqh>    // UP ext lq (cross-down)
 #include <WaveBot/Hunter.mqh>   // UP hunter
-#include <WaveBot/Switch.mqh>
+#include <WaveBot/Transition.mqh>   // NEW
 
 // قفل C1 در سناریوی شدو (کمترین Low در بازه، با اسکیپ inside)
 inline int IndexOfLeftmostMinLow_ExInside(const MqlRates &rates[], const bool &insideHL[],
@@ -151,11 +151,26 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
             ExtLQ_OnBar(rates[j]);
             if(Hunter_IsExtLQCross(rates[j]))
                Hunter_TryMarkIfValid(rates, n, c1, j);
+            
+            // --- NEW: اگر AutoSwitch روشن است و همین کندل «بدنه» ext lq را شکست، مسابقه را از همین کندل آغاز کن
+            if(InpEnableAutoSwitch && ExtLQ_Has())
+            {
+               const double lq = ExtLQ_Get();
+               if(rates[j].close < lq) // body-break به پایین (UP hunter logic)
+               {
+                  Transition_RaceFromTrigger_UP(sym, tf, rates[j].time, to_time);
+               }
+            }
+            
+            // --- NEW: اگر سوئیچ زمان‌بندی شد، همین‌جا پایان بده تا ادامه در مود جدید از mtc انجام شود
+            if(InpEnableAutoSwitch && Transition_SwitchScheduled())
+            {
+               // در صورت عبور از زمان mtc، خاتمه بده
+               if(rates[j].time >= Transition_ScheduledTime())
+                  return pairs;
+            }
 
             if(insideHL[j]) continue;
-            
-            Hunter_OnBar_CheckTransition_UP(rates[j]);
-            if(Switch_IsActive()) return pairs;
 
             // ارتقای سطح بریک با شدو (رو به بالا)
             if(!breakAchieved)
@@ -244,7 +259,7 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
                   k2=a2; k3=a3; k4=a4; w3_end=w3e;
                }
             }
-            
+
             // ابطال W2 پس از بریک (قبل از اتمام W3): L < L(C1_W3)
             if(breakAchieved && !have_w3)
             {

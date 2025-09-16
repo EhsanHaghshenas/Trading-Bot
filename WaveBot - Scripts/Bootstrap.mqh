@@ -200,63 +200,6 @@ bool Boot_FindFirstPair_UP(const string sym, const ENUM_TIMEFRAMES tf,
    return false;
 }
 
-bool Boot_FindFirstPair_UP_Details(const string sym, const ENUM_TIMEFRAMES tf,
-                                   const datetime from_time, const datetime to_time,
-                                   int &out_w3_c1_idx, datetime &out_w3_c1_time,
-                                   int &out_bodyBreakIdx, datetime &out_bodyBreakTime, double &out_bodyBreakClose)
-{
-   out_w3_c1_idx=-1; out_w3_c1_time=0; out_bodyBreakIdx=-1; out_bodyBreakTime=0; out_bodyBreakClose=0.0;
-
-   const int tfsec = PeriodSeconds(tf);
-   const int HISTORY_SKIP_BARS = 3;
-   datetime effective_start = from_time + (HISTORY_SKIP_BARS * tfsec);
-   datetime from_adj = from_time - tfsec*10;
-
-   MqlRates rates[]; int n = LoadRatesRange(sym, tf, from_adj, to_time, rates);
-   if(n<=0) return false;
-
-   double bodyLowEff[], bodyHighEff[]; BuildEffectiveBodies(rates, n, bodyLowEff, bodyHighEff);
-   bool insideHL[];                    BuildInsideClusterFlagsHL(rates, n, insideHL);
-
-   int first_eff=0; while(first_eff<n && rates[first_eff].time<effective_start) first_eff++;
-   int idx = MathMax(0, first_eff-2);
-
-   for(int i=idx; i<n; ++i)
-   {
-      if(insideHL[i]) continue;
-
-      int c2=-1,c3=-1,c4=-1;
-      if(CheckWave2_FromIndex_LocalOnly(rates, insideHL, bodyLowEff, bodyHighEff, n, i, c2, c3, c4))
-      {
-         int j=i+1, w3_c1=i, w3e=-1;
-         int a2=-1,a3=-1,a4=-1;
-
-        // بریک بدنه بالای High(C1_W2)
-         int bodyBreakIdx=-1;
-         for(; j<n; ++j)
-         {
-            if(insideHL[j]) continue;
-            const double H1_W2 = rates[i].high;
-            if(bodyBreakIdx<0 && rates[j].close > H1_W2) bodyBreakIdx=j;
-
-            if(CheckWave3CountOnly_Local(rates, insideHL, bodyLowEff, bodyHighEff, n, w3_c1, a2,a3,a4,w3e))
-            {
-               if(bodyBreakIdx>=0)
-               {
-                  out_w3_c1_idx  = w3_c1;
-                  out_w3_c1_time = rates[w3_c1].time;
-                  out_bodyBreakIdx   = bodyBreakIdx;
-                  out_bodyBreakTime  = rates[bodyBreakIdx].time;
-                  out_bodyBreakClose = rates[bodyBreakIdx].close;
-                  return true;
-               }
-            }
-         }
-      }
-   }
-   return false;
-}
-
 // ------------------------ اسکن «فقط اولین جفت کامل‌شده» (DOWN) ------------------------
 bool Boot_FindFirstPair_DOWN(const string sym, const ENUM_TIMEFRAMES tf,
                              const datetime from_time, const datetime to_time,
@@ -430,62 +373,6 @@ bool Boot_FindFirstPair_DOWN(const string sym, const ENUM_TIMEFRAMES tf,
          }
 
          if(!progressed) break;
-      }
-   }
-   return false;
-}
-
-bool Boot_FindFirstPair_DOWN_Details(const string sym, const ENUM_TIMEFRAMES tf,
-                                     const datetime from_time, const datetime to_time,
-                                     int &out_w3_c1_idx, datetime &out_w3_c1_time,
-                                     int &out_bodyBreakIdx, datetime &out_bodyBreakTime, double &out_bodyBreakClose)
-{
-   out_w3_c1_idx=-1; out_w3_c1_time=0; out_bodyBreakIdx=-1; out_bodyBreakTime=0; out_bodyBreakClose=0.0;
-
-   const int tfsec = PeriodSeconds(tf);
-   const int HISTORY_SKIP_BARS = 3;
-   datetime effective_start = from_time + (HISTORY_SKIP_BARS * tfsec);
-   datetime from_adj = from_time - tfsec*10;
-
-   MqlRates rates[]; int n = LoadRatesRange(sym, tf, from_adj, to_time, rates);
-   if(n<=0) return false;
-
-   double bodyLowEff[], bodyHighEff[]; BuildEffectiveBodies(rates, n, bodyLowEff, bodyHighEff);
-   bool insideHL[];                    BuildInsideClusterFlagsHL(rates, n, insideHL);
-
-   int first_eff=0; while(first_eff<n && rates[first_eff].time<effective_start) first_eff++;
-   int idx = MathMax(0, first_eff-2);
-
-   for(int i=idx; i<n; ++i)
-   {
-      if(insideHL[i]) continue;
-
-      int c2=-1,c3=-1,c4=-1;
-      if(CheckWave2_FromIndex_LocalOnly_Down(rates, insideHL, bodyLowEff, bodyHighEff, n, i, c2, c3, c4))
-      {
-         int j=i+1, w3_c1=i, w3e=-1;
-         int a2=-1,a3=-1,a4=-1;
-
-         int bodyBreakIdx=-1;
-         for(; j<n; ++j)
-         {
-            if(insideHL[j]) continue;
-            const double L1_W2 = rates[i].low;
-            if(bodyBreakIdx<0 && rates[j].close < L1_W2) bodyBreakIdx=j;
-
-            if(CheckWave3CountOnly_Local_Down(rates, insideHL, bodyLowEff, bodyHighEff, n, w3_c1, a2,a3,a4,w3e))
-            {
-               if(bodyBreakIdx>=0)
-               {
-                  out_w3_c1_idx  = w3_c1;
-                  out_w3_c1_time = rates[w3_c1].time;
-                  out_bodyBreakIdx   = bodyBreakIdx;
-                  out_bodyBreakTime  = rates[bodyBreakIdx].time;
-                  out_bodyBreakClose = rates[bodyBreakIdx].close;
-                  return true;
-               }
-            }
-         }
       }
    }
    return false;

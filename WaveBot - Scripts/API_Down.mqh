@@ -9,7 +9,7 @@
 #include <WaveBot/Wave3_Down.mqh>
 #include <WaveBot/ExtLQ_Down.mqh>
 #include <WaveBot/Hunter_Down.mqh>
-#include <WaveBot/Switch.mqh>
+#include <WaveBot/Transition.mqh>   // NEW
 
 // helper: leftmost max-high in [from..to] excluding inside bars
 inline int IndexOfLeftmostMaxHigh_ExInside(const MqlRates &rates[], const bool &insideHL[],
@@ -151,11 +151,25 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
             ExtLQ_Down_OnBar(rates[j]);
             if(Hunter_Down_IsExtLQCross(rates[j]))
                Hunter_Down_TryMarkIfValid(rates, n, c1, j);
+            
+            // --- NEW: اگر AutoSwitch روشن است و همین کندل «بدنه» ext lq را به بالا شکست، مسابقه را آغاز کن
+            if(InpEnableAutoSwitch && ExtLQ_Down_Has())
+            {
+               const double lq = ExtLQ_Down_Get();
+               if(rates[j].close > lq) // body-break به بالا (DOWN hunter logic)
+               {
+                  Transition_RaceFromTrigger_DOWN(sym, tf, rates[j].time, to_time);
+               }
+            }
+            
+            // --- NEW: خروج زودهنگام اگر سوئیچ زمان‌بندی شد
+            if(InpEnableAutoSwitch && Transition_SwitchScheduled())
+            {
+               if(rates[j].time >= Transition_ScheduledTime())
+                  return pairs;
+            }
 
             if(insideHL[j]) continue;
-            
-            Hunter_OnBar_CheckTransition_DOWN(rates[j]);
-            if(Switch_IsActive()) return pairs;
 
             // wick escalation (DOWN)
             if(!breakAchieved)
@@ -255,7 +269,7 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
                   k2=a2; k3=a3; k4=a4; w3_end=w3e;
                }
             }
-            
+
             // finalize only when BOTH conditions are met
             if(have_w3 && breakAchieved)
             {
