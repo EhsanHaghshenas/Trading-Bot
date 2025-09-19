@@ -287,6 +287,8 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
                {
                   g_race_winner="B"; g_race_winner_time=bt;
                   Race_MarkWin_B(DIR_UP, bt);
+                  // >>> NEW: نمایش جفت موج۲/۳ نزولیِ همان مسیر B (mtc_down)
+                  Race_DrawW2W3_MTC_Down(rates, n, S);
                   Race_InternalClearAll();
                }
                progressed=true; break;
@@ -428,6 +430,8 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
                {
                   g_race_winner="B"; g_race_winner_time=bt;
                   Race_MarkWin_B(DIR_DOWN, bt);
+                  // >>> NEW: نمایش جفت موج۲/۳ صعودیِ همان مسیر B (mtc_up)
+                  Race_DrawW2W3_MTC_Up(rates, n, S);
                   Race_InternalClearAll();
                }
                progressed=true; break;
@@ -435,6 +439,73 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
          }
          if(!progressed) break;
       }
+   }
+}
+
+// =====================[ MTC Drawing Helpers ]=====================
+inline void Race_DrawW2W3_MTC_Down(const MqlRates &rates[], const int n, const RacePathBState &S)
+{
+   const string tag = IntegerToString(g_race_counter);
+
+   // --- W2 (DOWN): C1..C4/Cend
+   if(S.c1 >= 0 && S.c1 < n) if(InpDrawMarkers) MarkV("MTC_DN_W2_C1_"+tag, rates[S.c1].time, clrFireBrick);
+   if(S.c2 >= 0 && S.c2 < n) if(InpDrawMarkers) MarkV("MTC_DN_W2_C2_"+tag, rates[S.c2].time, clrFireBrick);
+   if(S.c3 >= 0 && S.c3 < n) if(InpDrawMarkers) MarkV("MTC_DN_W2_C3_"+tag, rates[S.c3].time, clrFireBrick);
+   int cend = (S.c4>=0 ? S.c4 : S.c3);
+   if(cend >= 0 && cend < n) if(InpDrawMarkers) MarkV("MTC_DN_W2_CEND_"+tag, rates[cend].time, clrFireBrick);
+
+   // --- W3 (DOWN): C1..K2/K3/K4..END
+   if(S.w3_c1 >= 0 && S.w3_c1 < n) if(InpDrawMarkers) MarkV("MTC_DN_W3_C1_"+tag, rates[S.w3_c1].time, clrOrangeRed);
+   if(S.k2    >= 0 && S.k2    < n) if(InpDrawMarkers) MarkV("MTC_DN_W3_K2_"+tag, rates[S.k2].time,    clrOrangeRed);
+   if(S.k3    >= 0 && S.k3    < n) if(InpDrawMarkers) MarkV("MTC_DN_W3_K3_"+tag, rates[S.k3].time,    clrOrangeRed);
+   if(S.k4    >= 0 && S.k4    < n) if(InpDrawMarkers) MarkV("MTC_DN_W3_K4_"+tag, rates[S.k4].time,    clrOrangeRed);
+   if(S.w3_end>= 0 && S.w3_end< n) if(InpDrawMarkers) MarkV("MTC_DN_W3_END_"+tag,rates[S.w3_end].time,clrOrangeRed);
+
+   // --- Body-Break (DOWN): کندل بریک + خط افقی سطح بریک (بعد از wick-escalation)
+   if(S.bodyBreakIdx >= 0 && S.bodyBreakIdx < n && InpDrawMarkers)
+      MarkV("MTC_DN_BB_"+tag, rates[S.bodyBreakIdx].time, clrRed);
+
+   if(S.bodyBreakLevel > 0.0) // خط افقی سطح بریک
+   {
+      const string hname = "MTC_DN_BB_LEVEL_"+tag;
+      if(ObjectFind(0, hname) == -1)
+         ObjectCreate(0, hname, OBJ_HLINE, 0, 0, S.bodyBreakLevel);
+      ObjectSetInteger(0, hname, OBJPROP_COLOR, clrRed);
+      ObjectSetInteger(0, hname, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, hname, OBJPROP_STYLE, STYLE_DOT);
+   }
+}
+
+inline void Race_DrawW2W3_MTC_Up(const MqlRates &rates[], const int n, const RacePathBState &S)
+{
+   const string tag = IntegerToString(g_race_counter);
+
+   // --- W2 (UP): C1..C4/Cend
+   if(S.c1 >= 0 && S.c1 < n) if(InpDrawMarkers) MarkV("MTC_UP_W2_C1_"+tag, rates[S.c1].time, clrLime);
+   if(S.c2 >= 0 && S.c2 < n) if(InpDrawMarkers) MarkV("MTC_UP_W2_C2_"+tag, rates[S.c2].time, clrLime);
+   if(S.c3 >= 0 && S.c3 < n) if(InpDrawMarkers) MarkV("MTC_UP_W2_C3_"+tag, rates[S.c3].time, clrLime);
+   int cend = (S.c4>=0 ? S.c4 : S.c3);
+   if(cend >= 0 && cend < n) if(InpDrawMarkers) MarkV("MTC_UP_W2_CEND_"+tag, rates[cend].time, clrLime);
+
+   // --- W3 (UP): C1..K2/K3/K4..END
+   if(S.w3_c1 >= 0 && S.w3_c1 < n) if(InpDrawMarkers) MarkV("MTC_UP_W3_C1_"+tag, rates[S.w3_c1].time, clrDeepSkyBlue);
+   if(S.k2    >= 0 && S.k2    < n) if(InpDrawMarkers) MarkV("MTC_UP_W3_K2_"+tag, rates[S.k2].time,    clrDeepSkyBlue);
+   if(S.k3    >= 0 && S.k3    < n) if(InpDrawMarkers) MarkV("MTC_UP_W3_K3_"+tag, rates[S.k3].time,    clrDeepSkyBlue);
+   if(S.k4    >= 0 && S.k4    < n) if(InpDrawMarkers) MarkV("MTC_UP_W3_K4_"+tag, rates[S.k4].time,    clrDeepSkyBlue);
+   if(S.w3_end>= 0 && S.w3_end< n) if(InpDrawMarkers) MarkV("MTC_UP_W3_END_"+tag,rates[S.w3_end].time,clrDeepSkyBlue);
+
+   // --- Body-Break (UP)
+   if(S.bodyBreakIdx >= 0 && S.bodyBreakIdx < n && InpDrawMarkers)
+      MarkV("MTC_UP_BB_"+tag, rates[S.bodyBreakIdx].time, clrBlue);
+
+   if(S.bodyBreakLevel > 0.0)
+   {
+      const string hname = "MTC_UP_BB_LEVEL_"+tag;
+      if(ObjectFind(0, hname) == -1)
+         ObjectCreate(0, hname, OBJ_HLINE, 0, 0, S.bodyBreakLevel);
+      ObjectSetInteger(0, hname, OBJPROP_COLOR, clrBlue);
+      ObjectSetInteger(0, hname, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, hname, OBJPROP_STYLE, STYLE_DOT);
    }
 }
 
