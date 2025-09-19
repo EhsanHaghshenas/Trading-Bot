@@ -4,6 +4,7 @@
 #include <WaveBot/Markers.mqh>
 #include <WaveBot/ExtLQ_Down.mqh>
 #include <WaveBot/Utils.mqh>
+#include <WaveBot/RaceCoordinator.mqh>
 
 // ---------------- Hunter (DOWN) state ----------------
 static int      g_hw_counter_d     = 0;
@@ -99,6 +100,7 @@ inline void Hunter_Down_TryMarkIfValid(const MqlRates &rates[], const int n,
 inline void SW_DOWN_TryMarkOnConfirmedW3(const MqlRates &rates[], const int n,
                                          const int w3_c1, const int bodyBreakIdx)
 {
+   Race_OnSWConfirmed_DOWN(rates, n, w3_c1, bodyBreakIdx);
    if(!g_sw_seed_d_active) return;
    if(w3_c1 < 0 || bodyBreakIdx < 0)     return;
    if(rates[w3_c1].time < g_sw_seed_d_xtime) return;

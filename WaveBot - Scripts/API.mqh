@@ -23,6 +23,7 @@
 #include <WaveBot/ExtLQ.mqh>    // UP ext lq (cross-down)
 #include <WaveBot/Hunter.mqh>   // UP hunter
 #include <WaveBot/Hunter_BodyBreak.mqh>  // NEW: نمایش کندل بدنه‌شکن Hunter نسبت به ext lq (UP/DOWN)
+#include <WaveBot/RaceCoordinator.mqh>
 
 // قفل C1 در سناریوی شدو (کمترین Low در بازه، با اسکیپ inside)
 inline int IndexOfLeftmostMinLow_ExInside(const MqlRates &rates[], const bool &insideHL[],
@@ -118,7 +119,7 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
          for(int i=idx; i<n; ++i)
          {
             ExtLQ_OnBar(rates[i]);
-            HW_BB_UP_OnBar(rates[i]);   // NEW (ایمن است؛ فقط پس از Seed فعال می‌شود)
+            HW_BB_UP_OnBar(rates[i], rates, n, i);   // NEW (ایمن است؛ فقط پس از Seed فعال می‌شود)
  
             if(insideHL[i]) continue;
 
@@ -166,7 +167,9 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
             ExtLQ_OnBar(rates[j]);
             if(Hunter_IsExtLQCross(rates[j]))
                Hunter_TryMarkIfValid(rates, n, c1, j);
-            HW_BB_UP_OnBar(rates[j]);   // NEW
+
+            Race_OnBar_UP(rates, insideHL, bodyLowEff, bodyHighEff, n, j);
+            HW_BB_UP_OnBar(rates[j],rates, n, j);
 
             if(insideHL[j]) continue;
 

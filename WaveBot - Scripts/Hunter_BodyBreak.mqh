@@ -6,6 +6,7 @@
 #include <WaveBot/ExtLQ_Down.mqh>
 #include <WaveBot/Hunter.mqh>       // برای دسترسی به SW_UP_Seed* (بذرهانتر معتبر)
 #include <WaveBot/Hunter_Down.mqh>  // برای دسترسی به SW_DOWN_Seed*
+#include <WaveBot/RaceCoordinator.mqh>
 
 // ============================================================================
 // هدف: تنها «کندل بدنه‌شکن» نسبت به ext lq را بعد از یک Hunter معتبر نشان بدهیم.
@@ -62,8 +63,9 @@ inline void HW_BB_DOWN_ResetIfNewLQ()
 // --------------------------- UP: OnBar ---------------------------
 // شرط نمایش در مود صعودی: «کلوز زیر سطح (ext lq یا سطحِ ارتقایافته)»
 // با رعایت: تنها بعد از Hunter معتبر (از بذر SW-UP استفاده می‌کنیم).
-inline void HW_BB_UP_OnBar(const MqlRates &r)
+inline void HW_BB_UP_OnBar(const MqlRates &r, const MqlRates &rates[], const int n, const int j)
 {
+   if(Race_IsLocked()) return; // تا تعیین برنده، HWBB جدید ممنوع
    if(!ExtLQ_Has()) return;
 
    // اگر ext lq تازه شده، ریست محلی
@@ -90,6 +92,8 @@ inline void HW_BB_UP_OnBar(const MqlRates &r)
    {
       ++g_bb_counter_u;
       if(InpDrawMarkers) MarkV("HWBB_U_"+IntegerToString(g_bb_counter_u), r.time, clrRoyalBlue);
+      // --- شروع مسابقه از همین کندل HWBB (Mode=UP)
+      Race_Start_UP(rates, n, j);
       g_bb_done_u  = true;
       g_bb_armed_u = false;
       return;
@@ -105,8 +109,9 @@ inline void HW_BB_UP_OnBar(const MqlRates &r)
 // -------------------------- DOWN: OnBar --------------------------
 // شرط نمایش در مود نزولی: «کلوز بالای سطح (ext lq یا سطحِ ارتقایافته)»
 // با رعایت: تنها بعد از Hunter معتبر (از Seed زمان کراس استفاده می‌کنیم).
-inline void HW_BB_DOWN_OnBar(const MqlRates &r)
+inline void HW_BB_DOWN_OnBar(const MqlRates &r, const MqlRates &rates[], const int n, const int j)
 {
+   if(Race_IsLocked()) return; // تا تعیین برنده، HWBB جدید ممنوع
    if(!ExtLQ_Down_Has()) return;
 
    // اگر ext lq تازه شده، ریست محلی
@@ -130,6 +135,8 @@ inline void HW_BB_DOWN_OnBar(const MqlRates &r)
    {
       ++g_bb_counter_d;
       if(InpDrawMarkers) MarkV("HWBB_D_"+IntegerToString(g_bb_counter_d), r.time, clrDarkOrange);
+      // --- شروع مسابقه از همین کندل HWBB (Mode=DOWN)
+      Race_Start_DOWN(rates, n, j);
       g_bb_done_d  = true;
       g_bb_armed_d = false;
       return;

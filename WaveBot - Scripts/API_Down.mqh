@@ -23,6 +23,7 @@
 #include <WaveBot/ExtLQ_Down.mqh>
 #include <WaveBot/Hunter_Down.mqh>
 #include <WaveBot/Hunter_BodyBreak.mqh>  // NEW: نمایش کندل بدنه‌شکن Hunter نسبت به ext lq (UP/DOWN)
+#include <WaveBot/RaceCoordinator.mqh>
 
 // helper: leftmost max-high in [from..to] excluding inside bars
 inline int IndexOfLeftmostMaxHigh_ExInside(const MqlRates &rates[], const bool &insideHL[],
@@ -119,7 +120,7 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
          for(int i=idx; i<n; ++i)
          {
             ExtLQ_Down_OnBar(rates[i]);
-            HW_BB_DOWN_OnBar(rates[i]); // NEW
+            HW_BB_DOWN_OnBar(rates[i], rates, n, i);
             
             if(insideHL[i]) continue;
 
@@ -167,7 +168,8 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
             if(Hunter_Down_IsExtLQCross(rates[j]))
                Hunter_Down_TryMarkIfValid(rates, n, c1, j);
             
-            HW_BB_DOWN_OnBar(rates[j]); // NEW
+            Race_OnBar_DOWN(rates, insideHL, bodyLowEff, bodyHighEff, n, j);
+            HW_BB_DOWN_OnBar(rates[j],rates, n, j);
 
             if(insideHL[j]) continue;
 
