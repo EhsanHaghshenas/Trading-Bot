@@ -32,12 +32,6 @@ inline bool Hunter_Down_IsExtLQCross(const MqlRates &r)
    return (r.high >= lq || r.close > lq);
 }
 
-// تشخیص دقیق body-break روی ext lq (DOWN)
-inline bool Hunter_IsExtLQ_BodyBreak_DOWN(const MqlRates &r)
-{
-   return (ExtLQ_Down_Has() && r.close > ExtLQ_Down_Get());
-}
-
 // ابطال Hunter قبل از کراس: اگر تا پیش از کراس، Low < Low(C1) شود ⇒ Hunter نامعتبر
 inline bool Hunter_IsC1Invalidated_BeforeCross_DOWN(const MqlRates &rates[], const int n,
                                                     const int c1_index, const int cross_idx)

@@ -1,3 +1,16 @@
+//+------------------------------------------------------------------+
+//| WaveBot - API_Down (DOWN side)                                   |
+//| Scan W2 -> wait W3 (count + body-break), STRICT gate             |
+//| Rules summary (DOWN):                                            |
+//|  - Overlap: W3 may start from cend (j >= cend).                  |
+//|  - PRE body-break (non-wick NEW): if H > H(C1_W3) before body-   |
+//|    break -> RESET W3 (restart from the same breaking bar).       |
+//|  - PRE body-break (wick-path OLD): if rose above locked C1 while |
+//|    wickActive -> INVALIDATE W2 and restart from first wick bar.  |
+//|  - POST body-break (OLD): after body-break below L1_W2 but       |
+//|    BEFORE W3 finishes, if H > H(C1_W3) -> INVALIDATE W2 and      |
+//|    restart from the body-break bar.                              |
+//+------------------------------------------------------------------+
 #ifndef WAVEBOT_API_DOWN_MQH
 #define WAVEBOT_API_DOWN_MQH
 
@@ -9,7 +22,7 @@
 #include <WaveBot/Wave3_Down.mqh>
 #include <WaveBot/ExtLQ_Down.mqh>
 #include <WaveBot/Hunter_Down.mqh>
-#include <WaveBot/Transition.mqh>   // NEW
+#include <WaveBot/Hunter_BodyBreak.mqh>  // NEW: نمایش کندل بدنه‌شکن Hunter نسبت به ext lq (UP/DOWN)
 
 // helper: leftmost max-high in [from..to] excluding inside bars
 inline int IndexOfLeftmostMaxHigh_ExInside(const MqlRates &rates[], const bool &insideHL[],
@@ -106,6 +119,8 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
          for(int i=idx; i<n; ++i)
          {
             ExtLQ_Down_OnBar(rates[i]);
+            HW_BB_DOWN_OnBar(rates[i]); // NEW
+            
             if(insideHL[i]) continue;
 
             int i2=-1,i3=-1,i4=-1;
@@ -152,22 +167,7 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
             if(Hunter_Down_IsExtLQCross(rates[j]))
                Hunter_Down_TryMarkIfValid(rates, n, c1, j);
             
-            // --- NEW: اگر AutoSwitch روشن است و همین کندل «بدنه» ext lq را به بالا شکست، مسابقه را آغاز کن
-            if(InpEnableAutoSwitch && ExtLQ_Down_Has())
-            {
-               const double lq = ExtLQ_Down_Get();
-               if(rates[j].close > lq) // body-break به بالا (DOWN hunter logic)
-               {
-                  Transition_RaceFromTrigger_DOWN(sym, tf, rates[j].time, to_time);
-               }
-            }
-            
-            // --- NEW: خروج زودهنگام اگر سوئیچ زمان‌بندی شد
-            if(InpEnableAutoSwitch && Transition_SwitchScheduled())
-            {
-               if(rates[j].time >= Transition_ScheduledTime())
-                  return pairs;
-            }
+            HW_BB_DOWN_OnBar(rates[j]); // NEW
 
             if(insideHL[j]) continue;
 

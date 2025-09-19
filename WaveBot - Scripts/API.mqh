@@ -1,3 +1,16 @@
+//+------------------------------------------------------------------+
+//| WaveBot - API (UP)                                               |
+//| Scan W2 -> wait W3 (count + body-break), STRICT gate             |
+//| Rules (UP):                                                      |
+//|  • Overlap: W3 can start from cend (j >= cend).                  |
+//|  • NEW (pre body-break, non-wick): if L < L(C1_W3) before body-  |
+//|    break -> RESET W3 and restart from the same breaking bar.     |
+//|  • Pre body-break (wick case): wick-up above H1 then L1 breaks   |
+//|    down (wick/body) -> INVALIDATE W2 and restart from wick bar.  |
+//|  • Post body-break: after body-break above H1_W2 but BEFORE W3   |
+//|    finishes, if L < L(C1_W3) -> INVALIDATE W2 and restart from   |
+//|    the body-break bar.                                           |
+//+------------------------------------------------------------------+
 #ifndef WAVEBOT_API_MQH
 #define WAVEBOT_API_MQH
 
@@ -9,7 +22,7 @@
 #include <WaveBot/Wave3.mqh>    // UP W3
 #include <WaveBot/ExtLQ.mqh>    // UP ext lq (cross-down)
 #include <WaveBot/Hunter.mqh>   // UP hunter
-#include <WaveBot/Transition.mqh>   // NEW
+#include <WaveBot/Hunter_BodyBreak.mqh>  // NEW: نمایش کندل بدنه‌شکن Hunter نسبت به ext lq (UP/DOWN)
 
 // قفل C1 در سناریوی شدو (کمترین Low در بازه، با اسکیپ inside)
 inline int IndexOfLeftmostMinLow_ExInside(const MqlRates &rates[], const bool &insideHL[],
@@ -105,6 +118,8 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
          for(int i=idx; i<n; ++i)
          {
             ExtLQ_OnBar(rates[i]);
+            HW_BB_UP_OnBar(rates[i]);   // NEW (ایمن است؛ فقط پس از Seed فعال می‌شود)
+ 
             if(insideHL[i]) continue;
 
             int i2=-1,i3=-1,i4=-1;
@@ -151,24 +166,7 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
             ExtLQ_OnBar(rates[j]);
             if(Hunter_IsExtLQCross(rates[j]))
                Hunter_TryMarkIfValid(rates, n, c1, j);
-            
-            // --- NEW: اگر AutoSwitch روشن است و همین کندل «بدنه» ext lq را شکست، مسابقه را از همین کندل آغاز کن
-            if(InpEnableAutoSwitch && ExtLQ_Has())
-            {
-               const double lq = ExtLQ_Get();
-               if(rates[j].close < lq) // body-break به پایین (UP hunter logic)
-               {
-                  Transition_RaceFromTrigger_UP(sym, tf, rates[j].time, to_time);
-               }
-            }
-            
-            // --- NEW: اگر سوئیچ زمان‌بندی شد، همین‌جا پایان بده تا ادامه در مود جدید از mtc انجام شود
-            if(InpEnableAutoSwitch && Transition_SwitchScheduled())
-            {
-               // در صورت عبور از زمان mtc، خاتمه بده
-               if(rates[j].time >= Transition_ScheduledTime())
-                  return pairs;
-            }
+            HW_BB_UP_OnBar(rates[j]);   // NEW
 
             if(insideHL[j]) continue;
 
