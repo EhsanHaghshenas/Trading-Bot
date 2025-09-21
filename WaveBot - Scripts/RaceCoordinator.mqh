@@ -14,9 +14,6 @@
 #include <WaveBot/Wave3.mqh>          // UP W3
 #include <WaveBot/Wave2_Down.mqh>     // DOWN W2
 #include <WaveBot/Wave3_Down.mqh>     // DOWN W3
-// ---- Forward declarations to run API scans without including API headers (avoid circular include)
-int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf, const datetime from_time, const datetime to_time);
-int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf, const datetime from_time, const datetime to_time);
 
 //------------------------------ وضعیت کلی مسابقه ------------------------------
 static bool      g_race_locked       = false;
@@ -290,7 +287,6 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
                {                  
                   g_race_winner="B"; g_race_winner_time=bt;
                   Race_MarkWin_B(DIR_UP, bt);
-                  // >>> NEW: نمایش جفت موج۲/۳ نزولیِ همان مسیر B (mtc_down)
                   // >>> NEW: run DOWN-side API to display the exact W2/W3 pair that caused MTC_D
                   const int __c1 = (S.c1>=0 ? S.c1 : g_race_hwbb_idx);
                   datetime __from = rates[__c1].time - (PeriodSeconds(InpTF)*5);
@@ -438,7 +434,6 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
                {
                   g_race_winner="B"; g_race_winner_time=bt;
                   Race_MarkWin_B(DIR_DOWN, bt);
-                  // >>> NEW: نمایش جفت موج۲/۳ صعودیِ همان مسیر B (mtc_up)
                   // >>> NEW: run UP-side API to display the exact W2/W3 pair that caused MTC_U
                   const int __c1 = (S.c1>=0 ? S.c1 : g_race_hwbb_idx);
                   datetime __from = rates[__c1].time - (PeriodSeconds(InpTF)*5);
