@@ -291,7 +291,8 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
                   const int __c1 = (S.c1>=0 ? S.c1 : g_race_hwbb_idx);
                   datetime __from = rates[__c1].time - (PeriodSeconds(InpTF)*5);
                   datetime __to   = TimeCurrent();
-                  API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to);
+                  if (g_race_mode == DIR_UP) API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to);
+                  //API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to);
                   Race_DrawW2W3_MTC_Down(rates, n, S);
                   Race_InternalClearAll();
                }
@@ -438,7 +439,8 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
                   const int __c1 = (S.c1>=0 ? S.c1 : g_race_hwbb_idx);
                   datetime __from = rates[__c1].time - (PeriodSeconds(InpTF)*5);
                   datetime __to   = TimeCurrent();
-                  API_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to);
+                  if (g_race_mode == DIR_DOWN) API_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to);
+                  //API_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to);
                   Race_DrawW2W3_MTC_Up(rates, n, S);
                   Race_InternalClearAll();
                }
