@@ -51,6 +51,10 @@ struct RacePathBState
    double   bodyBreakLevel;
    bool     breakAchieved;
    int      bodyBreakIdx;
+   
+   // --- NEW: MTC candidate tracking (mirrored for both directions)
+   int      mtc_c1_cand;     // current C1 candidate index (starts at HWBB)
+   double   mtc_c1_level;    // invalidation level: LOW for DOWN-scan, HIGH for UP-scan
 };
 
 static RacePathBState g_pb_up;    // وقتی Mode=UP است (مسیر B = اسکن DOWN)
@@ -64,6 +68,8 @@ inline void Race_ResetPathB(RacePathBState &S)
    S.w3_cand=-1; S.w3_cand_low=DBL_MAX; S.w3_cand_high=-DBL_MAX;
    S.wickActive=false; S.firstWickIdx=-1; S.wickBreakIdx=-1;
    S.bodyBreakLevel=0.0; S.breakAchieved=false; S.bodyBreakIdx=-1;
+   S.mtc_c1_cand = -1;
+   S.mtc_c1_level = 0.0;
 }
 
 inline void Race_InternalClearAll()
@@ -109,6 +115,10 @@ inline void Race_Start_UP(const MqlRates &rates[], const int n, const int hwbb_i
    g_race_winner     = ""; g_race_winner_time=0;
    Race_ResetPathB(g_pb_up);
    g_pb_up.init=true; g_pb_up.state=R_SEARCH_W2; g_pb_up.idx = MathMax(0, hwbb_idx);
+      // NEW: start C1 candidate from the HWBB bar (Mode=UP ⇒ scanning DOWN)
+   g_pb_up.mtc_c1_cand = hwbb_idx;
+   g_pb_up.mtc_c1_level = (hwbb_idx>=0 && hwbb_idx<n ? rates[hwbb_idx].low : 0.0);
+
    Race_MarkStart(DIR_UP, g_race_hwbb_time);
 }
 
@@ -122,6 +132,9 @@ inline void Race_Start_DOWN(const MqlRates &rates[], const int n, const int hwbb
    g_race_winner     = ""; g_race_winner_time=0;
    Race_ResetPathB(g_pb_down);
    g_pb_down.init=true; g_pb_down.state=R_SEARCH_W2; g_pb_down.idx = MathMax(0, hwbb_idx);
+      // NEW: start C1 candidate from the HWBB bar (Mode=DOWN ⇒ scanning UP)
+   g_pb_down.mtc_c1_cand = hwbb_idx;
+   g_pb_down.mtc_c1_level = (hwbb_idx>=0 && hwbb_idx<n ? rates[hwbb_idx].high : 0.0);
    Race_MarkStart(DIR_DOWN, g_race_hwbb_time);
 }
 
@@ -172,31 +185,45 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
       if(S.state==R_SEARCH_W2)
       {
          bool found=false;
+         // --- NEW: candidate update (any wick/body break DOWN invalidates prior candidate)
+         if(S.mtc_c1_cand >= 0) // initialized from HWBB
+         {
+            if( (rates[upto_j].low < S.mtc_c1_level) || (rates[upto_j].close < S.mtc_c1_level) )
+            {
+               S.mtc_c1_cand = upto_j;
+               S.mtc_c1_level = rates[upto_j].low;
+               S.idx = S.mtc_c1_cand;  // move search pointer to the new candidate
+            }
+         }
          for(int i=S.idx; i<=limit; ++i)
          {
+            // --- NEW: allow scanning only at the current candidate index
+            if(S.mtc_c1_cand >= 0 && i != S.mtc_c1_cand) { continue; }
+
             if(insideHL[i]) continue;
 
             int i2=-1,i3=-1,i4=-1;
             if(!CheckWave2_FromIndex_LocalOnly_Down(rates, insideHL, bodyLowEff, bodyHighEff, n, i, i2, i3, i4))
                continue;
 
-            // تضمین شروع از خود HWBB
+            // تضمین شروع از خود HWBB (همان کُد فعلی)
             if(i < g_race_hwbb_idx){ S.idx = (i4>=0?i4:i3)+1; continue; }
 
             S.c1=i; S.c2=i2; S.c3=i3; S.c4=i4; S.cend=(S.c4>=0?S.c4:S.c3);
 
-            // ریست وضعیت W3
+            // ریست W3 و مدیریت‌های فعلی (بدون تغییر)
             S.have_w3=false; S.w3_c1=-1; S.k2=S.k3=S.k4=-1; S.w3_end=-1;
             S.w3_cand=-1;   S.w3_cand_high=-DBL_MAX;
 
             S.wickActive=false; S.firstWickIdx=-1; S.wickBreakIdx=-1;
-            S.bodyBreakLevel = rates[S.c1].low;  // L1_W2
+            S.bodyBreakLevel = rates[S.c1].low;
             S.breakAchieved  = false;
             S.bodyBreakIdx   = -1;
 
+            // از این‌جا به بعد وارد WAIT_CONFIRM می‌شویم
             S.idx=S.cend; S.state=R_WAIT_CONFIRM; found=true; break;
          }
-         if(!found) break; // منتظر کندل‌های بعدی
+         if(!found) break;
       }
       else // R_WAIT_CONFIRM (DOWN)
       {
@@ -302,6 +329,7 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
          if(!progressed) break;
       }
    }
+   g_pb_up = S;   // حفظ وضعیت به‌روز شده
 }
 
 //--------------------------- مسیر B برای Mode=DOWN (اسکن UP) -------------------
@@ -317,8 +345,21 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
       if(S.state==R_SEARCH_W2)
       {
          bool found=false;
+         // --- NEW: candidate update (any wick/body break UP invalidates prior candidate)
+         if(S.mtc_c1_cand >= 0)
+         {
+            if( (rates[upto_j].high > S.mtc_c1_level) || (rates[upto_j].close > S.mtc_c1_level) )
+            {
+               S.mtc_c1_cand = upto_j;
+               S.mtc_c1_level = rates[upto_j].high;
+               S.idx = S.mtc_c1_cand;
+            }
+         }
          for(int i=S.idx; i<=limit; ++i)
          {
+            // --- NEW: allow scanning only at the current candidate index
+            if(S.mtc_c1_cand >= 0 && i != S.mtc_c1_cand) { continue; }
+
             if(insideHL[i]) continue;
 
             int i2=-1,i3=-1,i4=-1;
@@ -329,12 +370,12 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
 
             S.c1=i; S.c2=i2; S.c3=i3; S.c4=i4; S.cend=(S.c4>=0?S.c4:S.c3);
 
-            // ریست W3/wick
+            // ریستِ W3/wick و… (همان کُد فعلی)
             S.have_w3=false; S.w3_c1=-1; S.k2=S.k3=S.k4=-1; S.w3_end=-1;
             S.w3_cand=-1;   S.w3_cand_low=DBL_MAX;
 
             S.wickActive=false; S.firstWickIdx=-1; S.wickBreakIdx=-1;
-            S.bodyBreakLevel = rates[S.c1].high;    // H1_W2
+            S.bodyBreakLevel = rates[S.c1].high;
             S.breakAchieved  = false;
             S.bodyBreakIdx   = -1;
 
@@ -450,6 +491,7 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
          if(!progressed) break;
       }
    }
+   g_pb_down = S;
 }
 
 // =====================[ MTC Drawing Helpers ]=====================
