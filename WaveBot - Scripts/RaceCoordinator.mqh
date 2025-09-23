@@ -23,6 +23,13 @@ static datetime  g_race_hwbb_time    = 0;        // زمان HWBB
 static string    g_race_winner       = "";       // "A" یا "B"
 static datetime  g_race_winner_time  = 0;
 static int       g_race_counter      = 0;        // برای نام‌گذاری مارکرها
+// نقطهٔ مرجع برای ترسیم بعد از MTC
+static double   g_race_ref_mtc_up   = 0.0;  // mtc_up ⇒ Lowِ C1ِ Hunter(DOWN)
+static double   g_race_ref_mtc_down = 0.0;  // mtc_down ⇒ Highِ C1ِ Hunter(UP)
+
+// ست‌کننده‌ها (از Hunter_BodyBreak فراخوانی می‌شوند)
+inline void Race_SetRefLevelForMTC_Up(const double price)   { g_race_ref_mtc_up   = price; }
+inline void Race_SetRefLevelForMTC_Down(const double price) { g_race_ref_mtc_down = price; }
 
 enum RState { R_IDLE=0, R_SEARCH_W2=1, R_WAIT_CONFIRM=2 };
 
@@ -80,6 +87,8 @@ inline void Race_InternalClearAll()
    g_race_winner=""; g_race_winner_time=0;
    Race_ResetPathB(g_pb_up);
    Race_ResetPathB(g_pb_down);
+   g_race_ref_mtc_up   = 0.0;
+   g_race_ref_mtc_down = 0.0;
 }
 
 inline bool Race_IsLocked() { return g_race_locked; }
@@ -526,6 +535,16 @@ inline void Race_DrawW2W3_MTC_Down(const MqlRates &rates[], const int n, const R
       ObjectSetInteger(0, hname, OBJPROP_WIDTH, 1);
       ObjectSetInteger(0, hname, OBJPROP_STYLE, STYLE_DOT);
    }
+   // --- Reference (DOWN): Highِ C1ِ Hunter(UP) که HWBBِ منجر به این MTC را ساخته بود
+   if(g_race_ref_mtc_down > 0.0)
+   {
+      const string rname = "MTC_DN_REF_"+tag;
+      if(ObjectFind(0, rname) == -1)
+         ObjectCreate(0, rname, OBJ_HLINE, 0, 0, g_race_ref_mtc_down);
+      ObjectSetInteger(0, rname, OBJPROP_COLOR, clrWhite);
+      ObjectSetInteger(0, rname, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, rname, OBJPROP_STYLE, STYLE_SOLID);
+   }
 }
 
 inline void Race_DrawW2W3_MTC_Up(const MqlRates &rates[], const int n, const RacePathBState &S)
@@ -558,6 +577,16 @@ inline void Race_DrawW2W3_MTC_Up(const MqlRates &rates[], const int n, const Rac
       ObjectSetInteger(0, hname, OBJPROP_COLOR, clrBlue);
       ObjectSetInteger(0, hname, OBJPROP_WIDTH, 1);
       ObjectSetInteger(0, hname, OBJPROP_STYLE, STYLE_DOT);
+   }
+   // --- Reference (UP): Lowِ C1ِ Hunter(DOWN) که HWBBِ منجر به این MTC را ساخته بود
+   if(g_race_ref_mtc_up > 0.0)
+   {
+      const string rname = "MTC_UP_REF_"+tag;
+      if(ObjectFind(0, rname) == -1)
+         ObjectCreate(0, rname, OBJ_HLINE, 0, 0, g_race_ref_mtc_up);
+      ObjectSetInteger(0, rname, OBJPROP_COLOR, clrWhite);
+      ObjectSetInteger(0, rname, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, rname, OBJPROP_STYLE, STYLE_SOLID);
    }
 }
 

@@ -92,6 +92,8 @@ inline void HW_BB_UP_OnBar(const MqlRates &r, const MqlRates &rates[], const int
    {
       ++g_bb_counter_u;
       if(InpDrawMarkers) MarkV("HWBB_U_"+IntegerToString(g_bb_counter_u), r.time, clrRoyalBlue);
+      // قبل از شروع مسابقه، Highِ C1ِ Hunter(UP) را به‌عنوان مرجعِ احتمالی mtc_down ثبت کن
+      Race_SetRefLevelForMTC_Down(SW_UP_Level());
       // --- شروع مسابقه از همین کندل HWBB (Mode=UP)
       Race_Start_UP(rates, n, j);
       g_bb_done_u  = true;
@@ -135,6 +137,8 @@ inline void HW_BB_DOWN_OnBar(const MqlRates &r, const MqlRates &rates[], const i
    {
       ++g_bb_counter_d;
       if(InpDrawMarkers) MarkV("HWBB_D_"+IntegerToString(g_bb_counter_d), r.time, clrDarkOrange);
+      // قبل از شروع مسابقه، Lowِ C1ِ Hunter(DOWN) را به‌عنوان مرجعِ احتمالی mtc_up ثبت کن
+      Race_SetRefLevelForMTC_Up(SW_DOWN_Level());
       // --- شروع مسابقه از همین کندل HWBB (Mode=DOWN)
       Race_Start_DOWN(rates, n, j);
       g_bb_done_d  = true;
