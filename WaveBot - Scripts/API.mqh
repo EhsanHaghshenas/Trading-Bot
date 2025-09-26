@@ -98,6 +98,9 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
    double bodyBreakLevel=0.0;            // باید با «بدنه» به بالا شکسته شود
    bool   breakAchieved=false;
    int    bodyBreakIdx=-1;               // اندیس کندل بریک با بدنه
+   // --- Guard: detect any post body-break C1_W3 change until W3 completes
+   bool   postBreak_c1_lock = false;
+   int    postBreak_c1_ref  = -1;
 
    while(idx < n)
    {
@@ -181,6 +184,10 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
                   {
                      breakAchieved = true;      // BODY-BREAK بالای سطح
                      bodyBreakIdx  = j;
+                     // Lock current C1 reference right after body-break (if any)
+                     int __c1_eff = (w3_c1>=0 ? w3_c1 : w3_cand);
+                     postBreak_c1_ref  = __c1_eff;
+                     postBreak_c1_lock = (__c1_eff >= 0);
                   }
                   else
                   {
@@ -259,7 +266,32 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
                   k2=a2; k3=a3; k4=a4; w3_end=w3e;
                }
             }
-
+            
+            // Guard (UP): after body-break & before W3 completes, ANY change in C1_W3 => invalidate W2
+            if(breakAchieved && !have_w3)
+            {
+               int __c1_now = (w3_c1>=0 ? w3_c1 : w3_cand);
+            
+               // if no lock yet (e.g., C1 formed after the body-break), lock the first seen C1
+               if(!postBreak_c1_lock && __c1_now >= 0)
+               {
+                  postBreak_c1_ref  = __c1_now;
+                  postBreak_c1_lock = true;
+               }
+               else
+               // if locked and now changed => rollback W2 to the body-break bar
+               if(postBreak_c1_lock && __c1_now >= 0 && __c1_now != postBreak_c1_ref)
+               {
+                  if(InpDebugPrints)
+                     Print("#",tag," W2(UP) INVALIDATED (C1_W3 changed after body-break). Restart from body-break @ ",
+                           T(rates[bodyBreakIdx>=0?bodyBreakIdx:j].time));
+                  idx       = (bodyBreakIdx>=0 ? bodyBreakIdx : j);
+                  state     = SEARCH_W2;
+                  progressed= true;
+                  break;
+               }
+            }
+   
             // ابطال W2 پس از بریک (قبل از اتمام W3): L < L(C1_W3)
             if(breakAchieved && !have_w3)
             {
