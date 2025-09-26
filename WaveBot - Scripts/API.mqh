@@ -1,16 +1,3 @@
-//+------------------------------------------------------------------+
-//| WaveBot - API (UP)                                               |
-//| Scan W2 -> wait W3 (count + body-break), STRICT gate             |
-//| Rules (UP):                                                      |
-//|  • Overlap: W3 can start from cend (j >= cend).                  |
-//|  • NEW (pre body-break, non-wick): if L < L(C1_W3) before body-  |
-//|    break -> RESET W3 and restart from the same breaking bar.     |
-//|  • Pre body-break (wick case): wick-up above H1 then L1 breaks   |
-//|    down (wick/body) -> INVALIDATE W2 and restart from wick bar.  |
-//|  • Post body-break: after body-break above H1_W2 but BEFORE W3   |
-//|    finishes, if L < L(C1_W3) -> INVALIDATE W2 and restart from   |
-//|    the body-break bar.                                           |
-//+------------------------------------------------------------------+
 #ifndef WAVEBOT_API_MQH
 #define WAVEBOT_API_MQH
 
@@ -24,6 +11,7 @@
 #include <WaveBot/Hunter.mqh>   // UP hunter
 #include <WaveBot/Hunter_BodyBreak.mqh>  // NEW: نمایش کندل بدنه‌شکن Hunter نسبت به ext lq (UP/DOWN)
 #include <WaveBot/RaceCoordinator.mqh>
+#include <WaveBot/C1W2Gate.mqh>
 
 // قفل C1 در سناریوی شدو (کمترین Low در بازه، با اسکیپ inside)
 inline int IndexOfLeftmostMinLow_ExInside(const MqlRates &rates[], const bool &insideHL[],
@@ -122,6 +110,16 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
             HW_BB_UP_OnBar(rates[i], rates, n, i);   // NEW (ایمن است؛ فقط پس از Seed فعال می‌شود)
  
             if(insideHL[i]) continue;
+            
+            bool __reanched = false;
+            if(!C1W2_UP_ShouldAllowAt(rates, i, __reanched))
+            {
+               // داخل پنجرهٔ ممنوعه هستیم ⇒ هیچ ارزیابی/نمایشی انجام نشود
+               ExtLQ_OnBar(rates[i]);
+               HW_BB_UP_OnBar(rates[i], rates, n, i);
+               continue;
+            }
+            // اگر __reanched == true شد، یعنی همین کندل i کاندید جدید است و می‌توان از همین کندل، W2 را از نو شمرد.
 
             int i2=-1,i3=-1,i4=-1;
             if(!CheckWave2_FromIndex_LocalOnly(rates, insideHL, bodyLowEff, bodyHighEff, n, i, i2, i3, i4))
@@ -152,6 +150,7 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
             bodyBreakIdx   = -1;
 
             idx=cend; state=WAIT_CONFIRM; found=true; break;
+            C1W2_UP_OnW2Locked();
          }
          if(!found) break;
       }
@@ -294,7 +293,9 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
             
                // --- NEW: Strong Wave (UP) بر اساس بذر ثبت‌شده توسط Hunter
                SW_UP_TryMarkOnConfirmedW3(rates, n, w3_c1, bodyBreakIdx);
-            
+               // NEW: c1_w2 (UP) ⇒ کاندید اول = همان کندلِ بریک W3
+               C1W2_UP_Start(rates, (bodyBreakIdx>=0 ? bodyBreakIdx : idx));
+
                if(InpDebugPrints)
                   Print("#",tag," Pair(UP) OK | W3 C1=",T(rates[w3_c1].time),
                         " | body-break @ ",T(rates[bodyBreakIdx>=0?bodyBreakIdx:idx].time));

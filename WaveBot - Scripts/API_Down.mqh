@@ -1,16 +1,3 @@
-//+------------------------------------------------------------------+
-//| WaveBot - API_Down (DOWN side)                                   |
-//| Scan W2 -> wait W3 (count + body-break), STRICT gate             |
-//| Rules summary (DOWN):                                            |
-//|  - Overlap: W3 may start from cend (j >= cend).                  |
-//|  - PRE body-break (non-wick NEW): if H > H(C1_W3) before body-   |
-//|    break -> RESET W3 (restart from the same breaking bar).       |
-//|  - PRE body-break (wick-path OLD): if rose above locked C1 while |
-//|    wickActive -> INVALIDATE W2 and restart from first wick bar.  |
-//|  - POST body-break (OLD): after body-break below L1_W2 but       |
-//|    BEFORE W3 finishes, if H > H(C1_W3) -> INVALIDATE W2 and      |
-//|    restart from the body-break bar.                              |
-//+------------------------------------------------------------------+
 #ifndef WAVEBOT_API_DOWN_MQH
 #define WAVEBOT_API_DOWN_MQH
 
@@ -24,6 +11,7 @@
 #include <WaveBot/Hunter_Down.mqh>
 #include <WaveBot/Hunter_BodyBreak.mqh>  // NEW: نمایش کندل بدنه‌شکن Hunter نسبت به ext lq (UP/DOWN)
 #include <WaveBot/RaceCoordinator.mqh>
+#include <WaveBot/C1W2Gate.mqh>
 
 // helper: leftmost max-high in [from..to] excluding inside bars
 inline int IndexOfLeftmostMaxHigh_ExInside(const MqlRates &rates[], const bool &insideHL[],
@@ -123,6 +111,16 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
             HW_BB_DOWN_OnBar(rates[i], rates, n, i);
             
             if(insideHL[i]) continue;
+            
+            bool __reanched = false;
+            if(!C1W2_DN_ShouldAllowAt(rates, i, __reanched))
+            {
+               ExtLQ_Down_OnBar(rates[i]);
+               HW_BB_DOWN_OnBar(rates[i], rates, n, i);
+               continue;
+            }
+            // اگر __reanched == true شد، همین کندل j کاندید جدید است ⇒ از همین کندل، شمارش W2 نزولی را از نو شروع کن.
+
 
             int i2=-1,i3=-1,i4=-1;
             if(!CheckWave2_FromIndex_LocalOnly_Down(rates,insideHL,bodyLowEff,bodyHighEff,n,i,i2,i3,i4))
@@ -153,6 +151,7 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
             bodyBreakIdx   = -1;
 
             idx=cend; state=WAIT_CONFIRM; found=true; break;
+            C1W2_DN_OnW2Locked();
          }
          if(!found) break;
       }
@@ -289,7 +288,9 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
             
                // --- NEW: Strong Wave (DOWN) بر اساس بذر Hunter
                SW_DOWN_TryMarkOnConfirmedW3(rates, n, w3_c1, bodyBreakIdx);
-            
+               // NEW: c1_w2 (DOWN) ⇒ کاندید اول = همان کندلِ بریک W3
+               C1W2_DN_Start(rates, (bodyBreakIdx>=0 ? bodyBreakIdx : idx));
+
                if(InpDebugPrints)
                   Print("#",tag," Pair(DOWN) OK | W3 C1=",T(rates[w3_c1].time),
                         " | body-break @ ",T(rates[bodyBreakIdx>=0?bodyBreakIdx:idx].time));
