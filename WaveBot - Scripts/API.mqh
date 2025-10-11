@@ -9,11 +9,12 @@
 #include <WaveBot/Wave3.mqh>    // UP W3
 #include <WaveBot/ExtLQ.mqh>    // UP ext lq (cross-down)
 #include <WaveBot/Hunter.mqh>   // UP hunter
-#include <WaveBot/Hunter_BodyBreak.mqh>  // NEW: نمایش کندل بدنه‌شکن Hunter نسبت به ext lq (UP/DOWN)
+#include <WaveBot/Hunter_BodyBreak.mqh>  // NEW: ????? ???? ???????? Hunter ???? ?? ext lq (UP/DOWN)
 #include <WaveBot/RaceCoordinator.mqh>
 #include <WaveBot/C1W2Gate.mqh>
+#include <WaveBot/W2W3_ChainInvalidation.mqh>
 
-// قفل C1 در سناریوی شدو (کمترین Low در بازه، با اسکیپ inside)
+// ??? C1 ?? ??????? ??? (?????? Low ?? ????? ?? ????? inside)
 inline int IndexOfLeftmostMinLow_ExInside(const MqlRates &rates[], const bool &insideHL[],
                                           const int from, const int to)
 {
@@ -29,7 +30,7 @@ inline int IndexOfLeftmostMinLow_ExInside(const MqlRates &rates[], const bool &i
    return idx;
 }
 
-// (اختیاری) جستجوی آخرین W2 – امضا بدون تغییر
+// (???????) ?????? ????? W2 - ???? ???? ?????
 bool FindMostRecentWave2_UP(const string sym, const ENUM_TIMEFRAMES tf,
                                    const int lookback, int &c1, int &c2, int &c3, int &c4,
                                    MqlRates &rates[], int &n)
@@ -58,7 +59,7 @@ bool FindMostRecentWave2_UP(const string sym, const ENUM_TIMEFRAMES tf,
    return true;
 }
 
-// اسکن کامل (UP): W2 -> WAIT_CONFIRM(W3) + Hunter + ExtLQ
+// ???? ???? (UP): W2 -> WAIT_CONFIRM(W3) + Hunter + ExtLQ
 int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf,
                                       const datetime from_time, const datetime to_time)
 {
@@ -82,22 +83,22 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
 
    int pairs=0;
 
-   // W2 جاری
+   // W2 ????
    int c1=-1,c2=-1,c3=-1,c4=-1, cend=-1;
 
-   // وضعیت W3 (UP)
+   // ????? W3 (UP)
    bool   have_w3=false;
    int    w3_c1=-1, k2=-1,k3=-1,k4=-1, w3_end=-1;
 
-   // کاندید مسیر مستقیم (کمترین Low از cend به بعد)
+   // ?????? ???? ?????? (?????? Low ?? cend ?? ???)
    int    w3_cand=-1; double w3_cand_low=DBL_MAX;
 
-   // شدو/ارتقای سطح بریک
+   // ???/?????? ??? ????
    bool   wickActive=false;
    int    firstWickIdx=-1, wickBreakIdx=-1;
-   double bodyBreakLevel=0.0;            // باید با «بدنه» به بالا شکسته شود
+   double bodyBreakLevel=0.0;            // ???? ?? "????" ?? ???? ????? ???
    bool   breakAchieved=false;
-   int    bodyBreakIdx=-1;               // اندیس کندل بریک با بدنه
+   int    bodyBreakIdx=-1;               // ????? ???? ???? ?? ????
    // --- Guard: detect any post body-break C1_W3 change until W3 completes
    bool   postBreak_c1_lock = false;
    int    postBreak_c1_ref  = -1;
@@ -110,19 +111,19 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
          for(int i=idx; i<n; ++i)
          {
             ExtLQ_OnBar(rates[i]);
-            HW_BB_UP_OnBar(rates[i], rates, n, i);   // NEW (ایمن است؛ فقط پس از Seed فعال می‌شود)
+            HW_BB_UP_OnBar(rates[i], rates, n, i);   // NEW (???? ???? ??? ?? ?? Seed ???? ??????)
  
             if(insideHL[i]) continue;
             
             bool __reanched = false;
             if(!C1W2_UP_ShouldAllowAt(rates, i, __reanched))
             {
-               // داخل پنجرهٔ ممنوعه هستیم ⇒ هیچ ارزیابی/نمایشی انجام نشود
+               // ???? ?????? ?????? ????? ? ??? ???????/?????? ????? ????
                ExtLQ_OnBar(rates[i]);
                HW_BB_UP_OnBar(rates[i], rates, n, i);
                continue;
             }
-            // اگر __reanched == true شد، یعنی همین کندل i کاندید جدید است و می‌توان از همین کندل، W2 را از نو شمرد.
+            // ??? __reanched == true ??? ???? ???? ???? i ?????? ???? ??? ? ??????? ?? ???? ????? W2 ?? ?? ?? ????.
 
             int i2=-1,i3=-1,i4=-1;
             if(!CheckWave2_FromIndex_LocalOnly(rates, insideHL, bodyLowEff, bodyHighEff, n, i, i2, i3, i4))
@@ -133,17 +134,21 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
             if(rates[c1].time<effective_start || rates[c1].time>to_time)
             { idx=cend+1; continue; }
 
-            string tag=IntegerToString(pairs+1);
+            string tag = IntegerToString(pairs+1);
             if(InpDrawMarkers)
             {
+               // NEW: clear old markers for this attempt (prevents orphan C4)
+               W2_ClearTag(tag);
+            
                MarkV("W2_"+tag+"_C1", rates[c1].time, clrDeepSkyBlue);
                MarkV("W2_"+tag+"_C2", rates[c2].time, clrDodgerBlue);
                MarkV("W2_"+tag+"_C3", rates[c3].time, clrRoyalBlue);
-               if(c4>=0) MarkV("W2_"+tag+"_C4", rates[c4].time, clrBlue);
+               if(c4 >= 0) MarkV("W2_"+tag+"_C4", rates[c4].time, clrBlue);
             }
+
             if(InpDebugPrints) Print("#",tag," W2(UP) found @ ",T(rates[c1].time));
 
-            // ریست وضعیت W3/wick
+            // ???? ????? W3/wick
             have_w3=false; w3_c1=-1; k2=k3=k4=-1; w3_end=-1;
             w3_cand=-1;   w3_cand_low=DBL_MAX;
 
@@ -151,9 +156,8 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
             bodyBreakLevel = rates[c1].high;   // H1_W2
             breakAchieved  = false;
             bodyBreakIdx   = -1;
-
-            idx=cend; state=WAIT_CONFIRM; found=true; break;
             C1W2_UP_OnW2Locked();
+            idx=cend; state=WAIT_CONFIRM; found=true; break;
          }
          if(!found) break;
       }
@@ -173,16 +177,16 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
             Race_OnBar_UP(rates, insideHL, bodyLowEff, bodyHighEff, n, j);
             HW_BB_UP_OnBar(rates[j],rates, n, j);
 
-            if(insideHL[j]) continue;
+            //if(insideHL[j]) continue;
 
-            // ارتقای سطح بریک با شدو (رو به بالا)
+            // ?????? ??? ???? ?? ??? (?? ?? ????)
             if(!breakAchieved)
             {
                if(rates[j].high > bodyBreakLevel)
                {
                   if(rates[j].close > bodyBreakLevel)
                   {
-                     breakAchieved = true;      // BODY-BREAK بالای سطح
+                     breakAchieved = true;      // BODY-BREAK ????? ???
                      bodyBreakIdx  = j;
                      // Lock current C1 reference right after body-break (if any)
                      int __c1_eff = (w3_c1>=0 ? w3_c1 : w3_cand);
@@ -191,70 +195,75 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
                   }
                   else
                   {
-                     bodyBreakLevel = rates[j].high; // ارتقا با شدو
+                     bodyBreakLevel = rates[j].high; // ????? ?? ???
                      if(firstWickIdx < 0)
                      {
-                        firstWickIdx = j;       // کندلی که برای نخستین بار H1 را با شدو شکست
+                        firstWickIdx = j;       // ????? ?? ???? ?????? ??? H1 ?? ?? ??? ????
                         wickBreakIdx = j;
                         wickActive   = true;
 
-                        // قفل C1: کمترین Low بین [cend..firstWickIdx]
+                        // ??? C1: ?????? Low ??? [cend..firstWickIdx]
                         int anchorC1 = IndexOfLeftmostMinLow_ExInside(rates, insideHL, cend, firstWickIdx);
                         have_w3=false; w3_c1 = anchorC1;
 
-                        // مسیر مستقیم را کنار بگذار
+                        // ???? ?????? ?? ???? ?????
                         w3_cand=-1; w3_cand_low=DBL_MAX;
                      }
                   }
                }
             }
-
-            // ابطال W2 قبل از بریک (سناریوی ویک: wick-up سپس شکست L1)
-            if(!breakAchieved && firstWickIdx>=0 &&
-               (rates[j].low < L1_W2 || rates[j].close < L1_W2))
+            
+            // --- NEW: Chain-Invalidation of W2 & W3 in wick-window (pre body-break)
             {
-               if(InpDebugPrints)
-                  Print("#",tag," W2(UP) INVALIDATED (wick-up then L1 broken).",
-                        " Restart from wick bar @ ",T(rates[firstWickIdx].time));
-               idx = firstWickIdx; state = SEARCH_W2; progressed = true; break;
+               int __rew = -1;
+               if(ChainInv_PreBody_WickWindow_UP_OnBar(
+                     rates, insideHL, n, j,
+                     breakAchieved, wickActive, firstWickIdx,
+                     w3_c1, w3_cand, __rew))
+               {
+                  if(InpDebugPrints)
+                     Print("[ChainInv-UP] W2 & W3 INVALID (pre-body, wick-window via C1_W3 break).",
+                           " Rewind to wick @ ", T(rates[__rew].time));
+                  idx = __rew; state = SEARCH_W2; progressed = true; break;
+               }
             }
 
             // ================= NEW: RESET W3 (pre body-break, NON-WICK) =================
-            // اگر قبل از بریک با بدنه و در مسیر غیر ویکی، Low از Low(C1_W3) عبور کند،
-            // شمارش W3 از همان کندلِ متخلف از نو آغاز می‌شود.
+            // ??? ??? ?? ???? ?? ???? ? ?? ???? ??? ????? Low ?? Low(C1_W3) ???? ????
+            // ????? W3 ?? ???? ????? ????? ?? ?? ???? ??????.
             if(!wickActive && !breakAchieved)
             {
-               int c1_eff = (w3_c1>=0 ? w3_c1 : w3_cand); // کاندید جاری C1 در هر دو مسیر
+               int c1_eff = (w3_c1>=0 ? w3_c1 : w3_cand); // ?????? ???? C1 ?? ?? ?? ????
                if(c1_eff >= 0 && rates[j].low < rates[c1_eff].low)
                {
                   if(InpDebugPrints)
                      Print("#",tag," W3(UP) RESET (non-wick): L < L(C1) before body-break. Restart W3 from this bar.");
                   have_w3=false; w3_end=-1; k2=k3=k4=-1;
                   w3_c1 = -1;
-                  w3_cand     = j;                 // همان کندل، C1 جدید
+                  w3_cand     = j;                 // ???? ????? C1 ????
                   w3_cand_low = rates[j].low;
                   continue;
                }
             }
             // ============================================================================
 
-            // مسیر مستقیم: انتخاب C1 از خود cend به بعد (هم‌پوشانی مجاز)
+            // ???? ??????: ?????? C1 ?? ??? cend ?? ??? (????????? ????)
             if(!wickActive)
             {
                if(j >= cend && (w3_cand < 0 || rates[j].low < w3_cand_low))
                {
-                  w3_cand     = j;                 // ممکن است j == cend باشد
+                  w3_cand     = j;                 // ???? ??? j == cend ????
                   w3_cand_low = rates[j].low;
                   have_w3     = false;
                }
             }
 
-            // انتخاب startIdx برای شمارش W3
+            // ?????? startIdx ???? ????? W3
             int startIdx = -1;
-            if(w3_c1  >= 0)       startIdx = w3_c1;     // مسیر ویکی (قفل)
-            else if(w3_cand >= 0) startIdx = w3_cand;   // مسیر مستقیم
+            if(w3_c1  >= 0)       startIdx = w3_c1;     // ???? ???? (???)
+            else if(w3_cand >= 0) startIdx = w3_cand;   // ???? ??????
 
-            // شمارش W3 (UP) — قوانین «اسکیپ inside» + «barrier» در Wave3.mqh اعمال می‌شود
+            // ????? W3 (UP) - ?????? "????? inside" + "barrier" ?? Wave3.mqh ????? ??????
             if(!have_w3 && startIdx >= 0 && !insideHL[startIdx])
             {
                int a2=-1,a3=-1,a4=-1, w3e=-1;
@@ -292,7 +301,7 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
                }
             }
    
-            // ابطال W2 پس از بریک (قبل از اتمام W3): L < L(C1_W3)
+            // ????? W2 ?? ?? ???? (??? ?? ????? W3): L < L(C1_W3)
             if(breakAchieved && !have_w3)
             {
                int c1_eff = (w3_c1>=0 ? w3_c1 : w3_cand);
@@ -308,7 +317,7 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
                }
             }
 
-            // نهایی‌سازی: هر دو شرط لازم (شمارش W3 + بریک با بدنه)
+            // ??????????: ?? ?? ??? ???? (????? W3 + ???? ?? ????)
             if(have_w3 && breakAchieved)
             {
                if(InpDrawMarkers)
@@ -319,13 +328,13 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
                   if(k4>=0) MarkV("W3_"+tag+"_C4", rates[k4].time, clrDarkGreen);
                }
             
-               // ext lq جدید (UP)
+               // ext lq ???? (UP)
                ExtLQ_Set(rates[w3_c1].low, rates[w3_c1].time);
                Hunter_OnExtLQUpdated();
             
-               // --- NEW: Strong Wave (UP) بر اساس بذر ثبت‌شده توسط Hunter
+               // --- NEW: Strong Wave (UP) ?? ???? ??? ??????? ???? Hunter
                SW_UP_TryMarkOnConfirmedW3(rates, n, w3_c1, bodyBreakIdx);
-               // NEW: c1_w2 (UP) ⇒ کاندید اول = همان کندلِ بریک W3
+               // NEW: c1_w2 (UP) ? ?????? ??? = ???? ????? ???? W3
                C1W2_UP_Start(rates, (bodyBreakIdx>=0 ? bodyBreakIdx : idx));
 
                if(InpDebugPrints)
@@ -352,7 +361,7 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
    return pairs;
 }
 
-// اجرای سریع روی [0..now]
+// ????? ???? ??? [0..now]
 void API_ShowMostRecent_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf, const int /*lookback*/)
 {
    datetime start=0, stop=TimeCurrent();

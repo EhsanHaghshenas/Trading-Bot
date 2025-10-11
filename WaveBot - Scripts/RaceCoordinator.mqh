@@ -14,6 +14,7 @@
 #include <WaveBot/Wave3.mqh>          // UP W3
 #include <WaveBot/Wave2_Down.mqh>     // DOWN W2
 #include <WaveBot/Wave3_Down.mqh>     // DOWN W3
+#include <WaveBot/W2W3_ChainInvalidation.mqh>
 
 //------------------------------ وضعیت کلی مسابقه ------------------------------
 static bool      g_race_locked       = false;
@@ -265,12 +266,18 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
                }
             }
 
-            // ابطال W2 قبل از بریک در مسیر ویکی: صعود بالای C1 قفل‌شده
-            if(S.wickActive && S.w3_c1>=0 && !S.breakAchieved && rates[j].high > rates[S.w3_c1].high)
+            // --- NEW: Chain-Invalidation (DOWN) in wick-window (pre body-break)
             {
-               S.idx=S.wickBreakIdx; S.state=R_SEARCH_W2; progressed=true; break;
+               int __rew = -1;
+               if(ChainInv_PreBody_WickWindow_DN_OnBar(
+                     rates, insideHL, n, j,
+                     S.breakAchieved, S.wickActive, S.firstWickIdx,
+                     S.w3_c1, S.w3_cand, __rew))
+               {
+                  S.idx = __rew; S.state = R_SEARCH_W2; progressed = true; break;
+               }
             }
-
+            
             // NEW (pre body-break, non-wick): H > H(C1_W3) => RESET W3 از همان کندل
             if(!S.wickActive && !S.breakAchieved)
             {
@@ -422,10 +429,16 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
                }
             }
 
-            // ابطال W2 قبل از بریک (wick-up سپس شکست L1): این مورد در مسیر مسابقه کافی است که به SEARCH برگردیم
-            if(!S.breakAchieved && S.firstWickIdx>=0 && rates[j].low < rates[S.c1].low)
+            // --- NEW: Chain-Invalidation (UP) in wick-window (pre body-break)
             {
-               S.idx = S.firstWickIdx; S.state = R_SEARCH_W2; progressed = true; break;
+               int __rew = -1;
+               if(ChainInv_PreBody_WickWindow_UP_OnBar(
+                     rates, insideHL, n, j,
+                     S.breakAchieved, S.wickActive, S.firstWickIdx,
+                     S.w3_c1, S.w3_cand, __rew))
+               {
+                  S.idx = __rew; S.state = R_SEARCH_W2; progressed = true; break;
+               }
             }
 
             // NEW (pre body-break, non-wick): L < L(C1_W3) => RESET W3 از همان کندل

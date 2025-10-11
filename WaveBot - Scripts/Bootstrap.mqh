@@ -9,6 +9,7 @@
 #include <WaveBot/Wave3.mqh>         // UP W3
 #include <WaveBot/Wave2_Down.mqh>    // DOWN W2
 #include <WaveBot/Wave3_Down.mqh>    // DOWN W3
+#include <WaveBot/W2W3_ChainInvalidation.mqh>
 
 // خروجی بوت‌استرپ (همان‌طور که قبلاً استفاده می‌کردیم)
 struct BootOutcome
@@ -125,11 +126,19 @@ bool Boot_FindFirstPair_UP(const string sym, const ENUM_TIMEFRAMES tf,
                }
             }
 
-            // ابطال W2 قبل از بریک (سناریوی ویک: wick-up سپس شکست L1)
-            if(!breakAchieved && firstWickIdx>=0 &&
-               (rates[j].low < L1_W2 || rates[j].close < L1_W2))
+            // --- NEW: Chain-Invalidation of W2 & W3 in wick-window (pre body-break)
             {
-               idx = firstWickIdx; state = SEARCH_W2; progressed = true; break;
+               int __rew = -1;
+               if(ChainInv_PreBody_WickWindow_UP_OnBar(
+                     rates, insideHL, n, j,
+                     breakAchieved, wickActive, firstWickIdx,
+                     w3_c1, w3_cand, __rew))
+               {
+                  if(InpDebugPrints)
+                     Print("[BOOT:ChainInv-UP] W2 & W3 INVALID (pre-body, wick-window via C1_W3 break).",
+                           " Rewind to wick @ ", T(rates[__rew].time));
+                  idx = __rew; state = SEARCH_W2; progressed = true; break;
+               }
             }
 
             // RESET W3 (قبل از body-break، غیر-ویکی): L < L(C1_W3)
@@ -304,10 +313,19 @@ bool Boot_FindFirstPair_DOWN(const string sym, const ENUM_TIMEFRAMES tf,
                }
             }
 
-            // PRE body-break (wick): بالاتر از C1 قفل‌شده ⇒ invalidate W2
-            if(wickActive && w3_c1>=0 && !breakAchieved && rates[j].high > rates[w3_c1].high)
+            // --- NEW: Chain-Invalidation of W2 & W3 in wick-window (pre body-break)
             {
-               idx=wickBreakIdx; state=SEARCH_W2; progressed=true; break;
+               int __rew = -1;
+               if(ChainInv_PreBody_WickWindow_DN_OnBar(
+                     rates, insideHL, n, j,
+                     breakAchieved, wickActive, firstWickIdx,
+                     w3_c1, w3_cand, __rew))
+               {
+                  if(InpDebugPrints)
+                     Print("[BOOT:ChainInv-DOWN] W2 & W3 INVALID (pre-body, wick-window via C1_W3 break).",
+                           " Rewind to wick @ ", T(rates[__rew].time));
+                  idx = __rew; state = SEARCH_W2; progressed = true; break;
+               }
             }
 
             // RESET W3 (قبل از body-break، غیر-ویکی): H > H(C1_W3)

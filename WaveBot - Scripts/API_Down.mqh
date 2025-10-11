@@ -9,9 +9,10 @@
 #include <WaveBot/Wave3_Down.mqh>
 #include <WaveBot/ExtLQ_Down.mqh>
 #include <WaveBot/Hunter_Down.mqh>
-#include <WaveBot/Hunter_BodyBreak.mqh>  // NEW: نمایش کندل بدنه‌شکن Hunter نسبت به ext lq (UP/DOWN)
+#include <WaveBot/Hunter_BodyBreak.mqh>  // NEW: ????? ???? ???????? Hunter ???? ?? ext lq (UP/DOWN)
 #include <WaveBot/RaceCoordinator.mqh>
 #include <WaveBot/C1W2Gate.mqh>
+#include <WaveBot/W2W3_ChainInvalidation.mqh>
 
 // helper: leftmost max-high in [from..to] excluding inside bars
 inline int IndexOfLeftmostMaxHigh_ExInside(const MqlRates &rates[], const bool &insideHL[],
@@ -122,7 +123,7 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
                HW_BB_DOWN_OnBar(rates[i], rates, n, i);
                continue;
             }
-            // اگر __reanched == true شد، همین کندل j کاندید جدید است ⇒ از همین کندل، شمارش W2 نزولی را از نو شروع کن.
+            // ??? __reanched == true ??? ???? ???? j ?????? ???? ??? ? ?? ???? ????? ????? W2 ????? ?? ?? ?? ???? ??.
 
 
             int i2=-1,i3=-1,i4=-1;
@@ -134,14 +135,18 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
             if(rates[c1].time<effective_start || rates[c1].time>to_time)
             { idx=cend+1; continue; }
 
-            string tag=IntegerToString(pairs+1);
+            string tag = IntegerToString(pairs+1);
             if(InpDrawMarkers)
             {
+               // NEW: clear old markers for this attempt (prevents orphan C4)
+               W2_ClearTag(tag);
+            
                MarkV("W2_"+tag+"_C1", rates[c1].time, clrDeepPink);
                MarkV("W2_"+tag+"_C2", rates[c2].time, clrPlum);
                MarkV("W2_"+tag+"_C3", rates[c3].time, clrMediumVioletRed);
-               if(c4>=0) MarkV("W2_"+tag+"_C4", rates[c4].time, clrCrimson);
+               if(c4 >= 0) MarkV("W2_"+tag+"_C4", rates[c4].time, clrCrimson);
             }
+
             if(InpDebugPrints) Print("#",tag," W2(DOWN) found @ ",T(rates[c1].time));
 
             // reset W3 state
@@ -152,9 +157,8 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
             bodyBreakLevel = rates[c1].low;  // L1_W2
             breakAchieved  = false;
             bodyBreakIdx   = -1;
-
-            idx=cend; state=WAIT_CONFIRM; found=true; break;
             C1W2_DN_OnW2Locked();
+            idx=cend; state=WAIT_CONFIRM; found=true; break;
          }
          if(!found) break;
       }
@@ -173,7 +177,7 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
             Race_OnBar_DOWN(rates, insideHL, bodyLowEff, bodyHighEff, n, j);
             HW_BB_DOWN_OnBar(rates[j],rates, n, j);
 
-            if(insideHL[j]) continue;
+            //if(insideHL[j]) continue;
 
             // wick escalation (DOWN)
             if(!breakAchieved)
@@ -206,16 +210,23 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
                   }
                }
             }
-
-            // PRE body-break (wick-path): rise above locked C1 -> invalidate W2
-            if(wickActive && w3_c1>=0 && !breakAchieved && rates[j].high > rates[w3_c1].high)
+            
+            // --- NEW: Chain-Invalidation of W2 & W3 in wick-window (pre body-break)
             {
-               if(InpDebugPrints)
-                  Print("#",tag," W2(DOWN) invalidated (rose above locked C1 before body-break).");
-               idx=wickBreakIdx; state=SEARCH_W2; progressed=true; break;
+               int __rew = -1;
+               if(ChainInv_PreBody_WickWindow_DN_OnBar(
+                     rates, insideHL, n, j,
+                     breakAchieved, wickActive, firstWickIdx,
+                     w3_c1, w3_cand, __rew))
+               {
+                  if(InpDebugPrints)
+                     Print("[ChainInv-DOWN] W2 & W3 INVALID (pre-body, wick-window via C1_W3 break).",
+                           " Rewind to wick @ ", T(rates[__rew].time));
+                  idx = __rew; state = SEARCH_W2; progressed = true; break;
+               }
             }
-
-            // ===== NEW: PRE body-break (non-wick) — reset W3 if H > H(C1_W3) =====
+            
+            // ===== NEW: PRE body-break (non-wick) - reset W3 if H > H(C1_W3) =====
             if(!wickActive && !breakAchieved)
             {
                int c1_eff = (w3_c1>=0 ? w3_c1 : w3_cand);
@@ -231,6 +242,7 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
                   continue;
                }
             }
+
             // =====================================================================
             
             // Guard (DOWN): after body-break & before W3 completes, ANY change in C1_W3 => invalidate W2
@@ -311,13 +323,13 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
                   if(k4>=0) MarkV("W3_"+tag+"_C4", rates[k4].time, clrMaroon);
                }
             
-               // ext lq جدید (DOWN)
+               // ext lq ???? (DOWN)
                ExtLQ_Down_Set(rates[w3_c1].high, rates[w3_c1].time);
                Hunter_Down_OnExtLQUpdated();
             
-               // --- NEW: Strong Wave (DOWN) بر اساس بذر Hunter
+               // --- NEW: Strong Wave (DOWN) ?? ???? ??? Hunter
                SW_DOWN_TryMarkOnConfirmedW3(rates, n, w3_c1, bodyBreakIdx);
-               // NEW: c1_w2 (DOWN) ⇒ کاندید اول = همان کندلِ بریک W3
+               // NEW: c1_w2 (DOWN) ? ?????? ??? = ???? ????? ???? W3
                C1W2_DN_Start(rates, (bodyBreakIdx>=0 ? bodyBreakIdx : idx));
 
                if(InpDebugPrints)
