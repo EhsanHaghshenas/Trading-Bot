@@ -94,6 +94,18 @@ inline void Race_InternalClearAll()
 
 inline bool Race_IsLocked() { return g_race_locked; }
 
+// --- NEW: fail-safe unlock on new ext LQ (called by Hunter side)
+// اگر مسابقه قفل باشد و از سمت مقابلِ مود فعلی ext lq جدیدی با زمان بعد از HWBB برسد، قفل را باز کن.
+inline void Race_TryUnlockOnNewLQ_Notify(const Direction lq_side, const datetime lq_time)
+{
+   if(!g_race_locked) return;
+   if(lq_time <= 0 || lq_time < g_race_hwbb_time) return;
+
+   // اگر مسابقه با Mode=UP شروع شده، ext lq معتبرِ سمت DOWN نشانه‌ی برنده بودن B است (و بالعکس)
+   if(g_race_mode == DIR_UP  && lq_side == DIR_DOWN){ Race_InternalClearAll(); return; }
+   if(g_race_mode == DIR_DOWN&& lq_side == DIR_UP  ){ Race_InternalClearAll(); return; }
+}
+
 // مارکرهای خروجی مسابقه
 inline void Race_MarkStart(const Direction mode, const datetime t)
 {

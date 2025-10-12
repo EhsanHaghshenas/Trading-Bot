@@ -21,8 +21,13 @@ static int      g_sw_counter_d     = 0;
 // ext lq جدید ثبت شد
 inline void Hunter_Down_OnExtLQUpdated()
 {
+   // ریست وضعیت hunter برای ext lq جدید (سمت DOWN)
    g_lq_time_seen_d  = ExtLQ_Down_Has() ? ExtLQ_Down_Time() : 0;
    g_marked_for_lq_d = false;
+
+   // --- NEW: اگر مسابقه قفل است و Mode=UP بوده، همین ext lq(DOWN) یعنی برنده مشخص شده
+   if(ExtLQ_Down_Has())
+      Race_TryUnlockOnNewLQ_Notify(DIR_DOWN, ExtLQ_Down_Time());
 }
 
 // عبور از ext lq (DOWN) ⇒ کراس به بالا (بدنه یا شدو)
