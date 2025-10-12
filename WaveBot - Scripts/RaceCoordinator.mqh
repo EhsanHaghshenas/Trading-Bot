@@ -28,6 +28,47 @@ static int       g_race_counter      = 0;        // برای نام‌گذاری
 static double   g_race_ref_mtc_up   = 0.0;  // mtc_up ⇒ Lowِ C1ِ Hunter(DOWN)
 static double   g_race_ref_mtc_down = 0.0;  // mtc_down ⇒ Highِ C1ِ Hunter(UP)
 
+// -----[ Reference History (draw immediately when created) ]-----
+static int g_ref_hist_up_counter   = 0;
+static int g_ref_hist_down_counter = 0;
+
+// رسم فوری تاریخچه‌ی مرجع برای MTC_UP (مرجع از سمت DOWN می‌آید)
+inline void Race_DrawRefHistory_Up(const double price, const datetime t)
+{
+   if(price <= 0.0) return;
+   ++g_ref_hist_up_counter;
+   const string name = "REF_UP_HIST_" + IntegerToString(g_ref_hist_up_counter);
+
+   if(ObjectFind(0, name) == -1)
+      ObjectCreate(0, name, OBJ_HLINE, 0, 0, price);
+
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clrWhite);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
+   ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_SOLID);
+
+   // مارکر زمانیِ اختیاری (برای دیباگ بصری)
+   if(InpDrawMarkers && t > 0)
+      MarkV("REF_UP_HIST_T_" + IntegerToString(g_ref_hist_up_counter), t, clrWhite);
+}
+
+// رسم فوری تاریخچه‌ی مرجع برای MTC_DOWN (مرجع از سمت UP می‌آید)
+inline void Race_DrawRefHistory_Down(const double price, const datetime t)
+{
+   if(price <= 0.0) return;
+   ++g_ref_hist_down_counter;
+   const string name = "REF_DN_HIST_" + IntegerToString(g_ref_hist_down_counter);
+
+   if(ObjectFind(0, name) == -1)
+      ObjectCreate(0, name, OBJ_HLINE, 0, 0, price);
+
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clrWhite);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
+   ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_SOLID);
+
+   if(InpDrawMarkers && t > 0)
+      MarkV("REF_DN_HIST_T_" + IntegerToString(g_ref_hist_down_counter), t, clrWhite);
+}
+
 // ست‌کننده‌ها (از Hunter_BodyBreak فراخوانی می‌شوند)
 inline void Race_SetRefLevelForMTC_Up(const double price)   { g_race_ref_mtc_up   = price; }
 inline void Race_SetRefLevelForMTC_Down(const double price) { g_race_ref_mtc_down = price; }
@@ -339,16 +380,24 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
                // اگر SW هم‌جهت هم در همین کندل رخ دهد، تقدم با هر کدام که زودتر ثبت شده باشد؛
                // پیش‌فرض: اگر هم‌زمان باشد و هنوز برنده‌ای ثبت نشده باشد، مسیر B پذیرفته می‌شود.
                if(g_race_winner=="" || bt < g_race_winner_time)
-               {                  
-                  g_race_winner="B"; g_race_winner_time=bt;
+               {
+                  g_race_winner="B";
+                  g_race_winner_time=bt;
+               
+                  // 1) ثبت برد مسیر B
                   Race_MarkWin_B(DIR_UP, bt);
-                  // >>> NEW: run DOWN-side API to display the exact W2/W3 pair that caused MTC_D
+               
+                  // 2) ابتدا رسم خروجی + خط مرجع
+                  Race_DrawW2W3_MTC_Down(rates, n, S);
+               
+                  // 3) سپس (اختیاری) اسکن API برای نمایش جفت دقیق
                   const int __c1 = (S.c1>=0 ? S.c1 : g_race_hwbb_idx);
                   datetime __from = rates[__c1].time - (PeriodSeconds(InpTF)*5);
                   datetime __to   = TimeCurrent();
-                  if (g_race_mode == DIR_UP) API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to);
-                  //API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to);
-                  Race_DrawW2W3_MTC_Down(rates, n, S);
+                  if (g_race_mode == DIR_UP)
+                     API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to);
+               
+                  // 4) پاکسازی داخلی
                   Race_InternalClearAll();
                }
                progressed=true; break;
@@ -508,15 +557,23 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
                const datetime bt = rates[(S.bodyBreakIdx>=0?S.bodyBreakIdx:j)].time;
                if(g_race_winner=="" || bt < g_race_winner_time)
                {
-                  g_race_winner="B"; g_race_winner_time=bt;
+                  g_race_winner="B"; 
+                  g_race_winner_time=bt;
+               
+                  // 1) ثبت برد مسیر B
                   Race_MarkWin_B(DIR_DOWN, bt);
-                  // >>> NEW: run UP-side API to display the exact W2/W3 pair that caused MTC_U
+               
+                  // 2) اول رسم کن تا state برای خط مرجع دست‌نخورده باشد
+                  Race_DrawW2W3_MTC_Up(rates, n, S);
+               
+                  // 3) سپس (اختیاری) اسکن API برای نمایش جفت دقیق
                   const int __c1 = (S.c1>=0 ? S.c1 : g_race_hwbb_idx);
                   datetime __from = rates[__c1].time - (PeriodSeconds(InpTF)*5);
                   datetime __to   = TimeCurrent();
-                  if (g_race_mode == DIR_DOWN) API_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to);
-                  //API_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to);
-                  Race_DrawW2W3_MTC_Up(rates, n, S);
+                  if (g_race_mode == DIR_DOWN)
+                     API_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to);
+               
+                  // 4) در پایان پاکسازی داخلی
                   Race_InternalClearAll();
                }
                progressed=true; break;
@@ -547,28 +604,31 @@ inline void Race_DrawW2W3_MTC_Down(const MqlRates &rates[], const int n, const R
    if(S.k4    >= 0 && S.k4    < n) if(InpDrawMarkers) MarkV("MTC_DN_W3_K4_"+tag, rates[S.k4].time,    clrOrangeRed);
    if(S.w3_end>= 0 && S.w3_end< n) if(InpDrawMarkers) MarkV("MTC_DN_W3_END_"+tag,rates[S.w3_end].time,clrOrangeRed);
 
-   // --- Body-Break (DOWN): کندل بریک + خط افقی سطح بریک (بعد از wick-escalation)
+   // --- Body-Break (DOWN): کندل بریک + خط افقی سطح بریک
    if(S.bodyBreakIdx >= 0 && S.bodyBreakIdx < n && InpDrawMarkers)
       MarkV("MTC_DN_BB_"+tag, rates[S.bodyBreakIdx].time, clrRed);
 
-   if(S.bodyBreakLevel > 0.0) // خط افقی سطح بریک
-   {
-      const string hname = "MTC_DN_BB_LEVEL_"+tag;
-      if(ObjectFind(0, hname) == -1)
-         ObjectCreate(0, hname, OBJ_HLINE, 0, 0, S.bodyBreakLevel);
-      ObjectSetInteger(0, hname, OBJPROP_COLOR, clrRed);
-      ObjectSetInteger(0, hname, OBJPROP_WIDTH, 1);
-      ObjectSetInteger(0, hname, OBJPROP_STYLE, STYLE_DOT);
-   }
    // --- Reference (DOWN): Highِ C1ِ Hunter(UP) که HWBBِ منجر به این MTC را ساخته بود
    if(g_race_ref_mtc_down > 0.0)
    {
       const string rname = "MTC_DN_REF_"+tag;
+
+      // بساز/تنظیم کن
       if(ObjectFind(0, rname) == -1)
          ObjectCreate(0, rname, OBJ_HLINE, 0, 0, g_race_ref_mtc_down);
       ObjectSetInteger(0, rname, OBJPROP_COLOR, clrWhite);
       ObjectSetInteger(0, rname, OBJPROP_WIDTH, 1);
       ObjectSetInteger(0, rname, OBJPROP_STYLE, STYLE_SOLID);
+
+      // فقط آخرین خط مرجع: همه‌ی MTC_*_REF_* به‌جز rname پاک شوند
+      for(int oi=ObjectsTotal(0)-1; oi>=0; --oi)
+      {
+         string on = ObjectName(0, oi);
+         if(on == "" || on == rname) continue;
+
+         bool isRef = (StringFind(on, "MTC_UP_REF_") == 0) || (StringFind(on, "MTC_DN_REF_") == 0);
+         if(isRef) ObjectDelete(0, on);
+      }
    }
 }
 
@@ -594,24 +654,27 @@ inline void Race_DrawW2W3_MTC_Up(const MqlRates &rates[], const int n, const Rac
    if(S.bodyBreakIdx >= 0 && S.bodyBreakIdx < n && InpDrawMarkers)
       MarkV("MTC_UP_BB_"+tag, rates[S.bodyBreakIdx].time, clrBlue);
 
-   if(S.bodyBreakLevel > 0.0)
-   {
-      const string hname = "MTC_UP_BB_LEVEL_"+tag;
-      if(ObjectFind(0, hname) == -1)
-         ObjectCreate(0, hname, OBJ_HLINE, 0, 0, S.bodyBreakLevel);
-      ObjectSetInteger(0, hname, OBJPROP_COLOR, clrBlue);
-      ObjectSetInteger(0, hname, OBJPROP_WIDTH, 1);
-      ObjectSetInteger(0, hname, OBJPROP_STYLE, STYLE_DOT);
-   }
    // --- Reference (UP): Lowِ C1ِ Hunter(DOWN) که HWBBِ منجر به این MTC را ساخته بود
    if(g_race_ref_mtc_up > 0.0)
    {
       const string rname = "MTC_UP_REF_"+tag;
+
+      // بساز/تنظیم کن
       if(ObjectFind(0, rname) == -1)
          ObjectCreate(0, rname, OBJ_HLINE, 0, 0, g_race_ref_mtc_up);
       ObjectSetInteger(0, rname, OBJPROP_COLOR, clrWhite);
       ObjectSetInteger(0, rname, OBJPROP_WIDTH, 1);
       ObjectSetInteger(0, rname, OBJPROP_STYLE, STYLE_SOLID);
+
+      // فقط آخرین خط مرجع: همه‌ی MTC_*_REF_* به‌جز rname پاک شوند
+      for(int oi=ObjectsTotal(0)-1; oi>=0; --oi)
+      {
+         string on = ObjectName(0, oi);
+         if(on == "" || on == rname) continue;
+
+         bool isRef = (StringFind(on, "MTC_UP_REF_") == 0) || (StringFind(on, "MTC_DN_REF_") == 0);
+         if(isRef) ObjectDelete(0, on);
+      }
    }
 }
 
