@@ -66,7 +66,7 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
 {
    const int tfsec = PeriodSeconds(tf);
 
-   const int HISTORY_SKIP_BARS = 3;
+   const int HISTORY_SKIP_BARS = 0;
    datetime effective_start = from_time + (HISTORY_SKIP_BARS * tfsec);
    datetime from_adj = from_time - tfsec*10;
 
@@ -177,7 +177,7 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
             Race_OnBar_DOWN(rates, insideHL, bodyLowEff, bodyHighEff, n, j);
             HW_BB_DOWN_OnBar(rates[j],rates, n, j);
 
-            //if(insideHL[j]) continue;
+            if(insideHL[j]) continue;
 
             // wick escalation (DOWN)
             if(!breakAchieved)

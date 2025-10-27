@@ -65,7 +65,7 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
 {
    const int tfsec = PeriodSeconds(tf);
 
-   const int HISTORY_SKIP_BARS = 3;
+   const int HISTORY_SKIP_BARS = 0;
    datetime effective_start = from_time + (HISTORY_SKIP_BARS * tfsec);
    datetime from_adj = from_time - tfsec*10;
 
@@ -177,7 +177,7 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
             Race_OnBar_UP(rates, insideHL, bodyLowEff, bodyHighEff, n, j);
             HW_BB_UP_OnBar(rates[j],rates, n, j);
 
-            //if(insideHL[j]) continue;
+            if(insideHL[j]) continue;
 
             // ?????? ??? ???? ?? ??? (?? ?? ????)
             if(!breakAchieved)

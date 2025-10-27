@@ -28,7 +28,7 @@ bool Boot_FindFirstPair_UP(const string sym, const ENUM_TIMEFRAMES tf,
    out_bodyBreakIdx = -1; out_bodyBreakTime = 0;
 
    const int tfsec = PeriodSeconds(tf);
-   const int HISTORY_SKIP_BARS = 3;
+   const int HISTORY_SKIP_BARS = 0;
    datetime effective_start = from_time + (HISTORY_SKIP_BARS * tfsec);
    datetime from_adj = from_time - tfsec*10;
 
@@ -217,7 +217,7 @@ bool Boot_FindFirstPair_DOWN(const string sym, const ENUM_TIMEFRAMES tf,
    out_bodyBreakIdx = -1; out_bodyBreakTime = 0;
 
    const int tfsec = PeriodSeconds(tf);
-   const int HISTORY_SKIP_BARS = 3;
+   const int HISTORY_SKIP_BARS = 0;
    datetime effective_start = from_time + (HISTORY_SKIP_BARS * tfsec);
    datetime from_adj = from_time - tfsec*10;
 

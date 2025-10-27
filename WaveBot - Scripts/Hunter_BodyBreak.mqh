@@ -8,15 +8,6 @@
 #include <WaveBot/Hunter_Down.mqh>  // برای دسترسی به SW_DOWN_Seed*
 #include <WaveBot/RaceCoordinator.mqh>
 
-// ============================================================================
-// هدف: تنها «کندل بدنه‌شکن» نسبت به ext lq را بعد از یک Hunter معتبر نشان بدهیم.
-// منطق ارتقای سطح (wick escalation):
-//  - اگر ابتدا عبور با شدو رخ دهد و کلوز آن‌طرفِ سطح نباشد، سطح ← کمترین Low (UP)
-//    یا بیشترین High (DOWN) همان عبور؛ سپس تا اولین کلوز فراتر از سطحِ ارتقایافته
-//    صبر می‌کنیم و همان کندل را نمایش می‌دهیم.
-//  - برای هر ext lq فقط یک‌بار مارک می‌زنیم (first-pass per LQ).
-// ============================================================================
-
 // -------------------- UP state --------------------
 static datetime g_bb_lq_time_u   = 0;    // ext lq فعال (زمان)
 static bool     g_bb_done_u      = false;// آیا برای این LQ مارک زده‌ایم؟
@@ -61,18 +52,15 @@ inline void HW_BB_DOWN_ResetIfNewLQ()
 }
 
 // --------------------------- UP: OnBar ---------------------------
-// شرط نمایش در مود صعودی: «کلوز زیر سطح (ext lq یا سطحِ ارتقایافته)»
-// با رعایت: تنها بعد از Hunter معتبر (از بذر SW-UP استفاده می‌کنیم).
 inline void HW_BB_UP_OnBar(const MqlRates &r, const MqlRates &rates[], const int n, const int j)
 {
-   if(Race_IsLocked()) return; // تا تعیین برنده، HWBB جدید ممنوع
-   if(!ExtLQ_Has()) return;
+   if(Race_IsLocked()) return;
+   if(!ExtLQ_Has())    return;
 
-   // اگر ext lq تازه شده، ریست محلی
    HW_BB_UP_ResetIfNewLQ();
    if(g_bb_done_u) return;
 
-   // بازوگذاری تنها پس از Hunter معتبر (از Seed زمان کراس استفاده می‌کنیم)
+   // arm only after a valid Hunter (we read seed time/level from SW_UP seed)
    if(!g_bb_armed_u)
    {
       if(SW_UP_SeedActive() && SW_UP_SeedTime() >= g_bb_lq_time_u)
@@ -84,41 +72,49 @@ inline void HW_BB_UP_OnBar(const MqlRates &r, const MqlRates &rates[], const int
       else return;
    }
 
-   // فقط از زمان کراس هانتر به بعد پایش می‌کنیم
    if(r.time < g_bb_cross_time_u) return;
 
-   // 1) اگر کلوز زیر سطحِ جاری است ⇒ همان کندل مطلوب ماست
+   // 1) BODY close below (level may have been escalated by previous wicks)
    if(r.close < g_bb_level_u)
    {
       ++g_bb_counter_u;
       if(InpDrawMarkers) MarkV("HWBB_U_"+IntegerToString(g_bb_counter_u), r.time, clrRoyalBlue);
-      // قبل از شروع مسابقه، Highِ C1ِ Hunter(UP) را به‌عنوان مرجعِ احتمالی mtc_down ثبت کن
+
+      // set ref for POSSIBLE MTC_DOWN (High of Hunter-UP C1) + draw ref history now
       Race_SetRefLevelForMTC_Down(SW_UP_Level());
-      // نمایش فوری تاریخچه‌ی مرجع (برای MTC_DOWN) در همان لحظه‌ی ایجاد
-      Race_DrawRefHistory_Down(SW_UP_Level(), r.time);
-      // --- شروع مسابقه از همین کندل HWBB (Mode=UP)
+      //Race_DrawRefHistory_Down(SW_UP_Level(), r.time);
+
+      // start race from this bar (Mode=UP)
       Race_Start_UP(rates, n, j);
+
+      // ---------------- SPECIAL CASE: active ref-up broken by THIS body close ----------------
+      // The currently active reference must be UP (latest MTC was UP) and now is body-broken.
+      if(Race_RefUp_IsActive() && r.close < Race_ActiveRef_Up())
+      {
+         // immediate Path-B win with MTC_DOWN on this same candle
+         Race_SpecialRefBreak_MTC_Down(rates, n, j);
+         g_bb_done_u  = true;
+         g_bb_armed_u = false;
+         return;
+      }
+      // ---------------------------------------------------------------------------------------
+
       g_bb_done_u  = true;
       g_bb_armed_u = false;
       return;
    }
 
-   // 2) اگر عبور فقط با شدو رخ داد ⇒ ارتقای سطح (wick escalation)
+   // 2) wick-only pass ⇒ escalate level until we see the first body close beyond it
    if(r.low < g_bb_level_u)
-   {
-      g_bb_level_u = r.low; // ارتقا به Low عبور
-   }
+      g_bb_level_u = r.low;
 }
 
 // -------------------------- DOWN: OnBar --------------------------
-// شرط نمایش در مود نزولی: «کلوز بالای سطح (ext lq یا سطحِ ارتقایافته)»
-// با رعایت: تنها بعد از Hunter معتبر (از Seed زمان کراس استفاده می‌کنیم).
 inline void HW_BB_DOWN_OnBar(const MqlRates &r, const MqlRates &rates[], const int n, const int j)
 {
-   if(Race_IsLocked()) return; // تا تعیین برنده، HWBB جدید ممنوع
+   if(Race_IsLocked()) return;
    if(!ExtLQ_Down_Has()) return;
 
-   // اگر ext lq تازه شده، ریست محلی
    HW_BB_DOWN_ResetIfNewLQ();
    if(g_bb_done_d) return;
 
@@ -139,21 +135,31 @@ inline void HW_BB_DOWN_OnBar(const MqlRates &r, const MqlRates &rates[], const i
    {
       ++g_bb_counter_d;
       if(InpDrawMarkers) MarkV("HWBB_D_"+IntegerToString(g_bb_counter_d), r.time, clrDarkOrange);
-      // قبل از شروع مسابقه، Lowِ C1ِ Hunter(DOWN) را به‌عنوان مرجعِ احتمالی mtc_up ثبت کن
+
+      // set ref for POSSIBLE MTC_UP (Low of Hunter-DOWN C1) + draw ref history now
       Race_SetRefLevelForMTC_Up(SW_DOWN_Level());
-      // نمایش فوری تاریخچه‌ی مرجع (برای MTC_UP) در همان لحظه‌ی ایجاد
-      Race_DrawRefHistory_Up(SW_DOWN_Level(), r.time);
-      // --- شروع مسابقه از همین کندل HWBB (Mode=DOWN)
+      //Race_DrawRefHistory_Up(SW_DOWN_Level(), r.time);
+
+      // start race from this bar (Mode=DOWN)
       Race_Start_DOWN(rates, n, j);
+
+      // ---------------- SPECIAL CASE: active ref-down broken by THIS body close --------------
+      if(Race_RefDown_IsActive() && r.close > Race_ActiveRef_Down())
+      {
+         Race_SpecialRefBreak_MTC_Up(rates, n, j);
+         g_bb_done_d  = true;
+         g_bb_armed_d = false;
+         return;
+      }
+      // ---------------------------------------------------------------------------------------
+
       g_bb_done_d  = true;
       g_bb_armed_d = false;
       return;
    }
 
    if(r.high > g_bb_level_d)
-   {
-      g_bb_level_d = r.high; // ارتقا به High عبور
-   }
+      g_bb_level_d = r.high;
 }
 
 #endif // WAVEBOT_HUNTER_BODYBREAK_MQH

@@ -1,8 +1,3 @@
-//+------------------------------------------------------------------+
-//| WaveBot - RaceCoordinator                                        |
-//| پس از نمایش HWBB: قفل مسابقه + پایش دو مسیر A/B تا تعیین برنده |
-//| مسیر A (تداوم): SW هم‌جهت  /  مسیر B (چرخش): W2→W3 خلاف‌جهت     |
-//+------------------------------------------------------------------+
 #ifndef WAVEBOT_RACECOORDINATOR_MQH
 #define WAVEBOT_RACECOORDINATOR_MQH
 
@@ -15,6 +10,7 @@
 #include <WaveBot/Wave2_Down.mqh>     // DOWN W2
 #include <WaveBot/Wave3_Down.mqh>     // DOWN W3
 #include <WaveBot/W2W3_ChainInvalidation.mqh>
+#include <WaveBot/C1W2Gate.mqh>
 
 //------------------------------ وضعیت کلی مسابقه ------------------------------
 static bool      g_race_locked       = false;
@@ -31,6 +27,34 @@ static double   g_race_ref_mtc_down = 0.0;  // mtc_down ⇒ Highِ C1ِ Hunter(U
 // -----[ Reference History (draw immediately when created) ]-----
 static int g_ref_hist_up_counter   = 0;
 static int g_ref_hist_down_counter = 0;
+
+// --- Active reference tracking (the "currently active ref" is the one from the latest MTC) ---
+static double   g_active_ref_up        = 0.0;
+static datetime g_active_ref_up_time   = 0;
+static double   g_active_ref_down      = 0.0;
+static datetime g_active_ref_down_time = 0;
+
+// setters: called when an MTC_* is finalized (ref becomes the new active one)
+inline void Race_ActivateRef_Up(const double price, const datetime t)
+{
+   if(price <= 0.0) return;
+   g_active_ref_up      = price;
+   g_active_ref_up_time = t;
+}
+inline void Race_ActivateRef_Down(const double price, const datetime t)
+{
+   if(price <= 0.0) return;
+   g_active_ref_down      = price;
+   g_active_ref_down_time = t;
+}
+
+// which ref is currently active? (latest timestamp wins)
+inline bool Race_RefUp_IsActive()   { return (g_active_ref_up_time   > g_active_ref_down_time) && (g_active_ref_up   > 0.0); }
+inline bool Race_RefDown_IsActive() { return (g_active_ref_down_time > g_active_ref_up_time)   && (g_active_ref_down > 0.0); }
+
+// getters for checks
+inline double Race_ActiveRef_Up()   { return g_active_ref_up; }
+inline double Race_ActiveRef_Down() { return g_active_ref_down; }
 
 // رسم فوری تاریخچه‌ی مرجع برای MTC_UP (مرجع از سمت DOWN می‌آید)
 inline void Race_DrawRefHistory_Up(const double price, const datetime t)
@@ -80,7 +104,7 @@ struct RacePathBState
 {
    bool     init;
    int      state;            // R_SEARCH_W2 / R_WAIT_CONFIRM
-   int      idx;              // نشانگر پیشروی محلی
+   int      idx;
 
    // W2 جاری
    int      c1,c2,c3,c4,cend;
@@ -100,10 +124,14 @@ struct RacePathBState
    double   bodyBreakLevel;
    bool     breakAchieved;
    int      bodyBreakIdx;
-   
-   // --- NEW: MTC candidate tracking (mirrored for both directions)
-   int      mtc_c1_cand;     // current C1 candidate index (starts at HWBB)
-   double   mtc_c1_level;    // invalidation level: LOW for DOWN-scan, HIGH for UP-scan
+
+   // --- MTC candidate tracking (از HWBB)
+   int      mtc_c1_cand;
+   double   mtc_c1_level;
+
+   // --- NEW: Guard پس از body-break: قفل C1_W3
+   bool     postBreak_c1_lock;   // آیا C1_W3 قفل شده؟
+   int      postBreak_c1_ref;    // مرجع C1_W3 پس از body-break
 };
 
 static RacePathBState g_pb_up;    // وقتی Mode=UP است (مسیر B = اسکن DOWN)
@@ -119,6 +147,8 @@ inline void Race_ResetPathB(RacePathBState &S)
    S.bodyBreakLevel=0.0; S.breakAchieved=false; S.bodyBreakIdx=-1;
    S.mtc_c1_cand = -1;
    S.mtc_c1_level = 0.0;
+   S.postBreak_c1_lock = false;
+   S.postBreak_c1_ref  = -1;
 }
 
 inline void Race_InternalClearAll()
@@ -241,49 +271,62 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
    RacePathBState S = g_pb_up;
    if(!S.init) return;
 
-   // از نقطهٔ HWBB به بعد
    int limit = MathMin(upto_j, n-1);
    while(S.idx <= limit)
    {
       if(S.state==R_SEARCH_W2)
       {
          bool found=false;
-         // --- NEW: candidate update (any wick/body break DOWN invalidates prior candidate)
-         if(S.mtc_c1_cand >= 0) // initialized from HWBB
+
+         // NEW: بروزرسانی کاندید MTC (هر شکست نزولی wick/body ⇒ ری‌انکر)
+         if(S.mtc_c1_cand >= 0)
          {
             if( (rates[upto_j].low < S.mtc_c1_level) || (rates[upto_j].close < S.mtc_c1_level) )
             {
                S.mtc_c1_cand = upto_j;
                S.mtc_c1_level = rates[upto_j].low;
-               S.idx = S.mtc_c1_cand;  // move search pointer to the new candidate
+               S.idx = S.mtc_c1_cand;
             }
          }
+
          for(int i=S.idx; i<=limit; ++i)
          {
-            // --- NEW: allow scanning only at the current candidate index
+            // فقط در ایندکس کاندید بررسی کن
             if(S.mtc_c1_cand >= 0 && i != S.mtc_c1_cand) { continue; }
 
             if(insideHL[i]) continue;
 
-            int i2=-1,i3=-1,i4=-1;
-            if(!CheckWave2_FromIndex_LocalOnly_Down(rates, insideHL, bodyLowEff, bodyHighEff, n, i, i2, i3, i4))
+            // NEW: گِیت C1W2 برای مسیر DOWN
+            bool __reanched=false;
+            if(!C1W2_DN_ShouldAllowAt(rates, i, __reanched))
                continue;
 
-            // تضمین شروع از خود HWBB (همان کُد فعلی)
-            if(i < g_race_hwbb_idx){ S.idx = (i4>=0?i4:i3)+1; continue; }
+            int i2=-1,i3=-1,i4=-1;
+            if(!CheckWave2_FromIndex_LocalOnly_Down(rates,insideHL,bodyLowEff,bodyHighEff,n,i,i2,i3,i4))
+               continue;
 
+            if(i < g_race_hwbb_idx){ S.idx=(i4>=0?i4:i3)+1; continue; }
+
+            // قفل W2 برای این سیکل ⇒ گِیت را خاموش کن
+            C1W2_DN_OnW2Locked();
+
+            // W2 یافت شد
             S.c1=i; S.c2=i2; S.c3=i3; S.c4=i4; S.cend=(S.c4>=0?S.c4:S.c3);
 
-            // ریست W3 و مدیریت‌های فعلی (بدون تغییر)
+            // ریست W3
             S.have_w3=false; S.w3_c1=-1; S.k2=S.k3=S.k4=-1; S.w3_end=-1;
             S.w3_cand=-1;   S.w3_cand_high=-DBL_MAX;
 
+            // مدیریت بریک
             S.wickActive=false; S.firstWickIdx=-1; S.wickBreakIdx=-1;
             S.bodyBreakLevel = rates[S.c1].low;
             S.breakAchieved  = false;
             S.bodyBreakIdx   = -1;
 
-            // از این‌جا به بعد وارد WAIT_CONFIRM می‌شویم
+            // قفلِ پس از بریک
+            S.postBreak_c1_lock=false;
+            S.postBreak_c1_ref =-1;
+
             S.idx=S.cend; S.state=R_WAIT_CONFIRM; found=true; break;
          }
          if(!found) break;
@@ -291,17 +334,24 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
       else // R_WAIT_CONFIRM (DOWN)
       {
          bool progressed=false;
+
          for(int j=S.idx; j<=limit; ++j)
          {
             if(insideHL[j]) continue;
 
-            // wick escalation (DOWN): ابتدا شدو، سپس اگر بدنه زیر سطح بسته شد => breakAchieved
+            // wick escalation (DOWN)
             if(!S.breakAchieved)
             {
                if(rates[j].low < S.bodyBreakLevel)
                {
                   if(rates[j].close < S.bodyBreakLevel)
-                  { S.breakAchieved = true; S.bodyBreakIdx = j; }
+                  {
+                     S.breakAchieved = true; S.bodyBreakIdx = j;
+                     // NEW: قفل C1_W3 بلافاصله پس از body-break
+                     int __c1_eff = (S.w3_c1>=0 ? S.w3_c1 : S.w3_cand);
+                     S.postBreak_c1_ref  = __c1_eff;
+                     S.postBreak_c1_lock = (__c1_eff >= 0);
+                  }
                   else
                   {
                      S.bodyBreakLevel = rates[j].low;
@@ -309,7 +359,6 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
                      {
                         S.firstWickIdx = j; S.wickBreakIdx = j; S.wickActive = true;
 
-                        // قفل C1 در مسیر ویکی: بیشترین High در [cend..firstWickIdx] بدون inside
                         int anchorC1 = IndexOfLeftmostMaxHigh_ExInside(rates, insideHL, S.cend, S.firstWickIdx);
                         S.have_w3=false; S.w3_c1 = anchorC1;
 
@@ -319,27 +368,23 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
                }
             }
 
-            // --- NEW: Chain-Invalidation (DOWN) in wick-window (pre body-break)
+            // Chain-Invalidation پیش از بریک (پنجره ویکی)
             {
-               int __rew = -1;
-               if(ChainInv_PreBody_WickWindow_DN_OnBar(
-                     rates, insideHL, n, j,
-                     S.breakAchieved, S.wickActive, S.firstWickIdx,
-                     S.w3_c1, S.w3_cand, __rew))
-               {
-                  S.idx = __rew; S.state = R_SEARCH_W2; progressed = true; break;
-               }
+               int __rew=-1;
+               if(ChainInv_PreBody_WickWindow_DN_OnBar(rates,insideHL,n,j,
+                     S.breakAchieved,S.wickActive,S.firstWickIdx,
+                     S.w3_c1,S.w3_cand,__rew))
+               { S.idx=__rew; S.state=R_SEARCH_W2; progressed=true; break; }
             }
-            
-            // NEW (pre body-break, non-wick): H > H(C1_W3) => RESET W3 از همان کندل
+
+            // RESET W3 (non-wick, pre-body): H > H(C1_W3)
             if(!S.wickActive && !S.breakAchieved)
             {
                int c1_eff = (S.w3_c1>=0 ? S.w3_c1 : S.w3_cand);
-               if(c1_eff >= 0 && rates[j].high > rates[c1_eff].high)
+               if(c1_eff>=0 && rates[j].high > rates[c1_eff].high)
                {
-                  S.have_w3=false; S.w3_end=-1; S.k2=S.k3=S.k4=-1; S.w3_c1 = -1;
-                  S.w3_cand      = j;
-                  S.w3_cand_high = rates[j].high;
+                  S.have_w3=false; S.w3_end=-1; S.k2=S.k3=S.k4=-1; S.w3_c1=-1;
+                  S.w3_cand=j; S.w3_cand_high=rates[j].high;
                   continue;
                }
             }
@@ -347,57 +392,60 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
             // مسیر مستقیم: بزرگ‌ترین High از cend به بعد
             if(!S.wickActive)
             {
-               if(j >= S.cend && (S.w3_cand < 0 || rates[j].high > S.w3_cand_high))
-               {
-                  S.w3_cand      = j;
-                  S.w3_cand_high = rates[j].high;
-                  S.have_w3      = false;
-               }
+               if(j>=S.cend && (S.w3_cand<0 || rates[j].high > S.w3_cand_high))
+               { S.w3_cand=j; S.w3_cand_high=rates[j].high; S.have_w3=false; }
             }
 
-            // انتخاب استارت شمارش W3(DOWN)
-            int startIdx = -1;
-            if(S.w3_c1  >= 0)       startIdx = S.w3_c1;     // مسیر ویکی
-            else if(S.w3_cand >= 0) startIdx = S.w3_cand;   // مسیر مستقیم
-
-            // شمارش W3 (DOWN)
-            if(!S.have_w3 && startIdx >= 0 && !insideHL[startIdx])
+            // شمارش W3(DOWN)
+            int startIdx=-1;
+            if(S.w3_c1>=0) startIdx=S.w3_c1; else if(S.w3_cand>=0) startIdx=S.w3_cand;
+            if(!S.have_w3 && startIdx>=0 && !insideHL[startIdx])
             {
-               int a2=-1,a3=-1,a4=-1, w3e=-1;
-               if(CheckWave3CountOnly_Local_Down(rates, insideHL, bodyLowEff, bodyHighEff, n,
-                                                 startIdx, a2, a3, a4, w3e))
+               int a2=-1,a3=-1,a4=-1,w3e=-1;
+               if(CheckWave3CountOnly_Local_Down(rates,insideHL,bodyLowEff,bodyHighEff,n,startIdx,a2,a3,a4,w3e))
+               { S.have_w3=true; if(S.w3_c1<0) S.w3_c1=startIdx; S.k2=a2; S.k3=a3; S.k4=a4; S.w3_end=w3e; }
+            }
+
+            // NEW: گاردِ «تغییر C1_W3» پس از body-break و قبل از تکمیل W3
+            if(S.breakAchieved && !S.have_w3)
+            {
+               int __c1_now = (S.w3_c1>=0 ? S.w3_c1 : S.w3_cand);
+               if(!S.postBreak_c1_lock && __c1_now>=0)
+               { S.postBreak_c1_ref=__c1_now; S.postBreak_c1_lock=true; }
+               else if(S.postBreak_c1_lock && __c1_now>=0 && __c1_now!=S.postBreak_c1_ref)
                {
-                  S.have_w3=true;
-                  if(S.w3_c1 < 0) S.w3_c1 = startIdx;
-                  S.k2=a2; S.k3=a3; S.k4=a4; S.w3_end=w3e;
+                  S.idx=(S.bodyBreakIdx>=0?S.bodyBreakIdx:j);
+                  S.state=R_SEARCH_W2; progressed=true; break;
                }
             }
 
-            // نهایی‌سازی: هر دو شرط لازم (شمارش W3 + بریک با بدنه)
+            // NEW: ابطال W2 پس از body-break و پیش از اتمام W3: H > H(C1_W3)
+            if(S.breakAchieved && !S.have_w3)
+            {
+               int c1_eff = (S.w3_c1>=0 ? S.w3_c1 : S.w3_cand);
+               if(c1_eff>=0 && rates[j].high > rates[c1_eff].high)
+               {
+                  S.idx=(S.bodyBreakIdx>=0?S.bodyBreakIdx:j);
+                  S.state=R_SEARCH_W2; progressed=true; break;
+               }
+            }
+
+            // نهایی‌سازی Path-B
             if(S.have_w3 && S.breakAchieved)
             {
                const datetime bt = rates[(S.bodyBreakIdx>=0?S.bodyBreakIdx:j)].time;
-               // اگر SW هم‌جهت هم در همین کندل رخ دهد، تقدم با هر کدام که زودتر ثبت شده باشد؛
-               // پیش‌فرض: اگر هم‌زمان باشد و هنوز برنده‌ای ثبت نشده باشد، مسیر B پذیرفته می‌شود.
                if(g_race_winner=="" || bt < g_race_winner_time)
                {
-                  g_race_winner="B";
-                  g_race_winner_time=bt;
-               
-                  // 1) ثبت برد مسیر B
+                  g_race_winner="B"; g_race_winner_time=bt;
                   Race_MarkWin_B(DIR_UP, bt);
-               
-                  // 2) ابتدا رسم خروجی + خط مرجع
                   Race_DrawW2W3_MTC_Down(rates, n, S);
-               
-                  // 3) سپس (اختیاری) اسکن API برای نمایش جفت دقیق
-                  const int __c1 = (S.c1>=0 ? S.c1 : g_race_hwbb_idx);
+
+                  const int __c1=(S.c1>=0?S.c1:g_race_hwbb_idx);
                   datetime __from = rates[__c1].time - (PeriodSeconds(InpTF)*5);
                   datetime __to   = TimeCurrent();
-                  if (g_race_mode == DIR_UP)
+                  if(g_race_mode==DIR_UP)
                      API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to);
-               
-                  // 4) پاکسازی داخلی
+
                   Race_InternalClearAll();
                }
                progressed=true; break;
@@ -406,7 +454,7 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
          if(!progressed) break;
       }
    }
-   g_pb_up = S;   // حفظ وضعیت به‌روز شده
+   g_pb_up = S;
 }
 
 //--------------------------- مسیر B برای Mode=DOWN (اسکن UP) -------------------
@@ -422,7 +470,8 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
       if(S.state==R_SEARCH_W2)
       {
          bool found=false;
-         // --- NEW: candidate update (any wick/body break UP invalidates prior candidate)
+
+         // NEW: بروزرسانی کاندید MTC (هر شکست صعودی wick/body ⇒ ری‌انکر)
          if(S.mtc_c1_cand >= 0)
          {
             if( (rates[upto_j].high > S.mtc_c1_level) || (rates[upto_j].close > S.mtc_c1_level) )
@@ -432,29 +481,43 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
                S.idx = S.mtc_c1_cand;
             }
          }
+
          for(int i=S.idx; i<=limit; ++i)
          {
-            // --- NEW: allow scanning only at the current candidate index
             if(S.mtc_c1_cand >= 0 && i != S.mtc_c1_cand) { continue; }
 
             if(insideHL[i]) continue;
 
+            // NEW: گِیت C1W2 برای مسیر UP
+            bool __reanched=false;
+            if(!C1W2_UP_ShouldAllowAt(rates, i, __reanched))
+               continue;
+
             int i2=-1,i3=-1,i4=-1;
-            if(!CheckWave2_FromIndex_LocalOnly(rates, insideHL, bodyLowEff, bodyHighEff, n, i, i2, i3, i4))
+            if(!CheckWave2_FromIndex_LocalOnly(rates,insideHL,bodyLowEff,bodyHighEff,n,i,i2,i3,i4))
                continue;
 
             if(i < g_race_hwbb_idx){ S.idx=(i4>=0?i4:i3)+1; continue; }
 
+            // قفل W2 ⇒ گِیت خاموش
+            C1W2_UP_OnW2Locked();
+
+            // W2 یافت شد
             S.c1=i; S.c2=i2; S.c3=i3; S.c4=i4; S.cend=(S.c4>=0?S.c4:S.c3);
 
-            // ریستِ W3/wick و… (همان کُد فعلی)
+            // ریست W3
             S.have_w3=false; S.w3_c1=-1; S.k2=S.k3=S.k4=-1; S.w3_end=-1;
             S.w3_cand=-1;   S.w3_cand_low=DBL_MAX;
 
+            // مدیریت بریک
             S.wickActive=false; S.firstWickIdx=-1; S.wickBreakIdx=-1;
             S.bodyBreakLevel = rates[S.c1].high;
             S.breakAchieved  = false;
             S.bodyBreakIdx   = -1;
+
+            // قفلِ پس از بریک
+            S.postBreak_c1_lock=false;
+            S.postBreak_c1_ref =-1;
 
             S.idx=S.cend; S.state=R_WAIT_CONFIRM; found=true; break;
          }
@@ -463,20 +526,27 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
       else // R_WAIT_CONFIRM (UP)
       {
          bool progressed=false;
+
          for(int j=S.idx; j<=limit; ++j)
          {
             if(insideHL[j]) continue;
 
-            // ارتقای سطح بریک با شدو (UP)
+            // wick escalation (UP)
             if(!S.breakAchieved)
             {
                if(rates[j].high > S.bodyBreakLevel)
                {
                   if(rates[j].close > S.bodyBreakLevel)
-                  { S.breakAchieved = true; S.bodyBreakIdx = j; }
+                  {
+                     S.breakAchieved = true; S.bodyBreakIdx = j;
+                     // NEW: قفل C1_W3 پس از body-break
+                     int __c1_eff = (S.w3_c1>=0 ? S.w3_c1 : S.w3_cand);
+                     S.postBreak_c1_ref  = __c1_eff;
+                     S.postBreak_c1_lock = (__c1_eff >= 0);
+                  }
                   else
                   {
-                     S.bodyBreakLevel = rates[j].high; // wick escalation
+                     S.bodyBreakLevel = rates[j].high;
                      if(S.firstWickIdx < 0)
                      {
                         S.firstWickIdx = j; S.wickBreakIdx = j; S.wickActive = true;
@@ -490,90 +560,84 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
                }
             }
 
-            // --- NEW: Chain-Invalidation (UP) in wick-window (pre body-break)
+            // Chain-Invalidation پیش از بریک (پنجره ویکی)
             {
-               int __rew = -1;
-               if(ChainInv_PreBody_WickWindow_UP_OnBar(
-                     rates, insideHL, n, j,
-                     S.breakAchieved, S.wickActive, S.firstWickIdx,
-                     S.w3_c1, S.w3_cand, __rew))
-               {
-                  S.idx = __rew; S.state = R_SEARCH_W2; progressed = true; break;
-               }
+               int __rew=-1;
+               if(ChainInv_PreBody_WickWindow_UP_OnBar(rates,insideHL,n,j,
+                     S.breakAchieved,S.wickActive,S.firstWickIdx,
+                     S.w3_c1,S.w3_cand,__rew))
+               { S.idx=__rew; S.state=R_SEARCH_W2; progressed=true; break; }
             }
 
-            // NEW (pre body-break, non-wick): L < L(C1_W3) => RESET W3 از همان کندل
+            // RESET W3 (non-wick, pre-body): L < L(C1_W3)
             if(!S.wickActive && !S.breakAchieved)
             {
                int c1_eff = (S.w3_c1>=0 ? S.w3_c1 : S.w3_cand);
-               if(c1_eff >= 0 && rates[j].low < rates[c1_eff].low)
+               if(c1_eff>=0 && rates[j].low < rates[c1_eff].low)
                {
-                  S.have_w3=false; S.w3_end=-1; S.k2=S.k3=S.k4=-1; S.w3_c1 = -1;
-                  S.w3_cand     = j;
-                  S.w3_cand_low = rates[j].low;
+                  S.have_w3=false; S.w3_end=-1; S.k2=S.k3=S.k4=-1; S.w3_c1=-1;
+                  S.w3_cand=j; S.w3_cand_low=rates[j].low;
                   continue;
                }
             }
 
-            // مسیر مستقیم: کم‌ترین Low از cend به بعد
+            // مسیر مستقیم: کمترین Low از cend به بعد
             if(!S.wickActive)
             {
-               if(j >= S.cend && (S.w3_cand < 0 || rates[j].low < S.w3_cand_low))
-               {
-                  S.w3_cand     = j;
-                  S.w3_cand_low = rates[j].low;
-                  S.have_w3     = false;
-               }
+               if(j>=S.cend && (S.w3_cand<0 || rates[j].low < S.w3_cand_low))
+               { S.w3_cand=j; S.w3_cand_low=rates[j].low; S.have_w3=false; }
             }
 
-            // انتخاب startIdx برای شمارش W3 (UP)
-            int startIdx = -1;
-            if(S.w3_c1  >= 0)       startIdx = S.w3_c1;     // مسیر ویکی
-            else if(S.w3_cand >= 0) startIdx = S.w3_cand;   // مسیر مستقیم
-
-            if(!S.have_w3 && startIdx >= 0 && !insideHL[startIdx])
+            // شمارش W3(UP)
+            int startIdx=-1;
+            if(S.w3_c1>=0) startIdx=S.w3_c1; else if(S.w3_cand>=0) startIdx=S.w3_cand;
+            if(!S.have_w3 && startIdx>=0 && !insideHL[startIdx])
             {
-               int a2=-1,a3=-1,a4=-1, w3e=-1;
-               if(CheckWave3CountOnly_Local(rates, insideHL, bodyLowEff, bodyHighEff, n, startIdx, a2, a3, a4, w3e))
+               int a2=-1,a3=-1,a4=-1,w3e=-1;
+               if(CheckWave3CountOnly_Local(rates,insideHL,bodyLowEff,bodyHighEff,n,startIdx,a2,a3,a4,w3e))
+               { S.have_w3=true; if(S.w3_c1<0) S.w3_c1=startIdx; S.k2=a2; S.k3=a3; S.k4=a4; S.w3_end=w3e; }
+            }
+
+            // NEW: گارد «تغییر C1_W3» پس از body-break و پیش از تکمیل W3
+            if(S.breakAchieved && !S.have_w3)
+            {
+               int __c1_now = (S.w3_c1>=0 ? S.w3_c1 : S.w3_cand);
+               if(!S.postBreak_c1_lock && __c1_now>=0)
+               { S.postBreak_c1_ref=__c1_now; S.postBreak_c1_lock=true; }
+               else if(S.postBreak_c1_lock && __c1_now>=0 && __c1_now!=S.postBreak_c1_ref)
                {
-                  S.have_w3=true;
-                  if(S.w3_c1 < 0) S.w3_c1 = startIdx;
-                  S.k2=a2; S.k3=a3; S.k4=a4; S.w3_end=w3e;
+                  S.idx=(S.bodyBreakIdx>=0?S.bodyBreakIdx:j);
+                  S.state=R_SEARCH_W2; progressed=true; break;
                }
             }
 
+            // ابطال پس از بریک (UP): L < L(C1_W3)  — (قبلاً داشتی، نگه داشته شد)
             if(S.breakAchieved && !S.have_w3)
             {
                int c1_eff = (S.w3_c1>=0 ? S.w3_c1 : S.w3_cand);
-               if(c1_eff >= 0 && rates[j].low < rates[c1_eff].low)
+               if(c1_eff>=0 && rates[j].low < rates[c1_eff].low)
                {
-                  S.idx = (S.bodyBreakIdx>=0 ? S.bodyBreakIdx : j);
-                  S.state = R_SEARCH_W2; progressed = true; break;
+                  S.idx=(S.bodyBreakIdx>=0?S.bodyBreakIdx:j);
+                  S.state=R_SEARCH_W2; progressed=true; break;
                }
             }
 
+            // نهایی‌سازی Path-B
             if(S.have_w3 && S.breakAchieved)
             {
                const datetime bt = rates[(S.bodyBreakIdx>=0?S.bodyBreakIdx:j)].time;
                if(g_race_winner=="" || bt < g_race_winner_time)
                {
-                  g_race_winner="B"; 
-                  g_race_winner_time=bt;
-               
-                  // 1) ثبت برد مسیر B
+                  g_race_winner="B"; g_race_winner_time=bt;
                   Race_MarkWin_B(DIR_DOWN, bt);
-               
-                  // 2) اول رسم کن تا state برای خط مرجع دست‌نخورده باشد
                   Race_DrawW2W3_MTC_Up(rates, n, S);
-               
-                  // 3) سپس (اختیاری) اسکن API برای نمایش جفت دقیق
-                  const int __c1 = (S.c1>=0 ? S.c1 : g_race_hwbb_idx);
+
+                  const int __c1=(S.c1>=0?S.c1:g_race_hwbb_idx);
                   datetime __from = rates[__c1].time - (PeriodSeconds(InpTF)*5);
                   datetime __to   = TimeCurrent();
-                  if (g_race_mode == DIR_DOWN)
+                  if(g_race_mode==DIR_DOWN)
                      API_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to);
-               
-                  // 4) در پایان پاکسازی داخلی
+
                   Race_InternalClearAll();
                }
                progressed=true; break;
@@ -597,38 +661,40 @@ inline void Race_DrawW2W3_MTC_Down(const MqlRates &rates[], const int n, const R
    int cend = (S.c4>=0 ? S.c4 : S.c3);
    if(cend >= 0 && cend < n) if(InpDrawMarkers) MarkV("MTC_DN_W2_CEND_"+tag, rates[cend].time, clrFireBrick);
 
-   // --- W3 (DOWN): C1..K2/K3/K4..END
+   // --- W3 (DOWN)
    if(S.w3_c1 >= 0 && S.w3_c1 < n) if(InpDrawMarkers) MarkV("MTC_DN_W3_C1_"+tag, rates[S.w3_c1].time, clrOrangeRed);
    if(S.k2    >= 0 && S.k2    < n) if(InpDrawMarkers) MarkV("MTC_DN_W3_K2_"+tag, rates[S.k2].time,    clrOrangeRed);
    if(S.k3    >= 0 && S.k3    < n) if(InpDrawMarkers) MarkV("MTC_DN_W3_K3_"+tag, rates[S.k3].time,    clrOrangeRed);
    if(S.k4    >= 0 && S.k4    < n) if(InpDrawMarkers) MarkV("MTC_DN_W3_K4_"+tag, rates[S.k4].time,    clrOrangeRed);
    if(S.w3_end>= 0 && S.w3_end< n) if(InpDrawMarkers) MarkV("MTC_DN_W3_END_"+tag,rates[S.w3_end].time,clrOrangeRed);
 
-   // --- Body-Break (DOWN): کندل بریک + خط افقی سطح بریک
+   // --- Body-Break (DOWN)
    if(S.bodyBreakIdx >= 0 && S.bodyBreakIdx < n && InpDrawMarkers)
       MarkV("MTC_DN_BB_"+tag, rates[S.bodyBreakIdx].time, clrRed);
 
-   // --- Reference (DOWN): Highِ C1ِ Hunter(UP) که HWBBِ منجر به این MTC را ساخته بود
+   // --- Reference for this MTC_DOWN
    if(g_race_ref_mtc_down > 0.0)
    {
       const string rname = "MTC_DN_REF_"+tag;
 
-      // بساز/تنظیم کن
       if(ObjectFind(0, rname) == -1)
          ObjectCreate(0, rname, OBJ_HLINE, 0, 0, g_race_ref_mtc_down);
       ObjectSetInteger(0, rname, OBJPROP_COLOR, clrWhite);
       ObjectSetInteger(0, rname, OBJPROP_WIDTH, 1);
       ObjectSetInteger(0, rname, OBJPROP_STYLE, STYLE_SOLID);
 
-      // فقط آخرین خط مرجع: همه‌ی MTC_*_REF_* به‌جز rname پاک شوند
+      // keep only the latest MTC ref on chart
       for(int oi=ObjectsTotal(0)-1; oi>=0; --oi)
       {
          string on = ObjectName(0, oi);
          if(on == "" || on == rname) continue;
-
          bool isRef = (StringFind(on, "MTC_UP_REF_") == 0) || (StringFind(on, "MTC_DN_REF_") == 0);
          if(isRef) ObjectDelete(0, on);
       }
+
+      // --- activate "current" ref for next phase logic
+      datetime tbb = (S.bodyBreakIdx>=0 && S.bodyBreakIdx<n ? rates[S.bodyBreakIdx].time : TimeCurrent());
+      Race_ActivateRef_Down(g_race_ref_mtc_down, tbb);
    }
 }
 
@@ -643,7 +709,7 @@ inline void Race_DrawW2W3_MTC_Up(const MqlRates &rates[], const int n, const Rac
    int cend = (S.c4>=0 ? S.c4 : S.c3);
    if(cend >= 0 && cend < n) if(InpDrawMarkers) MarkV("MTC_UP_W2_CEND_"+tag, rates[cend].time, clrLime);
 
-   // --- W3 (UP): C1..K2/K3/K4..END
+   // --- W3 (UP)
    if(S.w3_c1 >= 0 && S.w3_c1 < n) if(InpDrawMarkers) MarkV("MTC_UP_W3_C1_"+tag, rates[S.w3_c1].time, clrDeepSkyBlue);
    if(S.k2    >= 0 && S.k2    < n) if(InpDrawMarkers) MarkV("MTC_UP_W3_K2_"+tag, rates[S.k2].time,    clrDeepSkyBlue);
    if(S.k3    >= 0 && S.k3    < n) if(InpDrawMarkers) MarkV("MTC_UP_W3_K3_"+tag, rates[S.k3].time,    clrDeepSkyBlue);
@@ -654,28 +720,125 @@ inline void Race_DrawW2W3_MTC_Up(const MqlRates &rates[], const int n, const Rac
    if(S.bodyBreakIdx >= 0 && S.bodyBreakIdx < n && InpDrawMarkers)
       MarkV("MTC_UP_BB_"+tag, rates[S.bodyBreakIdx].time, clrBlue);
 
-   // --- Reference (UP): Lowِ C1ِ Hunter(DOWN) که HWBBِ منجر به این MTC را ساخته بود
+   // --- Reference for this MTC_UP
    if(g_race_ref_mtc_up > 0.0)
    {
       const string rname = "MTC_UP_REF_"+tag;
 
-      // بساز/تنظیم کن
       if(ObjectFind(0, rname) == -1)
          ObjectCreate(0, rname, OBJ_HLINE, 0, 0, g_race_ref_mtc_up);
       ObjectSetInteger(0, rname, OBJPROP_COLOR, clrWhite);
       ObjectSetInteger(0, rname, OBJPROP_WIDTH, 1);
       ObjectSetInteger(0, rname, OBJPROP_STYLE, STYLE_SOLID);
 
-      // فقط آخرین خط مرجع: همه‌ی MTC_*_REF_* به‌جز rname پاک شوند
+      // keep only the latest MTC ref on chart
       for(int oi=ObjectsTotal(0)-1; oi>=0; --oi)
       {
          string on = ObjectName(0, oi);
          if(on == "" || on == rname) continue;
-
          bool isRef = (StringFind(on, "MTC_UP_REF_") == 0) || (StringFind(on, "MTC_DN_REF_") == 0);
          if(isRef) ObjectDelete(0, on);
       }
+
+      // --- activate "current" ref for next phase logic
+      datetime tbb = (S.bodyBreakIdx>=0 && S.bodyBreakIdx<n ? rates[S.bodyBreakIdx].time : TimeCurrent());
+      Race_ActivateRef_Up(g_race_ref_mtc_up, tbb);
    }
+}
+
+// Draw MTC_DOWN only (special-case): just BB + REF, no W2/W3
+inline void Race_DrawMTCOnly_Down(const MqlRates &rates[], const int n, const int bodyIdx)
+{
+   const string tag = IntegerToString(g_race_counter);
+
+   if(bodyIdx >= 0 && bodyIdx < n && InpDrawMarkers)
+      MarkV("MTC_DN_BB_"+tag, rates[bodyIdx].time, clrRed);
+
+   if(g_race_ref_mtc_down > 0.0)
+   {
+      const string rname = "MTC_DN_REF_"+tag;
+      if(ObjectFind(0, rname) == -1)
+         ObjectCreate(0, rname, OBJ_HLINE, 0, 0, g_race_ref_mtc_down);
+      ObjectSetInteger(0, rname, OBJPROP_COLOR, clrWhite);
+      ObjectSetInteger(0, rname, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, rname, OBJPROP_STYLE, STYLE_SOLID);
+
+      // keep only the latest MTC ref
+      for(int oi=ObjectsTotal(0)-1; oi>=0; --oi)
+      {
+         string on = ObjectName(0, oi);
+         if(on == "" || on == rname) continue;
+         bool isRef = (StringFind(on, "MTC_UP_REF_") == 0) || (StringFind(on, "MTC_DN_REF_") == 0);
+         if(isRef) ObjectDelete(0, on);
+      }
+      Race_ActivateRef_Down(g_race_ref_mtc_down, (bodyIdx>=0 && bodyIdx<n ? rates[bodyIdx].time : TimeCurrent()));
+   }
+}
+
+// Draw MTC_UP only (special-case): just BB + REF, no W2/W3
+inline void Race_DrawMTCOnly_Up(const MqlRates &rates[], const int n, const int bodyIdx)
+{
+   const string tag = IntegerToString(g_race_counter);
+
+   if(bodyIdx >= 0 && bodyIdx < n && InpDrawMarkers)
+      MarkV("MTC_UP_BB_"+tag, rates[bodyIdx].time, clrBlue);
+
+   if(g_race_ref_mtc_up > 0.0)
+   {
+      const string rname = "MTC_UP_REF_"+tag;
+      if(ObjectFind(0, rname) == -1)
+         ObjectCreate(0, rname, OBJ_HLINE, 0, 0, g_race_ref_mtc_up);
+      ObjectSetInteger(0, rname, OBJPROP_COLOR, clrWhite);
+      ObjectSetInteger(0, rname, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, rname, OBJPROP_STYLE, STYLE_SOLID);
+
+      // keep only the latest MTC ref
+      for(int oi=ObjectsTotal(0)-1; oi>=0; --oi)
+      {
+         string on = ObjectName(0, oi);
+         if(on == "" || on == rname) continue;
+         bool isRef = (StringFind(on, "MTC_UP_REF_") == 0) || (StringFind(on, "MTC_DN_REF_") == 0);
+         if(isRef) ObjectDelete(0, on);
+      }
+      Race_ActivateRef_Up(g_race_ref_mtc_up, (bodyIdx>=0 && bodyIdx<n ? rates[bodyIdx].time : TimeCurrent()));
+   }
+}
+
+// SPECIAL: ref-up body-break by HWBB(UP) => immediate MTC_DOWN win (Path B)
+inline void Race_SpecialRefBreak_MTC_Down(const MqlRates &rates[], const int n, const int j)
+{
+   const datetime bt = (j>=0 && j<n ? rates[j].time : TimeCurrent());
+   g_race_winner      = "B";
+   g_race_winner_time = bt;
+
+   Race_MarkWin_B(DIR_UP, bt);              // output marker
+   Race_DrawMTCOnly_Down(rates, n, j);      // draw only BB + REF
+
+   // (optional) show a concise scan of the new direction
+   const int tfsec = PeriodSeconds(InpTF);
+   const datetime __from = (g_race_hwbb_idx>=0 && g_race_hwbb_idx<n ? rates[g_race_hwbb_idx].time - tfsec*5 : bt - tfsec*5);
+   const datetime __to   = TimeCurrent();
+   if(g_race_mode == DIR_UP) API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to);
+
+   Race_InternalClearAll();
+}
+
+// SPECIAL: ref-down body-break by HWBB(DOWN) => immediate MTC_UP win (Path B)
+inline void Race_SpecialRefBreak_MTC_Up(const MqlRates &rates[], const int n, const int j)
+{
+   const datetime bt = (j>=0 && j<n ? rates[j].time : TimeCurrent());
+   g_race_winner      = "B";
+   g_race_winner_time = bt;
+
+   Race_MarkWin_B(DIR_DOWN, bt);
+   Race_DrawMTCOnly_Up(rates, n, j);
+
+   const int tfsec = PeriodSeconds(InpTF);
+   const datetime __from = (g_race_hwbb_idx>=0 && g_race_hwbb_idx<n ? rates[g_race_hwbb_idx].time - tfsec*5 : bt - tfsec*5);
+   const datetime __to   = TimeCurrent();
+   if(g_race_mode == DIR_DOWN) API_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to);
+
+   Race_InternalClearAll();
 }
 
 #endif // WAVEBOT_RACECOORDINATOR_MQH
