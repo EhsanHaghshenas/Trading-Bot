@@ -209,9 +209,8 @@ inline void Race_Start_UP(const MqlRates &rates[], const int n, const int hwbb_i
    Race_ResetPathB(g_pb_up);
    g_pb_up.init=true; g_pb_up.state=R_SEARCH_W2; g_pb_up.idx = MathMax(0, hwbb_idx);
       // NEW: start C1 candidate from the HWBB bar (Mode=UP ⇒ scanning DOWN)
-   g_pb_up.mtc_c1_cand = hwbb_idx;
-   g_pb_up.mtc_c1_level = (hwbb_idx>=0 && hwbb_idx<n ? rates[hwbb_idx].low : 0.0);
-
+   g_pb_up.mtc_c1_cand = -1;
+   g_pb_up.mtc_c1_level = 0.0;
    Race_MarkStart(DIR_UP, g_race_hwbb_time);
 }
 
@@ -226,8 +225,8 @@ inline void Race_Start_DOWN(const MqlRates &rates[], const int n, const int hwbb
    Race_ResetPathB(g_pb_down);
    g_pb_down.init=true; g_pb_down.state=R_SEARCH_W2; g_pb_down.idx = MathMax(0, hwbb_idx);
       // NEW: start C1 candidate from the HWBB bar (Mode=DOWN ⇒ scanning UP)
-   g_pb_down.mtc_c1_cand = hwbb_idx;
-   g_pb_down.mtc_c1_level = (hwbb_idx>=0 && hwbb_idx<n ? rates[hwbb_idx].high : 0.0);
+   g_pb_down.mtc_c1_cand = -1;
+   g_pb_down.mtc_c1_level = 0.0;
    Race_MarkStart(DIR_DOWN, g_race_hwbb_time);
 }
 
@@ -278,7 +277,7 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
       {
          bool found=false;
 
-         // NEW: بروزرسانی کاندید MTC (هر شکست نزولی wick/body ⇒ ری‌انکر)
+         // --- Stickiness for C1_W2 (DOWN scan): re-anchor ONLY when invalidated by a new lower wick/body
          if(S.mtc_c1_cand >= 0)
          {
             if( (rates[upto_j].low < S.mtc_c1_level) || (rates[upto_j].close < S.mtc_c1_level) )
@@ -291,15 +290,7 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
 
          for(int i=S.idx; i<=limit; ++i)
          {
-            // فقط در ایندکس کاندید بررسی کن
-            if(S.mtc_c1_cand >= 0 && i != S.mtc_c1_cand) { continue; }
-
             if(insideHL[i]) continue;
-
-            // NEW: گِیت C1W2 برای مسیر DOWN
-            bool __reanched=false;
-            if(!C1W2_DN_ShouldAllowAt(rates, i, __reanched))
-               continue;
 
             int i2=-1,i3=-1,i4=-1;
             if(!CheckWave2_FromIndex_LocalOnly_Down(rates,insideHL,bodyLowEff,bodyHighEff,n,i,i2,i3,i4))
@@ -307,23 +298,20 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
 
             if(i < g_race_hwbb_idx){ S.idx=(i4>=0?i4:i3)+1; continue; }
 
-            // قفل W2 برای این سیکل ⇒ گِیت را خاموش کن
-            C1W2_DN_OnW2Locked();
-
-            // W2 یافت شد
+            // --- lock W2 context (no C1W2 gate here)
             S.c1=i; S.c2=i2; S.c3=i3; S.c4=i4; S.cend=(S.c4>=0?S.c4:S.c3);
 
-            // ریست W3
+            // reset W3 state
             S.have_w3=false; S.w3_c1=-1; S.k2=S.k3=S.k4=-1; S.w3_end=-1;
             S.w3_cand=-1;   S.w3_cand_high=-DBL_MAX;
 
-            // مدیریت بریک
+            // body-break management
             S.wickActive=false; S.firstWickIdx=-1; S.wickBreakIdx=-1;
             S.bodyBreakLevel = rates[S.c1].low;
             S.breakAchieved  = false;
             S.bodyBreakIdx   = -1;
 
-            // قفلِ پس از بریک
+            // post body-break guard
             S.postBreak_c1_lock=false;
             S.postBreak_c1_ref =-1;
 
@@ -331,7 +319,7 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
          }
          if(!found) break;
       }
-      else // R_WAIT_CONFIRM (DOWN)
+      else // ------------------------ R_WAIT_CONFIRM (DOWN counting) ------------------------
       {
          bool progressed=false;
 
@@ -339,7 +327,7 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
          {
             if(insideHL[j]) continue;
 
-            // wick escalation (DOWN)
+            // Wick escalation (DOWN)
             if(!S.breakAchieved)
             {
                if(rates[j].low < S.bodyBreakLevel)
@@ -347,7 +335,7 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
                   if(rates[j].close < S.bodyBreakLevel)
                   {
                      S.breakAchieved = true; S.bodyBreakIdx = j;
-                     // NEW: قفل C1_W3 بلافاصله پس از body-break
+                     // lock current C1_W3 reference immediately after body-break
                      int __c1_eff = (S.w3_c1>=0 ? S.w3_c1 : S.w3_cand);
                      S.postBreak_c1_ref  = __c1_eff;
                      S.postBreak_c1_lock = (__c1_eff >= 0);
@@ -358,23 +346,29 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
                      if(S.firstWickIdx < 0)
                      {
                         S.firstWickIdx = j; S.wickBreakIdx = j; S.wickActive = true;
-
                         int anchorC1 = IndexOfLeftmostMaxHigh_ExInside(rates, insideHL, S.cend, S.firstWickIdx);
                         S.have_w3=false; S.w3_c1 = anchorC1;
-
                         S.w3_cand=-1; S.w3_cand_high=-DBL_MAX;
                      }
                   }
                }
             }
 
-            // Chain-Invalidation پیش از بریک (پنجره ویکی)
+            // --- Chain-Invalidation in wick-window (pre body-break): rewind AND set new C1_W2 = firstWickIdx
             {
                int __rew=-1;
                if(ChainInv_PreBody_WickWindow_DN_OnBar(rates,insideHL,n,j,
                      S.breakAchieved,S.wickActive,S.firstWickIdx,
                      S.w3_c1,S.w3_cand,__rew))
-               { S.idx=__rew; S.state=R_SEARCH_W2; progressed=true; break; }
+               {
+                  // Re-anchor Path-B candidate exactly on the first wick-break bar
+                  S.mtc_c1_cand  = __rew;
+                  S.mtc_c1_level = rates[__rew].low;
+                  S.idx          = __rew;
+                  S.state        = R_SEARCH_W2;
+                  progressed     = true;
+                  break;
+               }
             }
 
             // RESET W3 (non-wick, pre-body): H > H(C1_W3)
@@ -389,14 +383,14 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
                }
             }
 
-            // مسیر مستقیم: بزرگ‌ترین High از cend به بعد
+            // direct path: take largest High from cend onward (unless wick-path is active)
             if(!S.wickActive)
             {
                if(j>=S.cend && (S.w3_cand<0 || rates[j].high > S.w3_cand_high))
                { S.w3_cand=j; S.w3_cand_high=rates[j].high; S.have_w3=false; }
             }
 
-            // شمارش W3(DOWN)
+            // Count W3 (DOWN)
             int startIdx=-1;
             if(S.w3_c1>=0) startIdx=S.w3_c1; else if(S.w3_cand>=0) startIdx=S.w3_cand;
             if(!S.have_w3 && startIdx>=0 && !insideHL[startIdx])
@@ -406,7 +400,7 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
                { S.have_w3=true; if(S.w3_c1<0) S.w3_c1=startIdx; S.k2=a2; S.k3=a3; S.k4=a4; S.w3_end=w3e; }
             }
 
-            // NEW: گاردِ «تغییر C1_W3» پس از body-break و قبل از تکمیل W3
+            // Guard: change of C1_W3 after body-break ⇒ invalidate W2
             if(S.breakAchieved && !S.have_w3)
             {
                int __c1_now = (S.w3_c1>=0 ? S.w3_c1 : S.w3_cand);
@@ -419,7 +413,7 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
                }
             }
 
-            // NEW: ابطال W2 پس از body-break و پیش از اتمام W3: H > H(C1_W3)
+            // Invalidate W2 after body-break but before W3 finishes: H > H(C1_W3)
             if(S.breakAchieved && !S.have_w3)
             {
                int c1_eff = (S.w3_c1>=0 ? S.w3_c1 : S.w3_cand);
@@ -430,7 +424,7 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
                }
             }
 
-            // نهایی‌سازی Path-B
+            // Finalize Path-B (MTC_DOWN)
             if(S.have_w3 && S.breakAchieved)
             {
                const datetime bt = rates[(S.bodyBreakIdx>=0?S.bodyBreakIdx:j)].time;
@@ -471,7 +465,7 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
       {
          bool found=false;
 
-         // NEW: بروزرسانی کاندید MTC (هر شکست صعودی wick/body ⇒ ری‌انکر)
+         // --- Stickiness for C1_W2 (UP scan): re-anchor ONLY when invalidated by a new higher wick/body
          if(S.mtc_c1_cand >= 0)
          {
             if( (rates[upto_j].high > S.mtc_c1_level) || (rates[upto_j].close > S.mtc_c1_level) )
@@ -484,14 +478,7 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
 
          for(int i=S.idx; i<=limit; ++i)
          {
-            if(S.mtc_c1_cand >= 0 && i != S.mtc_c1_cand) { continue; }
-
             if(insideHL[i]) continue;
-
-            // NEW: گِیت C1W2 برای مسیر UP
-            bool __reanched=false;
-            if(!C1W2_UP_ShouldAllowAt(rates, i, __reanched))
-               continue;
 
             int i2=-1,i3=-1,i4=-1;
             if(!CheckWave2_FromIndex_LocalOnly(rates,insideHL,bodyLowEff,bodyHighEff,n,i,i2,i3,i4))
@@ -499,23 +486,20 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
 
             if(i < g_race_hwbb_idx){ S.idx=(i4>=0?i4:i3)+1; continue; }
 
-            // قفل W2 ⇒ گِیت خاموش
-            C1W2_UP_OnW2Locked();
-
-            // W2 یافت شد
+            // lock W2 (no gate here)
             S.c1=i; S.c2=i2; S.c3=i3; S.c4=i4; S.cend=(S.c4>=0?S.c4:S.c3);
 
-            // ریست W3
+            // reset W3
             S.have_w3=false; S.w3_c1=-1; S.k2=S.k3=S.k4=-1; S.w3_end=-1;
             S.w3_cand=-1;   S.w3_cand_low=DBL_MAX;
 
-            // مدیریت بریک
+            // body-break management
             S.wickActive=false; S.firstWickIdx=-1; S.wickBreakIdx=-1;
             S.bodyBreakLevel = rates[S.c1].high;
             S.breakAchieved  = false;
             S.bodyBreakIdx   = -1;
 
-            // قفلِ پس از بریک
+            // post body-break guard
             S.postBreak_c1_lock=false;
             S.postBreak_c1_ref =-1;
 
@@ -523,7 +507,7 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
          }
          if(!found) break;
       }
-      else // R_WAIT_CONFIRM (UP)
+      else // ------------------------ R_WAIT_CONFIRM (UP counting) ------------------------
       {
          bool progressed=false;
 
@@ -531,7 +515,7 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
          {
             if(insideHL[j]) continue;
 
-            // wick escalation (UP)
+            // Wick escalation (UP)
             if(!S.breakAchieved)
             {
                if(rates[j].high > S.bodyBreakLevel)
@@ -539,7 +523,6 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
                   if(rates[j].close > S.bodyBreakLevel)
                   {
                      S.breakAchieved = true; S.bodyBreakIdx = j;
-                     // NEW: قفل C1_W3 پس از body-break
                      int __c1_eff = (S.w3_c1>=0 ? S.w3_c1 : S.w3_cand);
                      S.postBreak_c1_ref  = __c1_eff;
                      S.postBreak_c1_lock = (__c1_eff >= 0);
@@ -550,23 +533,28 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
                      if(S.firstWickIdx < 0)
                      {
                         S.firstWickIdx = j; S.wickBreakIdx = j; S.wickActive = true;
-
                         int anchorC1 = IndexOfLeftmostMinLow_ExInside(rates, insideHL, S.cend, S.firstWickIdx);
                         S.have_w3=false; S.w3_c1 = anchorC1;
-
                         S.w3_cand=-1; S.w3_cand_low=DBL_MAX;
                      }
                   }
                }
             }
 
-            // Chain-Invalidation پیش از بریک (پنجره ویکی)
+            // --- Chain-Invalidation in wick-window (pre body-break): rewind AND set new C1_W2 = firstWickIdx
             {
                int __rew=-1;
                if(ChainInv_PreBody_WickWindow_UP_OnBar(rates,insideHL,n,j,
                      S.breakAchieved,S.wickActive,S.firstWickIdx,
                      S.w3_c1,S.w3_cand,__rew))
-               { S.idx=__rew; S.state=R_SEARCH_W2; progressed=true; break; }
+               {
+                  S.mtc_c1_cand  = __rew;
+                  S.mtc_c1_level = rates[__rew].high;
+                  S.idx          = __rew;
+                  S.state        = R_SEARCH_W2;
+                  progressed     = true;
+                  break;
+               }
             }
 
             // RESET W3 (non-wick, pre-body): L < L(C1_W3)
@@ -581,14 +569,14 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
                }
             }
 
-            // مسیر مستقیم: کمترین Low از cend به بعد
+            // direct path: take smallest Low from cend onward
             if(!S.wickActive)
             {
                if(j>=S.cend && (S.w3_cand<0 || rates[j].low < S.w3_cand_low))
                { S.w3_cand=j; S.w3_cand_low=rates[j].low; S.have_w3=false; }
             }
 
-            // شمارش W3(UP)
+            // Count W3 (UP)
             int startIdx=-1;
             if(S.w3_c1>=0) startIdx=S.w3_c1; else if(S.w3_cand>=0) startIdx=S.w3_cand;
             if(!S.have_w3 && startIdx>=0 && !insideHL[startIdx])
@@ -598,7 +586,7 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
                { S.have_w3=true; if(S.w3_c1<0) S.w3_c1=startIdx; S.k2=a2; S.k3=a3; S.k4=a4; S.w3_end=w3e; }
             }
 
-            // NEW: گارد «تغییر C1_W3» پس از body-break و پیش از تکمیل W3
+            // Guard: change of C1_W3 after body-break ⇒ invalidate W2
             if(S.breakAchieved && !S.have_w3)
             {
                int __c1_now = (S.w3_c1>=0 ? S.w3_c1 : S.w3_cand);
@@ -611,7 +599,7 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
                }
             }
 
-            // ابطال پس از بریک (UP): L < L(C1_W3)  — (قبلاً داشتی، نگه داشته شد)
+            // Invalidate after body-break (UP): L < L(C1_W3)
             if(S.breakAchieved && !S.have_w3)
             {
                int c1_eff = (S.w3_c1>=0 ? S.w3_c1 : S.w3_cand);
@@ -622,7 +610,7 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
                }
             }
 
-            // نهایی‌سازی Path-B
+            // Finalize Path-B (MTC_UP)
             if(S.have_w3 && S.breakAchieved)
             {
                const datetime bt = rates[(S.bodyBreakIdx>=0?S.bodyBreakIdx:j)].time;
