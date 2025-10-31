@@ -156,6 +156,7 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
             breakAchieved  = false;
             bodyBreakIdx   = -1;
             C1W2_DN_OnW2Locked();
+            SWGate_DN_OnW2Locked(rates, c1);
             idx=cend; state=WAIT_CONFIRM; found=true; break;
          }
          if(!found) break;
@@ -329,6 +330,8 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
                SW_DOWN_TryMarkOnConfirmedW3(rates, n, w3_c1, bodyBreakIdx);
                // NEW: c1_w2 (DOWN) ? ?????? ??? = ???? ????? ???? W3
                C1W2_DN_Start(rates, (bodyBreakIdx>=0 ? bodyBreakIdx : idx));
+               
+               SWGate_DN_OnPairFinalized();
 
                if(InpDebugPrints)
                   Print("#",tag," Pair(DOWN) OK | W3 C1=",T(rates[w3_c1].time),

@@ -155,6 +155,7 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
             breakAchieved  = false;
             bodyBreakIdx   = -1;
             C1W2_UP_OnW2Locked();
+            SWGate_UP_OnW2Locked(rates, c1);
             idx=cend; state=WAIT_CONFIRM; found=true; break;
          }
          if(!found) break;
@@ -315,7 +316,6 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
                }
             }
 
-            // ??????????: ?? ?? ??? ???? (????? W3 + ???? ?? ????)
             if(have_w3 && breakAchieved)
             {
                if(InpDrawMarkers)
@@ -334,6 +334,8 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
                SW_UP_TryMarkOnConfirmedW3(rates, n, w3_c1, bodyBreakIdx);
                // NEW: c1_w2 (UP) ? ?????? ??? = ???? ????? ???? W3
                C1W2_UP_Start(rates, (bodyBreakIdx>=0 ? bodyBreakIdx : idx));
+               
+               SWGate_UP_OnPairFinalized();
 
                if(InpDebugPrints)
                   Print("#",tag," Pair(UP) OK | W3 C1=",T(rates[w3_c1].time),

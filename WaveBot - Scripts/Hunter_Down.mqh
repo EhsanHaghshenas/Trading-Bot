@@ -5,6 +5,7 @@
 #include <WaveBot/ExtLQ_Down.mqh>
 #include <WaveBot/Utils.mqh>
 #include <WaveBot/RaceCoordinator.mqh>
+#include <WaveBot/SWGate.mqh>
 
 // ---------------- Hunter (DOWN) state ----------------
 static int      g_hw_counter_d     = 0;
@@ -106,6 +107,12 @@ inline void SW_DOWN_TryMarkOnConfirmedW3(const MqlRates &rates[], const int n,
                                          const int w3_c1, const int bodyBreakIdx)
 {
    Race_OnSWConfirmed_DOWN(rates, n, w3_c1, bodyBreakIdx);
+   
+   if(!SWGate_DN_IsOpen()) return;
+   if(!SW_DOWN_SeedActive()) return;
+   if(w3_c1 < 0 || bodyBreakIdx < 0) return;
+   if(SW_DOWN_SeedTime() < SWGate_DN_W2Time()) return;
+
    if(!g_sw_seed_d_active) return;
    if(w3_c1 < 0 || bodyBreakIdx < 0)     return;
    if(rates[w3_c1].time < g_sw_seed_d_xtime) return;
@@ -129,6 +136,8 @@ inline void SW_DOWN_TryMarkOnConfirmedW3(const MqlRates &rates[], const int n,
 
       g_sw_seed_d_active = false; // بذر مصرف شد
    }
+   
+   SWGate_DN_OnPairFinalized();
 }
 
 #endif // WAVEBOT_HUNTER_DOWN_MQH
