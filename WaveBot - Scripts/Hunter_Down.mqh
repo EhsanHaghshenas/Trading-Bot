@@ -19,6 +19,18 @@ static datetime g_sw_seed_d_xtime  = 0;      // زمان کراس ext lq
 static double   g_sw_seed_d_level  = 0.0;    // Low(C1 هانتر)
 static int      g_sw_counter_d     = 0;
 
+// === NEW: expose C1 index/time for the last valid Hunter-DOWN seed ===
+inline int SW_DOWN_C1Index()
+{
+   return g_sw_seed_d_c1;
+}
+
+inline datetime SW_DOWN_C1Time(const MqlRates &rates[], const int n)
+{
+   int i = SW_DOWN_C1Index();
+   return (i>=0 && i<n ? rates[i].time : 0);
+}
+
 // ext lq جدید ثبت شد
 inline void Hunter_Down_OnExtLQUpdated()
 {

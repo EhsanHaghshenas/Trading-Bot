@@ -88,15 +88,23 @@ inline void HW_BB_UP_OnBar(const MqlRates &r, const MqlRates &rates[], const int
       Race_Start_UP(rates, n, j);
 
       // ---------------- SPECIAL CASE: active ref-up broken by THIS body close ----------------
-      // The currently active reference must be UP (latest MTC was UP) and now is body-broken.
       if(Race_RefUp_IsActive() && r.close < Race_ActiveRef_Up())
       {
-         // immediate Path-B win with MTC_DOWN on this same candle
+         // 1) NEW: move ext lq (DOWN) to HIGH of the 1st candle of the offending Hunter-UP
+         int      c1u   = SW_UP_C1Index();
+         datetime c1u_t = (c1u>=0 && c1u<n ? rates[c1u].time : r.time);
+         double   lq_dn = SW_UP_Level();               // High(C1 of Hunter-UP)
+         ExtLQ_Down_Set(lq_dn, c1u_t);                 // draw/update ext lq (DOWN)
+         Hunter_Down_OnExtLQUpdated();                 // reset hunter-DN state on new LQ
+      
+         // 2) announce immediate Path-B win with MTC_DOWN on this same candle
          Race_SpecialRefBreak_MTC_Down(rates, n, j);
+      
          g_bb_done_u  = true;
          g_bb_armed_u = false;
          return;
       }
+
       // ---------------------------------------------------------------------------------------
 
       g_bb_done_u  = true;
@@ -146,11 +154,21 @@ inline void HW_BB_DOWN_OnBar(const MqlRates &r, const MqlRates &rates[], const i
       // ---------------- SPECIAL CASE: active ref-down broken by THIS body close --------------
       if(Race_RefDown_IsActive() && r.close > Race_ActiveRef_Down())
       {
+         // 1) NEW: move ext lq (UP) to LOW of the 1st candle of the offending Hunter-DOWN
+         int      c1d   = SW_DOWN_C1Index();
+         datetime c1d_t = (c1d>=0 && c1d<n ? rates[c1d].time : r.time);
+         double   lq_up = SW_DOWN_Level();             // Low(C1 of Hunter-DOWN)
+         ExtLQ_Set(lq_up, c1d_t);                      // draw/update ext lq (UP)
+         Hunter_OnExtLQUpdated();                      // reset hunter-UP state on new LQ
+      
+         // 2) announce immediate Path-B win with MTC_UP on this same candle
          Race_SpecialRefBreak_MTC_Up(rates, n, j);
+      
          g_bb_done_d  = true;
          g_bb_armed_d = false;
          return;
       }
+
       // ---------------------------------------------------------------------------------------
 
       g_bb_done_d  = true;

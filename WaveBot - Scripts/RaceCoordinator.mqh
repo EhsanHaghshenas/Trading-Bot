@@ -802,11 +802,11 @@ inline void Race_SpecialRefBreak_MTC_Down(const MqlRates &rates[], const int n, 
    Race_MarkWin_B(DIR_UP, bt);              // output marker
    Race_DrawMTCOnly_Down(rates, n, j);      // draw only BB + REF
 
-   // (optional) show a concise scan of the new direction
-   const int tfsec = PeriodSeconds(InpTF);
-   const datetime __from = (g_race_hwbb_idx>=0 && g_race_hwbb_idx<n ? rates[g_race_hwbb_idx].time - tfsec*5 : bt - tfsec*5);
+   // NEW: start concise DOWN-scan exactly from the MTC_bb bar
+   const datetime __from = bt;              // ← از خودِ کندلِ BB
    const datetime __to   = TimeCurrent();
-   if(g_race_mode == DIR_UP) API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to);
+   if(g_race_mode == DIR_UP)
+      API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to);
 
    Race_InternalClearAll();
 }
@@ -821,10 +821,11 @@ inline void Race_SpecialRefBreak_MTC_Up(const MqlRates &rates[], const int n, co
    Race_MarkWin_B(DIR_DOWN, bt);
    Race_DrawMTCOnly_Up(rates, n, j);
 
-   const int tfsec = PeriodSeconds(InpTF);
-   const datetime __from = (g_race_hwbb_idx>=0 && g_race_hwbb_idx<n ? rates[g_race_hwbb_idx].time - tfsec*5 : bt - tfsec*5);
+   // NEW: start concise UP-scan exactly from the MTC_bb bar
+   const datetime __from = bt;              // ← از خودِ کندلِ BB
    const datetime __to   = TimeCurrent();
-   if(g_race_mode == DIR_DOWN) API_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to);
+   if(g_race_mode == DIR_DOWN)
+      API_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to);
 
    Race_InternalClearAll();
 }
