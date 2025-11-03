@@ -1,4 +1,3 @@
-// WaveBot/C1W2Gate.mqh
 #ifndef WAVEBOT_C1W2GATE_MQH
 #define WAVEBOT_C1W2GATE_MQH
 
@@ -72,6 +71,77 @@ inline bool C1W2_DN_ShouldAllowAt(const MqlRates &rates[], const int i, bool &re
       g_c1w2_dn_idx   = i;
       g_c1w2_dn_level = rates[i].low;
       reanchored      = true;
+      return true;
+   }
+   return false;
+}
+
+// ===== Path-B Strict Gate (after HWBB) =====
+// NOTE: "PB_DN" => Path-B while scanning DOWN (Mode=UP)
+//       "PB_UP" => Path-B while scanning UP   (Mode=DOWN)
+
+// ---- DOWN scan (Mode=UP) ----
+static bool   g_pb_dn_active = false;
+static int    g_pb_dn_idx    = -1;
+static double g_pb_dn_level  = 0.0;    // monitor: Low of locked C1
+
+inline void C1W2_PB_DN_Enable()  { g_pb_dn_active=true;  g_pb_dn_idx=-1; g_pb_dn_level=0.0; }
+inline void C1W2_PB_DN_Disable() { g_pb_dn_active=false; g_pb_dn_idx=-1; g_pb_dn_level=0.0; }
+inline void C1W2_PB_DN_OnW2Locked(){ C1W2_PB_DN_Disable(); }
+inline void C1W2_PB_DN_Reanchor(const MqlRates &rates[], const int i)
+{
+   if(i<0) return;
+   g_pb_dn_idx   = i;
+   g_pb_dn_level = rates[i].low;
+}
+
+// اجازه‌ی بررسی C1 جدید در Path-B فقط اگر «ابطال با Low/Close پایین‌تر از سطحِ C1 فعلی» رخ داده باشد
+inline bool C1W2_PB_DN_ShouldAllowAt(const MqlRates &rates[], const int i, bool &reanchored)
+{
+   reanchored=false;
+   if(!g_pb_dn_active) return true;
+
+   if(g_pb_dn_idx < 0){ g_pb_dn_idx=i; g_pb_dn_level=rates[i].low; return true; }
+   if(i==g_pb_dn_idx)  return true;
+
+   if(rates[i].low < g_pb_dn_level || rates[i].close < g_pb_dn_level)
+   {
+      g_pb_dn_idx   = i;
+      g_pb_dn_level = rates[i].low;
+      reanchored    = true;
+      return true;
+   }
+   return false;
+}
+
+// ---- UP scan (Mode=DOWN) ----
+static bool   g_pb_up_active = false;
+static int    g_pb_up_idx    = -1;
+static double g_pb_up_level  = 0.0;    // monitor: High of locked C1
+
+inline void C1W2_PB_UP_Enable()  { g_pb_up_active=true;  g_pb_up_idx=-1; g_pb_up_level=0.0; }
+inline void C1W2_PB_UP_Disable() { g_pb_up_active=false; g_pb_up_idx=-1; g_pb_up_level=0.0; }
+inline void C1W2_PB_UP_OnW2Locked(){ C1W2_PB_UP_Disable(); }
+inline void C1W2_PB_UP_Reanchor(const MqlRates &rates[], const int i)
+{
+   if(i<0) return;
+   g_pb_up_idx   = i;
+   g_pb_up_level = rates[i].high;
+}
+
+inline bool C1W2_PB_UP_ShouldAllowAt(const MqlRates &rates[], const int i, bool &reanchored)
+{
+   reanchored=false;
+   if(!g_pb_up_active) return true;
+
+   if(g_pb_up_idx < 0){ g_pb_up_idx=i; g_pb_up_level=rates[i].high; return true; }
+   if(i==g_pb_up_idx)  return true;
+
+   if(rates[i].high > g_pb_up_level || rates[i].close > g_pb_up_level)
+   {
+      g_pb_up_idx   = i;
+      g_pb_up_level = rates[i].high;
+      reanchored    = true;
       return true;
    }
    return false;
