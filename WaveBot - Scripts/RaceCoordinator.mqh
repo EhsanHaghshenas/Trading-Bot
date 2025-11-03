@@ -282,7 +282,18 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
          bool found=false;
 
          for(int i=S.idx; i<=limit; ++i)
-         {
+         {  
+            // --- SPECIAL: active ref-up body-break after HWBB (Mode=UP -> Path-B=MTC_DOWN)
+            if(Race_RefUp_IsActive() && i >= g_race_hwbb_idx)
+            {
+               if(rates[i].close < Race_ActiveRef_Up())
+               {
+                  // برنده‌ی B با MTC_DOWN (بدون نیاز به W2/W3)
+                  Race_SpecialRefBreak_MTC_Down(rates, n, i);
+                  return;   // Race_* خودش قفل را آزاد و اسکن بعدی را هندل می‌کند
+               }
+            }
+            
             // --- STRICT Path-B Gate (DOWN scan) ---
             bool __re=false;
             if(!C1W2_PB_DN_ShouldAllowAt(rates, i, __re)) continue;
@@ -326,6 +337,16 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
 
          for(int j=S.idx; j<=limit; ++j)
          {
+            // --- SPECIAL: active ref-up body-break after HWBB (Mode=UP -> Path-B=MTC_DOWN)
+            if(Race_RefUp_IsActive() && j >= g_race_hwbb_idx)
+            {
+               if(rates[j].close < Race_ActiveRef_Up())
+               {
+                  Race_SpecialRefBreak_MTC_Down(rates, n, j);
+                  return;
+               }
+            }
+
             if(insideHL[j]) continue;
 
             // Wick escalation (DOWN)
@@ -466,6 +487,16 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
 
          for(int i=S.idx; i<=limit; ++i)
          {
+            // --- SPECIAL: active ref-down body-break after HWBB (Mode=DOWN -> Path-B=MTC_UP)
+            if(Race_RefDown_IsActive() && i >= g_race_hwbb_idx)
+            {
+               if(rates[i].close > Race_ActiveRef_Down())
+               {
+                  Race_SpecialRefBreak_MTC_Up(rates, n, i);
+                  return;
+               }
+            }
+
             // --- STRICT Path-B Gate (UP scan) ---
             bool __re=false;
             if(!C1W2_PB_UP_ShouldAllowAt(rates, i, __re)) continue;
@@ -509,6 +540,16 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
 
          for(int j=S.idx; j<=limit; ++j)
          {
+            // --- SPECIAL: active ref-down body-break after HWBB (Mode=DOWN -> Path-B=MTC_UP)
+            if(Race_RefDown_IsActive() && j >= g_race_hwbb_idx)
+            {
+               if(rates[j].close > Race_ActiveRef_Down())
+               {
+                  Race_SpecialRefBreak_MTC_Up(rates, n, j);
+                  return;
+               }
+            }
+
             if(insideHL[j]) continue;
 
             // Wick escalation (UP)
@@ -789,7 +830,6 @@ inline void Race_DrawMTCOnly_Up(const MqlRates &rates[], const int n, const int 
 }
 
 // SPECIAL: ref-up body-break by HWBB(UP) => immediate MTC_DOWN win (Path B)
-// SPECIAL: ref-up body-break by HWBB(UP) => immediate MTC_DOWN win (Path B)
 inline void Race_SpecialRefBreak_MTC_Down(const MqlRates &rates[], const int n, const int j)
 {
    const datetime bt = (j>=0 && j<n ? rates[j].time : TimeCurrent());
@@ -814,7 +854,6 @@ inline void Race_SpecialRefBreak_MTC_Down(const MqlRates &rates[], const int n, 
       API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to);
 }
 
-// SPECIAL: ref-down body-break by HWBB(DOWN) => immediate MTC_UP win (Path B)
 // SPECIAL: ref-down body-break by HWBB(DOWN) => immediate MTC_UP win (Path B)
 inline void Race_SpecialRefBreak_MTC_Up(const MqlRates &rates[], const int n, const int j)
 {

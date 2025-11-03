@@ -113,7 +113,9 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
          {
             ExtLQ_OnBar(rates[i]);
             HW_BB_UP_OnBar(rates[i], rates, n, i);   // NEW (???? ???? ??? ?? ?? Seed ???? ??????)
- 
+            
+            Race_OnBar_UP(rates, insideHL, bodyLowEff, bodyHighEff, n, i);
+
             if(insideHL[i]) continue;
             
             bool __reanched = false;

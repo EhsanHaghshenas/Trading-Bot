@@ -115,6 +115,8 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
             ExtLQ_Down_OnBar(rates[i]);
             HW_BB_DOWN_OnBar(rates[i], rates, n, i);
             
+            Race_OnBar_DOWN(rates, insideHL, bodyLowEff, bodyHighEff, n, i);
+
             if(insideHL[i]) continue;
             
             bool __reanched = false;
