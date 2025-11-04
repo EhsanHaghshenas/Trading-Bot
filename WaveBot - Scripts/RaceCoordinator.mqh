@@ -11,6 +11,8 @@
 #include <WaveBot/Wave3_Down.mqh>     // DOWN W3
 #include <WaveBot/W2W3_ChainInvalidation.mqh>
 #include <WaveBot/C1W2Gate.mqh>
+#include <WaveBot/ExtLQ.mqh>
+#include <WaveBot/ExtLQ_Down.mqh>
 
 //------------------------------ وضعیت کلی مسابقه ------------------------------
 static bool      g_race_locked       = false;
@@ -836,20 +838,22 @@ inline void Race_SpecialRefBreak_MTC_Down(const MqlRates &rates[], const int n, 
    g_race_winner      = "B";
    g_race_winner_time = bt;
 
+   // 0) انتقال فوری ext lq به سمت DOWN بر مبنای ref تنظیم‌شده از HWBB(UP)
+   //    (این همان Highِ C1ِ Hunter-UP است که قبلاً با Race_SetRefLevelForMTC_Down ست شده)
+   if(g_race_ref_mtc_down > 0.0)
+      ExtLQ_Down_Set(g_race_ref_mtc_down, bt);   // <— کلید حل مشکل
+
    // 1) خروجی‌های MTC (مارکر BB + REF فعال)
    Race_MarkWin_B(DIR_UP, bt);
    Race_DrawMTCOnly_Down(rates, n, j);
 
-   // 2) خیلی مهم: قبل از اسکنِ بعدی، قفل مسابقه را باز کن تا HWBB بلاک نشود
-   Direction __prev_mode = g_race_mode;   // مود فعلی را ذخیره کن (برای تصمیم اسکن)
+   // 2) پیش از اسکن بعدی، قفل مسابقه را آزاد کن
+   Direction __prev_mode = g_race_mode;
    Race_InternalClearAll();
 
-   // 3) اسکن فشردهٔ DOWN دقیقاً از خودِ کندلِ BB
+   // 3) اسکن فشردهٔ DOWN از خود کندل BB (از همین لحظه Hunter روی ext lq جدید فعال است)
    const datetime __from = bt;
    const datetime __to   = TimeCurrent();
-
-   // در این سناریو، چون ref-up توسط HWBB(UP) شکسته شده، مسیر B = DOWN است
-   // اگر قبلاً Mode=UP بوده (سناریوی معمول)، اسکن DOWN را اجرا کن
    if(__prev_mode == DIR_UP)
       API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to);
 }
@@ -861,18 +865,21 @@ inline void Race_SpecialRefBreak_MTC_Up(const MqlRates &rates[], const int n, co
    g_race_winner      = "B";
    g_race_winner_time = bt;
 
+   // 0) انتقال فوری ext lq به سمت UP بر مبنای ref تنظیم‌شده از HWBB(DOWN)
+   if(g_race_ref_mtc_up > 0.0)
+      ExtLQ_Set(g_race_ref_mtc_up, bt);          // <— کلید حل مشکل (سمت UP)
+
    // 1) خروجی‌های MTC (مارکر BB + REF فعال)
    Race_MarkWin_B(DIR_DOWN, bt);
    Race_DrawMTCOnly_Up(rates, n, j);
 
-   // 2) قبل از اسکنِ بعدی، قفل را آزاد کن تا HWBB بلاک نشود
+   // 2) آزادسازی قفل
    Direction __prev_mode = g_race_mode;
    Race_InternalClearAll();
 
-   // 3) اسکن فشردهٔ UP از خودِ کندلِ BB
+   // 3) اسکن فشردهٔ UP از همان کندل BB
    const datetime __from = bt;
    const datetime __to   = TimeCurrent();
-
    if(__prev_mode == DIR_DOWN)
       API_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to);
 }
