@@ -1,3 +1,4 @@
+// WaveBot/ShadowBreaker.mqh
 #ifndef WAVEBOT_SHADOWBREAKER_MQH
 #define WAVEBOT_SHADOWBREAKER_MQH
 
@@ -70,13 +71,18 @@ static datetime g_sb_up_seed_time = 0;
 static double   g_sb_up_level     = 0.0;
 
 // SB/Temp/Invalidator state
-static bool     g_sb_up_sb_marked     = false; // SB رسم شده؟
-static int      g_sb_up_counter       = 0;     // شمارنده‌ی سری
-static int      g_sb_up_serial_current= 0;     // سری همین SB
-static int      g_sb_up_temp_idx      = -1;    // ایندکس temp-c1-sw
-static double   g_sb_up_temp_level    = 0.0;   // Low(temp-c1-sw)
-static bool     g_sb_up_watch_active  = false; // پایش فعال تا قبل از تأیید SW
-static bool     g_sb_up_inval_done    = false; // invalidator رسم شد؟
+static bool     g_sb_up_sb_marked      = false; // SB رسم شده؟
+static int      g_sb_up_counter        = 0;     // شمارنده‌ی سری
+static int      g_sb_up_serial_current = 0;     // سری همین SB
+static int      g_sb_up_temp_idx       = -1;    // ایندکس temp-c1-sw
+static double   g_sb_up_temp_level     = 0.0;   // Low(temp-c1-sw)
+static bool     g_sb_up_watch_active   = false; // پایش فعال تا قبل از تأیید SW
+static bool     g_sb_up_inval_done     = false; // invalidator رسم شد؟
+
+// زمان‌های هر مارکر برای «BringToFront»
+static datetime g_sb_up_time_sb    = 0;
+static datetime g_sb_up_time_temp  = 0;
+static datetime g_sb_up_time_inval = 0;
 
 inline void SB_UP_Reset()
 {
@@ -88,6 +94,7 @@ inline void SB_UP_Reset()
    g_sb_up_temp_idx     = -1;
    g_sb_up_temp_level   = 0.0;
    g_sb_up_serial_current = 0;
+   g_sb_up_time_sb = g_sb_up_time_temp = g_sb_up_time_inval = 0;
 }
 inline void SB_UP_SyncWithSeed()
 {
@@ -102,6 +109,19 @@ inline void SB_UP_SyncWithSeed()
       g_sb_up_seed_time = st;
       g_sb_up_level     = SW_UP_Level();
    }
+}
+
+// اولویت‌دهیِ سه مارکر (بازرسم در انتهای کندل)
+inline void SB_UP_BringToFront()
+{
+   if(!g_sb_up_sb_marked) return;
+   const string tag = IntegerToString(g_sb_up_serial_current);
+   if(g_sb_up_time_sb>0)
+      __SB_DrawV("SHADOW_BREAK_U_" + tag, g_sb_up_time_sb, clrGold);
+   if(g_sb_up_time_temp>0)
+      __SB_DrawTempC1("temp-c1-sw_u_" + tag, g_sb_up_time_temp);
+   if(g_sb_up_inval_done && g_sb_up_time_inval>0)
+      __SB_DrawInvalidator("invalidator_u_" + tag, g_sb_up_time_inval);
 }
 
 // نسخه‌ی دارای کانتکست: SB + temp-c1-sw + invalidator
@@ -125,13 +145,17 @@ inline void SB_UP_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
 
          // mark SB
          __SB_DrawV("SHADOW_BREAK_U_" + IntegerToString(g_sb_up_serial_current), r.time, clrGold);
+         g_sb_up_time_sb = r.time;
 
          // temp-c1-sw: کمترین Low در [cend..j]
          int from = (cend>=0 ? cend : 0); if(from>j) from=j;
          g_sb_up_temp_idx   = __SB_LeftmostMinLow_ExInside(rates, insideHL, from, j);
          g_sb_up_temp_level = (g_sb_up_temp_idx>=0 && g_sb_up_temp_idx<n ? rates[g_sb_up_temp_idx].low : 0.0);
          if(g_sb_up_temp_idx>=0 && g_sb_up_temp_idx<n)
+         {
             __SB_DrawTempC1("temp-c1-sw_u_" + IntegerToString(g_sb_up_serial_current), rates[g_sb_up_temp_idx].time);
+            g_sb_up_time_temp = rates[g_sb_up_temp_idx].time;
+         }
 
          // از حالا تا قبل از body-break پایش invalidator فعال است
          g_sb_up_watch_active = true;
@@ -153,8 +177,9 @@ inline void SB_UP_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
       if(g_sb_up_temp_idx>=0 && (r.low < g_sb_up_temp_level || r.close < g_sb_up_temp_level))
       {
          __SB_DrawInvalidator("invalidator_u_" + IntegerToString(g_sb_up_serial_current), r.time);
-         g_sb_up_inval_done   = true;
-         g_sb_up_watch_active = false;   // این سیکل تمام
+         g_sb_up_time_inval  = r.time;
+         g_sb_up_inval_done  = true;
+         g_sb_up_watch_active= false;   // این سیکل تمام
       }
    }
 }
@@ -163,13 +188,17 @@ inline void SB_UP_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
 static datetime g_sb_dn_seed_time = 0;
 static double   g_sb_dn_level     = 0.0;
 
-static bool     g_sb_dn_sb_marked     = false;
-static int      g_sb_dn_counter       = 0;
-static int      g_sb_dn_serial_current= 0;
-static int      g_sb_dn_temp_idx      = -1;
-static double   g_sb_dn_temp_level    = 0.0;   // High(temp-c1-sw)
-static bool     g_sb_dn_watch_active  = false;
-static bool     g_sb_dn_inval_done    = false;
+static bool     g_sb_dn_sb_marked      = false;
+static int      g_sb_dn_counter        = 0;
+static int      g_sb_dn_serial_current = 0;
+static int      g_sb_dn_temp_idx       = -1;
+static double   g_sb_dn_temp_level     = 0.0;   // High(temp-c1-sw)
+static bool     g_sb_dn_watch_active   = false;
+static bool     g_sb_dn_inval_done     = false;
+
+static datetime g_sb_dn_time_sb    = 0;
+static datetime g_sb_dn_time_temp  = 0;
+static datetime g_sb_dn_time_inval = 0;
 
 inline void SB_DN_Reset()
 {
@@ -181,6 +210,7 @@ inline void SB_DN_Reset()
    g_sb_dn_temp_idx     = -1;
    g_sb_dn_temp_level   = 0.0;
    g_sb_dn_serial_current = 0;
+   g_sb_dn_time_sb = g_sb_dn_time_temp = g_sb_dn_time_inval = 0;
 }
 inline void SB_DN_SyncWithSeed()
 {
@@ -194,6 +224,19 @@ inline void SB_DN_SyncWithSeed()
       g_sb_dn_seed_time = st;
       g_sb_dn_level     = SW_DOWN_Level();
    }
+}
+
+// اولویت‌دهی (بازرسم) برای DOWN
+inline void SB_DN_BringToFront()
+{
+   if(!g_sb_dn_sb_marked) return;
+   const string tag = IntegerToString(g_sb_dn_serial_current);
+   if(g_sb_dn_time_sb>0)
+      __SB_DrawV("SHADOW_BREAK_D_" + tag, g_sb_dn_time_sb, clrGold);
+   if(g_sb_dn_time_temp>0)
+      __SB_DrawTempC1("temp-c1-sw_d_" + tag, g_sb_dn_time_temp);
+   if(g_sb_dn_inval_done && g_sb_dn_time_inval>0)
+      __SB_DrawInvalidator("invalidator_d_" + tag, g_sb_dn_time_inval);
 }
 
 // نسخه‌ی دارای کانتکست: SB + temp-c1-sw + invalidator
@@ -216,12 +259,16 @@ inline void SB_DN_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
          g_sb_dn_serial_current = g_sb_dn_counter;
 
          __SB_DrawV("SHADOW_BREAK_D_" + IntegerToString(g_sb_dn_serial_current), r.time, clrGold);
+         g_sb_dn_time_sb = r.time;
 
          int from = (cend>=0 ? cend : 0); if(from>j) from=j;
          g_sb_dn_temp_idx   = __SB_LeftmostMaxHigh_ExInside(rates, insideHL, from, j);
          g_sb_dn_temp_level = (g_sb_dn_temp_idx>=0 && g_sb_dn_temp_idx<n ? rates[g_sb_dn_temp_idx].high : 0.0);
          if(g_sb_dn_temp_idx>=0 && g_sb_dn_temp_idx<n)
+         {
             __SB_DrawTempC1("temp-c1-sw_d_" + IntegerToString(g_sb_dn_serial_current), rates[g_sb_dn_temp_idx].time);
+            g_sb_dn_time_temp = rates[g_sb_dn_temp_idx].time;
+         }
 
          g_sb_dn_watch_active = true;
          g_sb_dn_inval_done   = false;
@@ -242,8 +289,9 @@ inline void SB_DN_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
       if(g_sb_dn_temp_idx>=0 && (r.high > g_sb_dn_temp_level || r.close > g_sb_dn_temp_level))
       {
          __SB_DrawInvalidator("invalidator_d_" + IntegerToString(g_sb_dn_serial_current), r.time);
-         g_sb_dn_inval_done   = true;
-         g_sb_dn_watch_active = false;
+         g_sb_dn_time_inval  = r.time;
+         g_sb_dn_inval_done  = true;
+         g_sb_dn_watch_active= false;
       }
    }
 }
