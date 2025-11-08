@@ -1,4 +1,3 @@
-// WaveBot/ShadowBreaker.mqh
 #ifndef WAVEBOT_SHADOWBREAKER_MQH
 #define WAVEBOT_SHADOWBREAKER_MQH
 
@@ -17,18 +16,26 @@ inline void __SB_DrawV(const string base, const datetime t, const color col)
    ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_DASHDOT);
    ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
 }
-
 inline void __SB_DrawTempC1(const string base, const datetime t)
 {
    const string name = __ScanPrefix() + base;
    if(ObjectFind(0, name) != -1) ObjectDelete(0, name);
    ObjectCreate(0, name, OBJ_VLINE, 0, t, 0);
-   ObjectSetInteger(0, name, OBJPROP_COLOR, clrSkyBlue); // تمایز با Gold
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clrSkyBlue);
    ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_DASH);
    ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
 }
+inline void __SB_DrawInvalidator(const string base, const datetime t)
+{
+   const string name = __ScanPrefix() + base;
+   if(ObjectFind(0, name) != -1) ObjectDelete(0, name);
+   ObjectCreate(0, name, OBJ_VLINE, 0, t, 0);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clrRed);
+   ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_SOLID);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
+}
 
-// ---------- local anchors (avoid name clash with API helpers) ----------
+// ---------- local anchors ----------
 inline int __SB_LeftmostMinLow_ExInside(const MqlRates &rates[], const bool &insideHL[],
                                         const int from, const int to)
 {
@@ -61,135 +68,183 @@ inline int __SB_LeftmostMaxHigh_ExInside(const MqlRates &rates[], const bool &in
 // ===================== UP =====================
 static datetime g_sb_up_seed_time = 0;
 static double   g_sb_up_level     = 0.0;
-static bool     g_sb_up_done      = false;
-static int      g_sb_up_counter   = 0;
+
+// SB/Temp/Invalidator state
+static bool     g_sb_up_sb_marked     = false; // SB رسم شده؟
+static int      g_sb_up_counter       = 0;     // شمارنده‌ی سری
+static int      g_sb_up_serial_current= 0;     // سری همین SB
+static int      g_sb_up_temp_idx      = -1;    // ایندکس temp-c1-sw
+static double   g_sb_up_temp_level    = 0.0;   // Low(temp-c1-sw)
+static bool     g_sb_up_watch_active  = false; // پایش فعال تا قبل از تأیید SW
+static bool     g_sb_up_inval_done    = false; // invalidator رسم شد؟
 
 inline void SB_UP_Reset()
 {
    g_sb_up_seed_time = 0;
    g_sb_up_level     = 0.0;
-   g_sb_up_done      = false;
+   g_sb_up_sb_marked = false;
+   g_sb_up_watch_active = false;
+   g_sb_up_inval_done   = false;
+   g_sb_up_temp_idx     = -1;
+   g_sb_up_temp_level   = 0.0;
+   g_sb_up_serial_current = 0;
 }
-
 inline void SB_UP_SyncWithSeed()
 {
-   // نیاز به بذر SW و گیتِ باز: Hunter باید بعد از قفل W2 باشد
+   // SW باید در همان چرخه پس از قفل W2 باشد
    if(!SW_UP_SeedActive() || !SWGate_UP_IsOpen() || SW_UP_SeedTime() < SWGate_UP_W2Time())
    { SB_UP_Reset(); return; }
 
    const datetime st = SW_UP_SeedTime();
-   if(st != g_sb_up_seed_time){ g_sb_up_seed_time = st; g_sb_up_level = SW_UP_Level(); g_sb_up_done = false; }
-}
-
-// نسخه قدیمی برای سازگاری (فقط Shadow Breaker را رسم می‌کند)
-inline void SB_UP_OnBar(const MqlRates &r)
-{
-   SB_UP_SyncWithSeed();
-   if(g_sb_up_seed_time == 0 || g_sb_up_done) return;
-   if(r.time < g_sb_up_seed_time) return;
-
-   if(r.high > g_sb_up_level)
+   if(st != g_sb_up_seed_time)
    {
-      if(r.close > g_sb_up_level){ g_sb_up_done = true; return; }
-      ++g_sb_up_counter;
-      __SB_DrawV("SHADOW_BREAK_U_" + IntegerToString(g_sb_up_counter), r.time, clrGold);
-      g_sb_up_done = true;
+      SB_UP_Reset();
+      g_sb_up_seed_time = st;
+      g_sb_up_level     = SW_UP_Level();
    }
 }
 
-// نسخهٔ دارای کانتکست: همراه با Shadow Breaker، temp-c1-sw را هم نشان می‌دهد
+// نسخه‌ی دارای کانتکست: SB + temp-c1-sw + invalidator
 inline void SB_UP_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
                            const int n, const int cend, const int j)
 {
    SB_UP_SyncWithSeed();
-   if(g_sb_up_seed_time == 0 || g_sb_up_done) return;
+   if(g_sb_up_seed_time == 0) return;
    if(j<0 || j>=n) return;
    const MqlRates r = rates[j];
    if(r.time < g_sb_up_seed_time) return;
 
-   if(r.high > g_sb_up_level)
+   // 1) اگر هنوز SB نداریم: شناسایی SB (wick-only)
+   if(!g_sb_up_sb_marked)
    {
-      if(r.close > g_sb_up_level){ g_sb_up_done = true; return; }
+      if(r.high > g_sb_up_level && r.close <= g_sb_up_level)
+      {
+         ++g_sb_up_counter;
+         g_sb_up_sb_marked      = true;
+         g_sb_up_serial_current = g_sb_up_counter;
 
-      ++g_sb_up_counter;
-      // 1) Shadow Breaker
-      __SB_DrawV("SHADOW_BREAK_U_" + IntegerToString(g_sb_up_counter), r.time, clrGold);
+         // mark SB
+         __SB_DrawV("SHADOW_BREAK_U_" + IntegerToString(g_sb_up_serial_current), r.time, clrGold);
 
-      // 2) temp-c1-sw (کمترین Low از [cend..j] با اسکیپ inside)
-      int from = (cend>=0 ? cend : 0);
-      if(from > j) from = j;
-      int c1idx = __SB_LeftmostMinLow_ExInside(rates, insideHL, from, j);
-      if(c1idx>=0 && c1idx<n)
-         __SB_DrawTempC1("temp-c1-sw_u_" + IntegerToString(g_sb_up_counter), rates[c1idx].time);
+         // temp-c1-sw: کمترین Low در [cend..j]
+         int from = (cend>=0 ? cend : 0); if(from>j) from=j;
+         g_sb_up_temp_idx   = __SB_LeftmostMinLow_ExInside(rates, insideHL, from, j);
+         g_sb_up_temp_level = (g_sb_up_temp_idx>=0 && g_sb_up_temp_idx<n ? rates[g_sb_up_temp_idx].low : 0.0);
+         if(g_sb_up_temp_idx>=0 && g_sb_up_temp_idx<n)
+            __SB_DrawTempC1("temp-c1-sw_u_" + IntegerToString(g_sb_up_serial_current), rates[g_sb_up_temp_idx].time);
 
-      g_sb_up_done = true;
+         // از حالا تا قبل از body-break پایش invalidator فعال است
+         g_sb_up_watch_active = true;
+         g_sb_up_inval_done   = false;
+      }
+      return;
+   }
+
+   // 2) اگر SB داریم و هنوز SW تایید نشده، پایش invalidator
+   if(g_sb_up_watch_active && !g_sb_up_inval_done)
+   {
+      // الف) تأیید SW با بدنه (close > level) ⇒ پایش متوقف
+      if(r.close > g_sb_up_level)
+      {
+         g_sb_up_watch_active = false;
+         return;
+      }
+      // ب) ابطال temp-c1-sw (wick/body زیر Low(temp)) ⇒ invalidator
+      if(g_sb_up_temp_idx>=0 && (r.low < g_sb_up_temp_level || r.close < g_sb_up_temp_level))
+      {
+         __SB_DrawInvalidator("invalidator_u_" + IntegerToString(g_sb_up_serial_current), r.time);
+         g_sb_up_inval_done   = true;
+         g_sb_up_watch_active = false;   // این سیکل تمام
+      }
    }
 }
 
 // ===================== DOWN =====================
 static datetime g_sb_dn_seed_time = 0;
 static double   g_sb_dn_level     = 0.0;
-static bool     g_sb_dn_done      = false;
-static int      g_sb_dn_counter   = 0;
+
+static bool     g_sb_dn_sb_marked     = false;
+static int      g_sb_dn_counter       = 0;
+static int      g_sb_dn_serial_current= 0;
+static int      g_sb_dn_temp_idx      = -1;
+static double   g_sb_dn_temp_level    = 0.0;   // High(temp-c1-sw)
+static bool     g_sb_dn_watch_active  = false;
+static bool     g_sb_dn_inval_done    = false;
 
 inline void SB_DN_Reset()
 {
    g_sb_dn_seed_time = 0;
    g_sb_dn_level     = 0.0;
-   g_sb_dn_done      = false;
+   g_sb_dn_sb_marked = false;
+   g_sb_dn_watch_active = false;
+   g_sb_dn_inval_done   = false;
+   g_sb_dn_temp_idx     = -1;
+   g_sb_dn_temp_level   = 0.0;
+   g_sb_dn_serial_current = 0;
 }
-
 inline void SB_DN_SyncWithSeed()
 {
    if(!SW_DOWN_SeedActive() || !SWGate_DN_IsOpen() || SW_DOWN_SeedTime() < SWGate_DN_W2Time())
    { SB_DN_Reset(); return; }
 
    const datetime st = SW_DOWN_SeedTime();
-   if(st != g_sb_dn_seed_time){ g_sb_dn_seed_time = st; g_sb_dn_level = SW_DOWN_Level(); g_sb_dn_done = false; }
-}
-
-// نسخه قدیمی برای سازگاری
-inline void SB_DN_OnBar(const MqlRates &r)
-{
-   SB_DN_SyncWithSeed();
-   if(g_sb_dn_seed_time == 0 || g_sb_dn_done) return;
-   if(r.time < g_sb_dn_seed_time) return;
-
-   if(r.low < g_sb_dn_level)
+   if(st != g_sb_dn_seed_time)
    {
-      if(r.close < g_sb_dn_level){ g_sb_dn_done = true; return; }
-      ++g_sb_dn_counter;
-      __SB_DrawV("SHADOW_BREAK_D_" + IntegerToString(g_sb_dn_counter), r.time, clrGold);
-      g_sb_dn_done = true;
+      SB_DN_Reset();
+      g_sb_dn_seed_time = st;
+      g_sb_dn_level     = SW_DOWN_Level();
    }
 }
 
-// نسخهٔ دارای کانتکست: همراه با Shadow Breaker، temp-c1-sw را هم نشان می‌دهد
+// نسخه‌ی دارای کانتکست: SB + temp-c1-sw + invalidator
 inline void SB_DN_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
                            const int n, const int cend, const int j)
 {
    SB_DN_SyncWithSeed();
-   if(g_sb_dn_seed_time == 0 || g_sb_dn_done) return;
+   if(g_sb_dn_seed_time == 0) return;
    if(j<0 || j>=n) return;
    const MqlRates r = rates[j];
    if(r.time < g_sb_dn_seed_time) return;
 
-   if(r.low < g_sb_dn_level)
+   // 1) اگر هنوز SB نداریم: شناسایی SB (wick-only)
+   if(!g_sb_dn_sb_marked)
    {
-      if(r.close < g_sb_dn_level){ g_sb_dn_done = true; return; }
+      if(r.low < g_sb_dn_level && r.close >= g_sb_dn_level)
+      {
+         ++g_sb_dn_counter;
+         g_sb_dn_sb_marked      = true;
+         g_sb_dn_serial_current = g_sb_dn_counter;
 
-      ++g_sb_dn_counter;
-      // 1) Shadow Breaker
-      __SB_DrawV("SHADOW_BREAK_D_" + IntegerToString(g_sb_dn_counter), r.time, clrGold);
+         __SB_DrawV("SHADOW_BREAK_D_" + IntegerToString(g_sb_dn_serial_current), r.time, clrGold);
 
-      // 2) temp-c1-sw (بیشترین High از [cend..j] با اسکیپ inside)
-      int from = (cend>=0 ? cend : 0);
-      if(from > j) from = j;
-      int c1idx = __SB_LeftmostMaxHigh_ExInside(rates, insideHL, from, j);
-      if(c1idx>=0 && c1idx<n)
-         __SB_DrawTempC1("temp-c1-sw_d_" + IntegerToString(g_sb_dn_counter), rates[c1idx].time);
+         int from = (cend>=0 ? cend : 0); if(from>j) from=j;
+         g_sb_dn_temp_idx   = __SB_LeftmostMaxHigh_ExInside(rates, insideHL, from, j);
+         g_sb_dn_temp_level = (g_sb_dn_temp_idx>=0 && g_sb_dn_temp_idx<n ? rates[g_sb_dn_temp_idx].high : 0.0);
+         if(g_sb_dn_temp_idx>=0 && g_sb_dn_temp_idx<n)
+            __SB_DrawTempC1("temp-c1-sw_d_" + IntegerToString(g_sb_dn_serial_current), rates[g_sb_dn_temp_idx].time);
 
-      g_sb_dn_done = true;
+         g_sb_dn_watch_active = true;
+         g_sb_dn_inval_done   = false;
+      }
+      return;
+   }
+
+   // 2) پایش invalidator تا قبل از تأیید SW
+   if(g_sb_dn_watch_active && !g_sb_dn_inval_done)
+   {
+      // الف) تأیید SW با بدنه (close < level) ⇒ توقف پایش
+      if(r.close < g_sb_dn_level)
+      {
+         g_sb_dn_watch_active = false;
+         return;
+      }
+      // ب) ابطال temp-c1-sw (wick/body بالای High(temp))
+      if(g_sb_dn_temp_idx>=0 && (r.high > g_sb_dn_temp_level || r.close > g_sb_dn_temp_level))
+      {
+         __SB_DrawInvalidator("invalidator_d_" + IntegerToString(g_sb_dn_serial_current), r.time);
+         g_sb_dn_inval_done   = true;
+         g_sb_dn_watch_active = false;
+      }
    }
 }
 
