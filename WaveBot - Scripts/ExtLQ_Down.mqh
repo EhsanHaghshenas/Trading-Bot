@@ -101,4 +101,41 @@ inline void ExtLQ_Down_OnBar(const MqlRates &r)
    }
 }
 
+// Promote previous untouched LQ (DOWN side) to be the current active one.
+inline bool ExtLQ_Down_PromotePrevToCurrent()
+{
+   int idx = ExtLQ_Down_FindLatestUntouchedIndex();
+   if(idx < 0) return false;
+
+   if(g_extD_has)
+   {
+      int sz = ArraySize(g_histD);
+      ArrayResize(g_histD, sz+1);
+      g_histD[sz].price  = g_extD_price;
+      g_histD[sz].t      = g_extD_time;
+      g_histD[sz].broken = true;
+   }
+
+   g_extD_has   = true;
+   g_extD_price = g_histD[idx].price;
+   g_extD_time  = g_histD[idx].t;
+
+   if(InpDrawExtLQ)
+      ExtLQ_Down_DrawLine(EXTLQ_D_LINE_CURR, g_extD_price, InpExtLQColor, STYLE_SOLID);
+
+   // prev قدیمی‌ترِ دست‌نخورده
+   int new_prev = -1;
+   for(int i=idx-1; i>=0; --i)
+      if(!g_histD[i].broken){ new_prev=i; break; }
+
+   if(new_prev != g_prev_idxD)
+   {
+      if(g_prev_idxD>=0) ExtLQ_Down_DeleteLine(EXTLQ_D_LINE_PREV);
+      g_prev_idxD = new_prev;
+      if(g_prev_idxD>=0 && InpDrawExtLQ)
+         ExtLQ_Down_DrawLine(EXTLQ_D_LINE_PREV, g_histD[g_prev_idxD].price, clrViolet, STYLE_DOT);
+   }
+   return true;
+}
+
 #endif // WAVEBOT_EXTLQ_DOWN_MQH

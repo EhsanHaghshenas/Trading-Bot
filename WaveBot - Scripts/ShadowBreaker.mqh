@@ -181,8 +181,13 @@ inline void SB_UP_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
          g_sb_up_inval_done  = true;
          g_sb_up_watch_active= false;   // این سیکل تمام
       }
-   }
+   }   
 }
+
+// === Query helpers for external modules (UP) ===
+inline bool     SB_UP_InvalidatorReady(){ return g_sb_up_inval_done; }
+inline datetime SB_UP_SBTime()          { return g_sb_up_time_sb;    }
+inline void     SB_UP_ClearCycle()      { SB_UP_Reset();             }
 
 // ===================== DOWN =====================
 static datetime g_sb_dn_seed_time = 0;
@@ -296,4 +301,8 @@ inline void SB_DN_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
    }
 }
 
+// === Query helpers for external modules (DOWN) ===
+inline bool     SB_DN_InvalidatorReady(){ return g_sb_dn_inval_done; }
+inline datetime SB_DN_SBTime()          { return g_sb_dn_time_sb;    }
+inline void     SB_DN_ClearCycle()      { SB_DN_Reset();             }
 #endif // WAVEBOT_SHADOWBREAKER_MQH

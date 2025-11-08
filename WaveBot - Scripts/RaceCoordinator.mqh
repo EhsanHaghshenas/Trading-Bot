@@ -13,10 +13,7 @@
 #include <WaveBot/C1W2Gate.mqh>
 #include <WaveBot/ExtLQ.mqh>
 #include <WaveBot/ExtLQ_Down.mqh>
-
-// --- Forward decl for ShadowBreaker priority redraw (avoid include cycle)
-void SB_UP_BringToFront();
-void SB_DN_BringToFront();
+#include <WaveBot/ShadowBreaker.mqh>
 
 //------------------------------ وضعیت کلی مسابقه ------------------------------
 static bool      g_race_locked       = false;
