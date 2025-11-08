@@ -7,6 +7,7 @@
 #include <WaveBot/Hunter.mqh>       // برای دسترسی به SW_UP_Seed* (بذرهانتر معتبر)
 #include <WaveBot/Hunter_Down.mqh>  // برای دسترسی به SW_DOWN_Seed*
 #include <WaveBot/RaceCoordinator.mqh>
+#include <WaveBot/ShadowBreaker.mqh>   // brings SB_*_BinaryPhaseActive definitions
 
 // -------------------- UP state --------------------
 static datetime g_bb_lq_time_u   = 0;    // ext lq فعال (زمان)
@@ -56,6 +57,9 @@ inline void HW_BB_UP_OnBar(const MqlRates &r, const MqlRates &rates[], const int
 {
    if(Race_IsLocked()) return;
    if(!ExtLQ_Has())    return;
+   
+   // --- NEW: بین SB و نتیجه، Path-B ممنوع است
+   if(SB_UP_BinaryPhaseActive()) return;
 
    HW_BB_UP_ResetIfNewLQ();
    if(g_bb_done_u) return;
@@ -122,7 +126,10 @@ inline void HW_BB_DOWN_OnBar(const MqlRates &r, const MqlRates &rates[], const i
 {
    if(Race_IsLocked()) return;
    if(!ExtLQ_Down_Has()) return;
-
+   
+   // --- NEW: بین SB و نتیجه، Path-B ممنوع است
+   if(SB_DN_BinaryPhaseActive()) return;
+   
    HW_BB_DOWN_ResetIfNewLQ();
    if(g_bb_done_d) return;
 

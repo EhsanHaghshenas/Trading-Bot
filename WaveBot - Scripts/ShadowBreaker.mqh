@@ -156,6 +156,10 @@ inline void SB_UP_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
             __SB_DrawTempC1("temp-c1-sw_u_" + IntegerToString(g_sb_up_serial_current), rates[g_sb_up_temp_idx].time);
             g_sb_up_time_temp = rates[g_sb_up_temp_idx].time;
          }
+         
+         // --- NEW: از لحظه تشخیص SB ⇒ مسابقه HWBB متوقف و موج‌ها پاک‌سازی شوند
+         Race_InternalClearAll();          // توقف کامل مسابقه/Path-B (قفل و ref و ... ریست)
+         Markers_Clear_Waves_CurrentScan(); // حذف مارکرهای W2/W3/HW/HWBB/SW همین اسکن
 
          // از حالا تا قبل از body-break پایش invalidator فعال است
          g_sb_up_watch_active = true;
@@ -188,6 +192,7 @@ inline void SB_UP_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
 inline bool     SB_UP_InvalidatorReady(){ return g_sb_up_inval_done; }
 inline datetime SB_UP_SBTime()          { return g_sb_up_time_sb;    }
 inline void     SB_UP_ClearCycle()      { SB_UP_Reset();             }
+inline bool     SB_UP_BinaryPhaseActive(){ return (g_sb_up_sb_marked && g_sb_up_watch_active); }
 
 // ===================== DOWN =====================
 static datetime g_sb_dn_seed_time = 0;
@@ -274,6 +279,10 @@ inline void SB_DN_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
             __SB_DrawTempC1("temp-c1-sw_d_" + IntegerToString(g_sb_dn_serial_current), rates[g_sb_dn_temp_idx].time);
             g_sb_dn_time_temp = rates[g_sb_dn_temp_idx].time;
          }
+         
+         // --- NEW: از لحظه تشخیص SB ⇒ مسابقه HWBB متوقف و موج‌ها پاک‌سازی شوند
+         Race_InternalClearAll();
+         Markers_Clear_Waves_CurrentScan();
 
          g_sb_dn_watch_active = true;
          g_sb_dn_inval_done   = false;
@@ -305,4 +314,6 @@ inline void SB_DN_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
 inline bool     SB_DN_InvalidatorReady(){ return g_sb_dn_inval_done; }
 inline datetime SB_DN_SBTime()          { return g_sb_dn_time_sb;    }
 inline void     SB_DN_ClearCycle()      { SB_DN_Reset();             }
+inline bool     SB_DN_BinaryPhaseActive(){ return (g_sb_dn_sb_marked && g_sb_dn_watch_active); }
+
 #endif // WAVEBOT_SHADOWBREAKER_MQH
