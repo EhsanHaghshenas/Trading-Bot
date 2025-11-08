@@ -14,6 +14,10 @@
 #include <WaveBot/ExtLQ.mqh>
 #include <WaveBot/ExtLQ_Down.mqh>
 
+// --- Forward decl for ShadowBreaker priority redraw (avoid include cycle)
+void SB_UP_BringToFront();
+void SB_DN_BringToFront();
+
 //------------------------------ وضعیت کلی مسابقه ------------------------------
 static bool      g_race_locked       = false;
 static Direction g_race_mode         = DIR_UP;   // Mode لحظهٔ شروع مسابقه
@@ -722,6 +726,11 @@ inline void Race_DrawW2W3_MTC_Down(const MqlRates &rates[], const int n, const R
       // --- activate "current" ref for next phase logic
       datetime tbb = (S.bodyBreakIdx>=0 && S.bodyBreakIdx<n ? rates[S.bodyBreakIdx].time : TimeCurrent());
       Race_ActivateRef_Down(g_race_ref_mtc_down, tbb);
+      
+         // --- PRIORITY: keep ShadowBreaker markers on top even vs MTC drawing
+      SB_UP_BringToFront();
+      SB_DN_BringToFront();
+
    }
 }
 
@@ -770,6 +779,10 @@ inline void Race_DrawW2W3_MTC_Up(const MqlRates &rates[], const int n, const Rac
       // --- activate "current" ref for next phase logic
       datetime tbb = (S.bodyBreakIdx>=0 && S.bodyBreakIdx<n ? rates[S.bodyBreakIdx].time : TimeCurrent());
       Race_ActivateRef_Up(g_race_ref_mtc_up, tbb);
+      
+      SB_UP_BringToFront();
+      SB_DN_BringToFront();
+
    }
 }
 
@@ -799,6 +812,9 @@ inline void Race_DrawMTCOnly_Down(const MqlRates &rates[], const int n, const in
          if(isRef) ObjectDelete(0, on);
       }
       Race_ActivateRef_Down(g_race_ref_mtc_down, (bodyIdx>=0 && bodyIdx<n ? rates[bodyIdx].time : TimeCurrent()));
+      SB_UP_BringToFront();
+      SB_DN_BringToFront();
+
    }
 }
 
@@ -828,6 +844,9 @@ inline void Race_DrawMTCOnly_Up(const MqlRates &rates[], const int n, const int 
          if(isRef) ObjectDelete(0, on);
       }
       Race_ActivateRef_Up(g_race_ref_mtc_up, (bodyIdx>=0 && bodyIdx<n ? rates[bodyIdx].time : TimeCurrent()));
+      SB_UP_BringToFront();
+      SB_DN_BringToFront();
+
    }
 }
 
