@@ -33,7 +33,7 @@ inline void __SR_DrawRect(const string base, const datetime t1, const double p_t
    ObjectSetInteger(0, full, OBJPROP_STYLE, STYLE_SOLID);
    ObjectSetInteger(0, full, OBJPROP_WIDTH, 1);
    ObjectSetInteger(0, full, OBJPROP_BACK,  true);          // پشت کندل‌ها
-   ObjectSetInteger(0, full, OBJPROP_FILL,  true);          // پرشدگی
+   ObjectSetInteger(0, full, OBJPROP_FILL,  false);          // پرشدگی
 }
 
 // --- سناریوی صعودی: هنگام شکل‌گیری SW یا FSMS-SW ---
