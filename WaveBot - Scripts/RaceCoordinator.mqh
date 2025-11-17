@@ -14,6 +14,9 @@
 #include <WaveBot/ExtLQ.mqh>
 #include <WaveBot/ExtLQ_Down.mqh>
 #include <WaveBot/ShadowBreaker.mqh>
+#include <WaveBot/SR_Gate.mqh>     // NEW: SR direction gating after MTC
+#include <WaveBot/Hunter.mqh>      // for SW_UP_ClearSeed()
+#include <WaveBot/Hunter_Down.mqh> // for SW_DOWN_ClearSeed()
 
 //------------------------------ وضعیت کلی مسابقه ------------------------------
 static bool      g_race_locked       = false;
@@ -724,11 +727,14 @@ inline void Race_DrawW2W3_MTC_Down(const MqlRates &rates[], const int n, const R
       datetime tbb = (S.bodyBreakIdx>=0 && S.bodyBreakIdx<n ? rates[S.bodyBreakIdx].time : TimeCurrent());
       Race_ActivateRef_Down(g_race_ref_mtc_down, tbb);
       
-         // --- PRIORITY: keep ShadowBreaker markers on top even vs MTC drawing
+      // PRIORITY: keep SB markers on top
       SB_UP_BringToFront();
       SB_DN_BringToFront();
-
    }
+
+   // --- NEW: بعد از MTC_DOWN ⇒ فقط SR سمت DOWN بررسی شود + بذر SW_UP حذف شود
+   SR_AllowOnly(DIR_DOWN);
+   SW_UP_ClearSeed();
 }
 
 inline void Race_DrawW2W3_MTC_Up(const MqlRates &rates[], const int n, const RacePathBState &S)
@@ -773,14 +779,17 @@ inline void Race_DrawW2W3_MTC_Up(const MqlRates &rates[], const int n, const Rac
          if(isRef) ObjectDelete(0, on);
       }
 
-      // --- activate "current" ref for next phase logic
+      // --- activate "current" ref
       datetime tbb = (S.bodyBreakIdx>=0 && S.bodyBreakIdx<n ? rates[S.bodyBreakIdx].time : TimeCurrent());
       Race_ActivateRef_Up(g_race_ref_mtc_up, tbb);
-      
+
       SB_UP_BringToFront();
       SB_DN_BringToFront();
-
    }
+
+   // --- NEW: بعد از MTC_UP ⇒ فقط SR سمت UP بررسی شود + بذر SW_DOWN حذف شود
+   SR_AllowOnly(DIR_UP);
+   SW_DOWN_ClearSeed();
 }
 
 // Draw MTC_DOWN only (special-case): just BB + REF, no W2/W3
@@ -811,6 +820,8 @@ inline void Race_DrawMTCOnly_Down(const MqlRates &rates[], const int n, const in
       Race_ActivateRef_Down(g_race_ref_mtc_down, (bodyIdx>=0 && bodyIdx<n ? rates[bodyIdx].time : TimeCurrent()));
       SB_UP_BringToFront();
       SB_DN_BringToFront();
+      SR_AllowOnly(DIR_DOWN);
+      SW_UP_ClearSeed();
 
    }
 }
@@ -843,6 +854,8 @@ inline void Race_DrawMTCOnly_Up(const MqlRates &rates[], const int n, const int 
       Race_ActivateRef_Up(g_race_ref_mtc_up, (bodyIdx>=0 && bodyIdx<n ? rates[bodyIdx].time : TimeCurrent()));
       SB_UP_BringToFront();
       SB_DN_BringToFront();
+      SR_AllowOnly(DIR_UP);
+      SW_DOWN_ClearSeed();
 
    }
 }
@@ -866,6 +879,8 @@ inline void Race_SpecialRefBreak_MTC_Down(const MqlRates &rates[], const int n, 
    // 2) پیش از اسکن بعدی، قفل مسابقه را آزاد کن
    Direction __prev_mode = g_race_mode;
    Race_InternalClearAll();
+   SR_AllowOnly(DIR_DOWN);
+   SW_UP_ClearSeed();
 
    // 3) اسکن فشردهٔ DOWN از خود کندل BB (از همین لحظه Hunter روی ext lq جدید فعال است)
    const datetime __from = bt;
@@ -892,6 +907,8 @@ inline void Race_SpecialRefBreak_MTC_Up(const MqlRates &rates[], const int n, co
    // 2) آزادسازی قفل
    Direction __prev_mode = g_race_mode;
    Race_InternalClearAll();
+   SR_AllowOnly(DIR_UP);
+   SW_DOWN_ClearSeed();
 
    // 3) اسکن فشردهٔ UP از همان کندل BB
    const datetime __from = bt;
