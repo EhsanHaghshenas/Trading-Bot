@@ -40,6 +40,8 @@ static datetime g_active_ref_up_time   = 0;
 static double   g_active_ref_down      = 0.0;
 static datetime g_active_ref_down_time = 0;
 
+inline datetime Race_ActiveRef_Up_Time()   { return g_active_ref_up_time; }
+inline datetime Race_ActiveRef_Down_Time() { return g_active_ref_down_time; }
 // setters: called when an MTC_* is finalized (ref becomes the new active one)
 inline void Race_ActivateRef_Up(const double price, const datetime t)
 {
