@@ -52,18 +52,26 @@ inline void SR_OnBar_UP(const MqlRates &rates[], const int n, const int j, const
          const double level_top = FSMS_SW_UP_Level();       // High(C1-W2 هم‌جهت FSMS)
          if(rates[j].high > level_top)                      // شکست با شدو یا بدنه
          {
-            const int  c1_top_idx = FSMS_SW_UP_C1Index();   // اندیس همان C1-W2
-            const int  t_idx      = (c1_top_idx>=0 && c1_top_idx<n ? c1_top_idx : w3_start_idx);
-            const double p_top    = level_top;
-            const double p_bottom = rates[w3_start_idx].low; // Low(C1-FSMS-SW)
+            const int    c1_top_idx = FSMS_SW_UP_C1Index();   // اندیس همان C1-W2
+            const int    t_idx      = (c1_top_idx>=0 && c1_top_idx<n ? c1_top_idx : w3_start_idx);
+            const double p_top      = level_top;
+            const double p_bottom   = rates[w3_start_idx].low; // Low(C1-FSMS-SW)
             ++g_sr_up_counter;
 
-            __SR_DrawRect("SR_U_"+IntegerToString(g_sr_up_counter), rates[t_idx].time, p_top, rates[j].time, p_bottom);
+            __SR_DrawRect("SR_U_"+IntegerToString(g_sr_up_counter),
+                          rates[t_idx].time, p_top,
+                          rates[j].time,    p_bottom);
             g_sr_fsms_up_drawn_seed = seed_t;
 
-            // NEW: ثبت وضعیت SR برای first SR mitigator
+            // NEW: ثبت وضعیت SR برای first SR mitigator + ناحیه unmitigated SR
             const bool created_by_body = (rates[j].close > level_top);
-            SRMIT_OnNewSR_UP(g_sr_up_counter, p_top, p_bottom, rates[j].time, created_by_body);
+            SRMIT_OnNewSR_UP(g_sr_up_counter,
+                             p_top,
+                             p_bottom,
+                             rates[j].time,            // زمان کندل سازنده SR
+                             created_by_body,
+                             rates[w3_start_idx].time  // زمان C1-FSMS-SW = لبه چپ ناحیه SR و unmit
+                             );
          }
       }
       return; // اگر FSMS‑SW فعال است، دیگر به حالت SW معمولی نمی‌رویم
@@ -78,18 +86,26 @@ inline void SR_OnBar_UP(const MqlRates &rates[], const int n, const int j, const
          const double level_top = SW_UP_Level();            // High(C1-HW)
          if(rates[j].high > level_top)
          {
-            const int  c1_top_idx = SW_UP_C1Index();
-            const int  t_idx      = (c1_top_idx>=0 && c1_top_idx<n ? c1_top_idx : w3_start_idx);
-            const double p_top    = level_top;              // High(C1-HW)
-            const double p_bottom = rates[w3_start_idx].low;// Low(C1-SW)
+            const int    c1_top_idx = SW_UP_C1Index();
+            const int    t_idx      = (c1_top_idx>=0 && c1_top_idx<n ? c1_top_idx : w3_start_idx);
+            const double p_top      = level_top;              // High(C1-HW)
+            const double p_bottom   = rates[w3_start_idx].low;// Low(C1-SW)
             ++g_sr_up_counter;
 
-            __SR_DrawRect("SR_U_"+IntegerToString(g_sr_up_counter), rates[t_idx].time, p_top, rates[j].time, p_bottom);
+            __SR_DrawRect("SR_U_"+IntegerToString(g_sr_up_counter),
+                          rates[t_idx].time, p_top,
+                          rates[j].time,    p_bottom);
             g_sr_sw_up_drawn_seed = seed_t;
 
-            // NEW: ثبت وضعیت SR برای first SR mitigator
+            // NEW: ثبت وضعیت SR برای first SR mitigator + ناحیه unmitigated SR
             const bool created_by_body = (rates[j].close > level_top);
-            SRMIT_OnNewSR_UP(g_sr_up_counter, p_top, p_bottom, rates[j].time, created_by_body);
+            SRMIT_OnNewSR_UP(g_sr_up_counter,
+                             p_top,
+                             p_bottom,
+                             rates[j].time,            // زمان کندل سازنده SR
+                             created_by_body,
+                             rates[w3_start_idx].time  // زمان C1-SW = لبه چپ ناحیه SR و unmit
+                             );
          }
       }
    }
@@ -110,18 +126,26 @@ inline void SR_OnBar_DOWN(const MqlRates &rates[], const int n, const int j, con
          const double level_bottom = FSMS_SW_DN_Level();    // Low(C1-W2 هم‌جهت FSMS)
          if(rates[j].low < level_bottom)                    // شکست با شدو یا بدنه
          {
-            const int  c1_bot_idx = FSMS_SW_DN_C1Index();
-            const int  t_idx      = (c1_bot_idx>=0 && c1_bot_idx<n ? c1_bot_idx : w3_start_idx);
-            const double p_top    = rates[w3_start_idx].high; // High(C1-FSMS-SW)
-            const double p_bottom = level_bottom;             // Low(C1-W2 یا C1-HW)
+            const int    c1_bot_idx = FSMS_SW_DN_C1Index();
+            const int    t_idx      = (c1_bot_idx>=0 && c1_bot_idx<n ? c1_bot_idx : w3_start_idx);
+            const double p_top      = rates[w3_start_idx].high; // High(C1-FSMS-SW)
+            const double p_bottom   = level_bottom;             // Low(C1-W2 یا C1-HW)
             ++g_sr_dn_counter;
 
-            __SR_DrawRect("SR_D_"+IntegerToString(g_sr_dn_counter), rates[t_idx].time, p_top, rates[j].time, p_bottom);
+            __SR_DrawRect("SR_D_"+IntegerToString(g_sr_dn_counter),
+                          rates[t_idx].time, p_top,
+                          rates[j].time,    p_bottom);
             g_sr_fsms_dn_drawn_seed = seed_t;
 
-            // NEW: ثبت وضعیت SR برای first SR mitigator
+            // NEW: ثبت وضعیت SR برای first SR mitigator + ناحیه unmitigated SR
             const bool created_by_body = (rates[j].close < level_bottom);
-            SRMIT_OnNewSR_DN(g_sr_dn_counter, p_top, p_bottom, rates[j].time, created_by_body);
+            SRMIT_OnNewSR_DN(g_sr_dn_counter,
+                             p_top,
+                             p_bottom,
+                             rates[j].time,            // زمان کندل سازنده SR
+                             created_by_body,
+                             rates[w3_start_idx].time  // زمان C1-FSMS-SW = لبه چپ ناحیه SR و unmit (DOWN)
+                             );
          }
       }
       return;
@@ -136,18 +160,26 @@ inline void SR_OnBar_DOWN(const MqlRates &rates[], const int n, const int j, con
          const double level_bottom = SW_DOWN_Level();       // Low(C1-HW)
          if(rates[j].low < level_bottom)
          {
-            const int  c1_bot_idx = SW_DOWN_C1Index();
-            const int  t_idx      = (c1_bot_idx>=0 && c1_bot_idx<n ? c1_bot_idx : w3_start_idx);
-            const double p_top    = rates[w3_start_idx].high; // High(C1-SW)
-            const double p_bottom = level_bottom;             // Low(C1-HW)
+            const int    c1_bot_idx = SW_DOWN_C1Index();
+            const int    t_idx      = (c1_bot_idx>=0 && c1_bot_idx<n ? c1_bot_idx : w3_start_idx);
+            const double p_top      = rates[w3_start_idx].high; // High(C1-SW)
+            const double p_bottom   = level_bottom;             // Low(C1-HW)
             ++g_sr_dn_counter;
 
-            __SR_DrawRect("SR_D_"+IntegerToString(g_sr_dn_counter), rates[t_idx].time, p_top, rates[j].time, p_bottom);
+            __SR_DrawRect("SR_D_"+IntegerToString(g_sr_dn_counter),
+                          rates[t_idx].time, p_top,
+                          rates[j].time,    p_bottom);
             g_sr_sw_dn_drawn_seed = seed_t;
 
-            // NEW: ثبت وضعیت SR برای first SR mitigator
+            // NEW: ثبت وضعیت SR برای first SR mitigator + ناحیه unmitigated SR
             const bool created_by_body = (rates[j].close < level_bottom);
-            SRMIT_OnNewSR_DN(g_sr_dn_counter, p_top, p_bottom, rates[j].time, created_by_body);
+            SRMIT_OnNewSR_DN(g_sr_dn_counter,
+                             p_top,
+                             p_bottom,
+                             rates[j].time,            // زمان کندل سازنده SR
+                             created_by_body,
+                             rates[w3_start_idx].time  // زمان C1-SW = لبه چپ ناحیه SR و unmit (DOWN)
+                             );
          }
       }
    }
