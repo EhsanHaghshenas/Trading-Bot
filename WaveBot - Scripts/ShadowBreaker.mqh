@@ -67,253 +67,441 @@ inline int __SB_LeftmostMaxHigh_ExInside(const MqlRates &rates[], const bool &in
 }
 
 // ===================== UP =====================
-static datetime g_sb_up_seed_time = 0;
-static double   g_sb_up_level     = 0.0;
 
-// SB/Temp/Invalidator state
-static bool     g_sb_up_sb_marked      = false; // SB رسم شده؟
-static int      g_sb_up_counter        = 0;     // شمارنده‌ی سری
-static int      g_sb_up_serial_current = 0;     // سری همین SB
-static int      g_sb_up_temp_idx       = -1;    // ایندکس temp-c1-sw
-static double   g_sb_up_temp_level     = 0.0;   // Low(temp-c1-sw)
-static bool     g_sb_up_watch_active   = false; // پایش فعال تا قبل از تأیید SW
-static bool     g_sb_up_inval_done     = false; // invalidator رسم شد؟
+// هر prefix (برگشتی از __ScanPrefix) یک اسلات مستقل دارد
+struct SB_UP_State
+{
+   bool     used;
+   string   prefix;
 
-// زمان‌های هر مارکر برای «BringToFront»
-static datetime g_sb_up_time_sb    = 0;
-static datetime g_sb_up_time_temp  = 0;
-static datetime g_sb_up_time_inval = 0;
+   datetime seed_time;
+   double   level;
 
+   bool     sb_marked;
+   int      counter;          // شمارندهٔ داخلی این context
+   int      serial_current;   // شمارهٔ SB فعلی همین context
+   int      temp_idx;
+   double   temp_level;
+   bool     watch_active;
+   bool     inval_done;
+
+   datetime time_sb;
+   datetime time_temp;
+   datetime time_inval;
+};
+
+// آرایهٔ اسلات‌ها برای همهٔ contextها (MAJOR / MINOR / …)
+static SB_UP_State g_sb_up_states[];
+
+// شمارندهٔ سراسری فقط برای یکتاسازی نام (در صورت نیاز)
+static int g_sb_up_global_counter = 0;
+
+// --- reset یک اسلات ---
+inline void __SB_UP_ResetState(SB_UP_State &S)
+{
+   S.seed_time      = 0;
+   S.level          = 0.0;
+   S.sb_marked      = false;
+   S.watch_active   = false;
+   S.inval_done     = false;
+   S.temp_idx       = -1;
+   S.temp_level     = 0.0;
+   S.serial_current = 0;
+   S.time_sb        = 0;
+   S.time_temp      = 0;
+   S.time_inval     = 0;
+}
+
+// --- پیدا کردن اسلات بر اساس prefix ---
+inline int __SB_UP_FindSlot(const string prefix)
+{
+   const int count = ArraySize(g_sb_up_states);
+   for(int i = 0; i < count; ++i)
+   {
+      if(!g_sb_up_states[i].used) continue;
+      if(g_sb_up_states[i].prefix == prefix)
+         return i;
+   }
+   return -1;
+}
+
+// --- گرفتن یا ساختن اسلات برای context فعلی ---
+inline int __SB_UP_EnsureSlot()
+{
+   const string prefix = __ScanPrefix();
+   int idx = __SB_UP_FindSlot(prefix);
+   if(idx >= 0)
+      return idx;
+
+   int count = ArraySize(g_sb_up_states);
+   ArrayResize(g_sb_up_states, count + 1);
+   idx = count;
+
+   g_sb_up_states[idx].used   = true;
+   g_sb_up_states[idx].prefix = prefix;
+   g_sb_up_states[idx].counter= 0;
+   __SB_UP_ResetState(g_sb_up_states[idx]);
+   return idx;
+}
+
+// --- Reset عمومی برای context فعلی (همان SB_UP_Reset قدیمی، ولی context-based) ---
 inline void SB_UP_Reset()
 {
-   g_sb_up_seed_time = 0;
-   g_sb_up_level     = 0.0;
-   g_sb_up_sb_marked = false;
-   g_sb_up_watch_active = false;
-   g_sb_up_inval_done   = false;
-   g_sb_up_temp_idx     = -1;
-   g_sb_up_temp_level   = 0.0;
-   g_sb_up_serial_current = 0;
-   g_sb_up_time_sb = g_sb_up_time_temp = g_sb_up_time_inval = 0;
+   int idx = __SB_UP_EnsureSlot();
+   __SB_UP_ResetState(g_sb_up_states[idx]);
 }
+
+// --- Sync با Seed فعلی SW (برای context فعلی) ---
 inline void SB_UP_SyncWithSeed()
 {
+   const int idx = __SB_UP_EnsureSlot();
+   SB_UP_State S = g_sb_up_states[idx];
+
    // SW باید در همان چرخه پس از قفل W2 باشد
    if(!SW_UP_SeedActive() || !SWGate_UP_IsOpen() || SW_UP_SeedTime() < SWGate_UP_W2Time())
-   { SB_UP_Reset(); return; }
+   {
+      __SB_UP_ResetState(S);
+      return;
+   }
 
    const datetime st = SW_UP_SeedTime();
-   if(st != g_sb_up_seed_time)
+   if(st != S.seed_time)
    {
-      SB_UP_Reset();
-      g_sb_up_seed_time = st;
-      g_sb_up_level     = SW_UP_Level();
+      __SB_UP_ResetState(S);
+      S.seed_time = st;
+      S.level     = SW_UP_Level();
    }
 }
 
-// اولویت‌دهیِ سه مارکر (بازرسم در انتهای کندل)
+// --- اولویت‌دهی سه مارکر (بازرسم در انتهای کندل) برای context فعلی ---
 inline void SB_UP_BringToFront()
 {
-   if(!g_sb_up_sb_marked) return;
-   const string tag = IntegerToString(g_sb_up_serial_current);
-   if(g_sb_up_time_sb>0)
-      __SB_DrawV("SHADOW_BREAK_U_" + tag, g_sb_up_time_sb, clrGold);
-   if(g_sb_up_time_temp>0)
-      __SB_DrawTempC1("temp-c1-sw_u_" + tag, g_sb_up_time_temp);
-   if(g_sb_up_inval_done && g_sb_up_time_inval>0)
-      __SB_DrawInvalidator("invalidator_u_" + tag, g_sb_up_time_inval);
+   const int idx = __SB_UP_EnsureSlot();
+   SB_UP_State S = g_sb_up_states[idx];
+
+   if(!S.sb_marked) return;
+   const string tag = IntegerToString(S.serial_current);
+   if(S.time_sb > 0)
+      __SB_DrawV("SHADOW_BREAK_U_" + tag, S.time_sb, clrGold);
+   if(S.time_temp > 0)
+      __SB_DrawTempC1("temp-c1-sw_u_" + tag, S.time_temp);
+   if(S.inval_done && S.time_inval > 0)
+      __SB_DrawInvalidator("invalidator_u_" + tag, S.time_inval);
 }
 
-// نسخه‌ی دارای کانتکست: SB + temp-c1-sw + invalidator
+// --- نسخهٔ context-based از منطق اصلی SB برای UP ---
 inline void SB_UP_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
                            const int n, const int cend, const int j)
 {
-   SB_UP_SyncWithSeed();
-   if(g_sb_up_seed_time == 0) return;
-   if(j<0 || j>=n) return;
+   const int idx = __SB_UP_EnsureSlot();
+   SB_UP_State S = g_sb_up_states[idx];
+
+   SB_UP_SyncWithSeed();             // با Seed فعلی همگام شو
+   if(S.seed_time == 0) return;
+   if(j < 0 || j >= n) return;
+
    const MqlRates r = rates[j];
-   if(r.time < g_sb_up_seed_time) return;
+   if(r.time < S.seed_time) return;
 
    // 1) اگر هنوز SB نداریم: شناسایی SB (wick-only)
-   if(!g_sb_up_sb_marked)
+   if(!S.sb_marked)
    {
-      if(r.high > g_sb_up_level && r.close <= g_sb_up_level)
+      if(r.high > S.level && r.close <= S.level)
       {
-         ++g_sb_up_counter;
-         g_sb_up_sb_marked      = true;
-         g_sb_up_serial_current = g_sb_up_counter;
+         ++g_sb_up_global_counter;
+         ++S.counter;
+         S.sb_marked      = true;
+         S.serial_current = S.counter;
+
+         const string tag = IntegerToString(S.serial_current);
 
          // mark SB
-         __SB_DrawV("SHADOW_BREAK_U_" + IntegerToString(g_sb_up_serial_current), r.time, clrGold);
-         g_sb_up_time_sb = r.time;
+         __SB_DrawV("SHADOW_BREAK_U_" + tag, r.time, clrGold);
+         S.time_sb = r.time;
 
-         // temp-c1-sw: کمترین Low در [cend..j]
-         int from = (cend>=0 ? cend : 0); if(from>j) from=j;
-         g_sb_up_temp_idx   = __SB_LeftmostMinLow_ExInside(rates, insideHL, from, j);
-         g_sb_up_temp_level = (g_sb_up_temp_idx>=0 && g_sb_up_temp_idx<n ? rates[g_sb_up_temp_idx].low : 0.0);
-         if(g_sb_up_temp_idx>=0 && g_sb_up_temp_idx<n)
+         // temp-c1-sw: کمترین Low در [cend..j] (با حذف insideHL)
+         int from = (cend >= 0 ? cend : 0);
+         if(from > j) from = j;
+         S.temp_idx   = __SB_LeftmostMinLow_ExInside(rates, insideHL, from, j);
+         S.temp_level = (S.temp_idx >= 0 && S.temp_idx < n ? rates[S.temp_idx].low : 0.0);
+
+         if(S.temp_idx >= 0 && S.temp_idx < n)
          {
-            __SB_DrawTempC1("temp-c1-sw_u_" + IntegerToString(g_sb_up_serial_current), rates[g_sb_up_temp_idx].time);
-            g_sb_up_time_temp = rates[g_sb_up_temp_idx].time;
+            __SB_DrawTempC1("temp-c1-sw_u_" + tag, rates[S.temp_idx].time);
+            S.time_temp = rates[S.temp_idx].time;
          }
-         
-         // --- NEW: از لحظه تشخیص SB ⇒ مسابقه HWBB متوقف و موج‌ها پاک‌سازی شوند
-         Race_InternalClearAll();          // توقف کامل مسابقه/Path-B (قفل و ref و ... ریست)
-         Markers_Clear_Waves_CurrentScan(); // حذف مارکرهای W2/W3/HW/HWBB/SW همین اسکن
+
+         // از لحظهٔ تشخیص SB ⇒ مسابقه HWBB متوقف و موج‌ها پاک‌سازی شوند (برای همین context)
+         Race_InternalClearAll();
+         Markers_Clear_Waves_CurrentScan();
 
          // از حالا تا قبل از body-break پایش invalidator فعال است
-         g_sb_up_watch_active = true;
-         g_sb_up_inval_done   = false;
+         S.watch_active = true;
+         S.inval_done   = false;
       }
       return;
    }
 
    // 2) اگر SB داریم و هنوز SW تایید نشده، پایش invalidator
-   if(g_sb_up_watch_active && !g_sb_up_inval_done)
+   if(S.watch_active && !S.inval_done)
    {
       // الف) تأیید SW با بدنه (close > level) ⇒ پایش متوقف
-      if(r.close > g_sb_up_level)
+      if(r.close > S.level)
       {
-         g_sb_up_watch_active = false;
+         S.watch_active = false;
          return;
       }
+
       // ب) ابطال temp-c1-sw (wick/body زیر Low(temp)) ⇒ invalidator
-      if(g_sb_up_temp_idx>=0 && (r.low < g_sb_up_temp_level || r.close < g_sb_up_temp_level))
+      if(S.temp_idx >= 0 && (r.low < S.temp_level || r.close < S.temp_level))
       {
-         __SB_DrawInvalidator("invalidator_u_" + IntegerToString(g_sb_up_serial_current), r.time);
-         g_sb_up_time_inval  = r.time;
-         g_sb_up_inval_done  = true;
-         g_sb_up_watch_active= false;   // این سیکل تمام
+         __SB_DrawInvalidator("invalidator_u_" + IntegerToString(S.serial_current), r.time);
+         S.time_inval   = r.time;
+         S.inval_done   = true;
+         S.watch_active = false;   // این سیکل تمام
       }
-   }   
-}
-
-// === Query helpers for external modules (UP) ===
-inline bool     SB_UP_InvalidatorReady(){ return g_sb_up_inval_done; }
-inline datetime SB_UP_SBTime()          { return g_sb_up_time_sb;    }
-inline void     SB_UP_ClearCycle()      { SB_UP_Reset();             }
-inline bool     SB_UP_BinaryPhaseActive(){ return (g_sb_up_sb_marked && g_sb_up_watch_active); }
-
-// ===================== DOWN =====================
-static datetime g_sb_dn_seed_time = 0;
-static double   g_sb_dn_level     = 0.0;
-
-static bool     g_sb_dn_sb_marked      = false;
-static int      g_sb_dn_counter        = 0;
-static int      g_sb_dn_serial_current = 0;
-static int      g_sb_dn_temp_idx       = -1;
-static double   g_sb_dn_temp_level     = 0.0;   // High(temp-c1-sw)
-static bool     g_sb_dn_watch_active   = false;
-static bool     g_sb_dn_inval_done     = false;
-
-static datetime g_sb_dn_time_sb    = 0;
-static datetime g_sb_dn_time_temp  = 0;
-static datetime g_sb_dn_time_inval = 0;
-
-inline void SB_DN_Reset()
-{
-   g_sb_dn_seed_time = 0;
-   g_sb_dn_level     = 0.0;
-   g_sb_dn_sb_marked = false;
-   g_sb_dn_watch_active = false;
-   g_sb_dn_inval_done   = false;
-   g_sb_dn_temp_idx     = -1;
-   g_sb_dn_temp_level   = 0.0;
-   g_sb_dn_serial_current = 0;
-   g_sb_dn_time_sb = g_sb_dn_time_temp = g_sb_dn_time_inval = 0;
-}
-inline void SB_DN_SyncWithSeed()
-{
-   if(!SW_DOWN_SeedActive() || !SWGate_DN_IsOpen() || SW_DOWN_SeedTime() < SWGate_DN_W2Time())
-   { SB_DN_Reset(); return; }
-
-   const datetime st = SW_DOWN_SeedTime();
-   if(st != g_sb_dn_seed_time)
-   {
-      SB_DN_Reset();
-      g_sb_dn_seed_time = st;
-      g_sb_dn_level     = SW_DOWN_Level();
    }
 }
 
-// اولویت‌دهی (بازرسم) برای DOWN
-inline void SB_DN_BringToFront()
+// === Query helpers برای context فعلی (UP) ===
+inline bool     SB_UP_InvalidatorReady()
 {
-   if(!g_sb_dn_sb_marked) return;
-   const string tag = IntegerToString(g_sb_dn_serial_current);
-   if(g_sb_dn_time_sb>0)
-      __SB_DrawV("SHADOW_BREAK_D_" + tag, g_sb_dn_time_sb, clrGold);
-   if(g_sb_dn_time_temp>0)
-      __SB_DrawTempC1("temp-c1-sw_d_" + tag, g_sb_dn_time_temp);
-   if(g_sb_dn_inval_done && g_sb_dn_time_inval>0)
-      __SB_DrawInvalidator("invalidator_d_" + tag, g_sb_dn_time_inval);
+   const int idx = __SB_UP_EnsureSlot();
+   const SB_UP_State S = g_sb_up_states[idx];
+   return S.inval_done;
 }
 
-// نسخه‌ی دارای کانتکست: SB + temp-c1-sw + invalidator
+inline datetime SB_UP_SBTime()
+{
+   const int idx = __SB_UP_EnsureSlot();
+   const SB_UP_State S = g_sb_up_states[idx];
+   return S.time_sb;
+}
+
+inline void     SB_UP_ClearCycle()
+{
+   SB_UP_Reset();
+}
+
+inline bool     SB_UP_BinaryPhaseActive()
+{
+   const int idx = __SB_UP_EnsureSlot();
+   const SB_UP_State S = g_sb_up_states[idx];
+   return (S.sb_marked && S.watch_active);
+}
+
+// ===================== DOWN =====================
+
+struct SB_DN_State
+{
+   bool     used;
+   string   prefix;
+
+   datetime seed_time;
+   double   level;
+
+   bool     sb_marked;
+   int      counter;
+   int      serial_current;
+   int      temp_idx;
+   double   temp_level;
+   bool     watch_active;
+   bool     inval_done;
+
+   datetime time_sb;
+   datetime time_temp;
+   datetime time_inval;
+};
+
+static SB_DN_State g_sb_dn_states[];
+static int         g_sb_dn_global_counter = 0;
+
+// --- reset یک اسلات DOWN ---
+inline void __SB_DN_ResetState(SB_DN_State &S)
+{
+   S.seed_time      = 0;
+   S.level          = 0.0;
+   S.sb_marked      = false;
+   S.watch_active   = false;
+   S.inval_done     = false;
+   S.temp_idx       = -1;
+   S.temp_level     = 0.0;
+   S.serial_current = 0;
+   S.time_sb        = 0;
+   S.time_temp      = 0;
+   S.time_inval     = 0;
+}
+
+inline int __SB_DN_FindSlot(const string prefix)
+{
+   const int count = ArraySize(g_sb_dn_states);
+   for(int i = 0; i < count; ++i)
+   {
+      if(!g_sb_dn_states[i].used) continue;
+      if(g_sb_dn_states[i].prefix == prefix)
+         return i;
+   }
+   return -1;
+}
+
+inline int __SB_DN_EnsureSlot()
+{
+   const string prefix = __ScanPrefix();
+   int idx = __SB_DN_FindSlot(prefix);
+   if(idx >= 0)
+      return idx;
+
+   int count = ArraySize(g_sb_dn_states);
+   ArrayResize(g_sb_dn_states, count + 1);
+   idx = count;
+
+   g_sb_dn_states[idx].used   = true;
+   g_sb_dn_states[idx].prefix = prefix;
+   g_sb_dn_states[idx].counter= 0;
+   __SB_DN_ResetState(g_sb_dn_states[idx]);
+   return idx;
+}
+
+// Reset عمومی برای context فعلی (DOWN)
+inline void SB_DN_Reset()
+{
+   int idx = __SB_DN_EnsureSlot();
+   __SB_DN_ResetState(g_sb_dn_states[idx]);
+}
+
+// Sync با Seed فعلی SW-DOWN
+inline void SB_DN_SyncWithSeed()
+{
+   const int idx = __SB_DN_EnsureSlot();
+   SB_DN_State S = g_sb_dn_states[idx];
+
+   if(!SW_DOWN_SeedActive() || !SWGate_DN_IsOpen() || SW_DOWN_SeedTime() < SWGate_DN_W2Time())
+   {
+      __SB_DN_ResetState(S);
+      return;
+   }
+
+   const datetime st = SW_DOWN_SeedTime();
+   if(st != S.seed_time)
+   {
+      __SB_DN_ResetState(S);
+      S.seed_time = st;
+      S.level     = SW_DOWN_Level();
+   }
+}
+
+// اولویت‌دهی (بازرسم) برای context فعلی (DOWN)
+inline void SB_DN_BringToFront()
+{
+   const int idx = __SB_DN_EnsureSlot();
+   SB_DN_State S = g_sb_dn_states[idx];
+
+   if(!S.sb_marked) return;
+   const string tag = IntegerToString(S.serial_current);
+   if(S.time_sb > 0)
+      __SB_DrawV("SHADOW_BREAK_D_" + tag, S.time_sb, clrGold);
+   if(S.time_temp > 0)
+      __SB_DrawTempC1("temp-c1-sw_d_" + tag, S.time_temp);
+   if(S.inval_done && S.time_inval > 0)
+      __SB_DrawInvalidator("invalidator_d_" + tag, S.time_inval);
+}
+
+// نسخهٔ context-based منطق اصلی برای DOWN
 inline void SB_DN_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
                            const int n, const int cend, const int j)
 {
+   const int idx = __SB_DN_EnsureSlot();
+   SB_DN_State S = g_sb_dn_states[idx];
+
    SB_DN_SyncWithSeed();
-   if(g_sb_dn_seed_time == 0) return;
-   if(j<0 || j>=n) return;
+   if(S.seed_time == 0) return;
+   if(j < 0 || j >= n) return;
+
    const MqlRates r = rates[j];
-   if(r.time < g_sb_dn_seed_time) return;
+   if(r.time < S.seed_time) return;
 
    // 1) اگر هنوز SB نداریم: شناسایی SB (wick-only)
-   if(!g_sb_dn_sb_marked)
+   if(!S.sb_marked)
    {
-      if(r.low < g_sb_dn_level && r.close >= g_sb_dn_level)
+      if(r.low < S.level && r.close >= S.level)
       {
-         ++g_sb_dn_counter;
-         g_sb_dn_sb_marked      = true;
-         g_sb_dn_serial_current = g_sb_dn_counter;
+         ++g_sb_dn_global_counter;
+         ++S.counter;
+         S.sb_marked      = true;
+         S.serial_current = S.counter;
 
-         __SB_DrawV("SHADOW_BREAK_D_" + IntegerToString(g_sb_dn_serial_current), r.time, clrGold);
-         g_sb_dn_time_sb = r.time;
+         const string tag = IntegerToString(S.serial_current);
 
-         int from = (cend>=0 ? cend : 0); if(from>j) from=j;
-         g_sb_dn_temp_idx   = __SB_LeftmostMaxHigh_ExInside(rates, insideHL, from, j);
-         g_sb_dn_temp_level = (g_sb_dn_temp_idx>=0 && g_sb_dn_temp_idx<n ? rates[g_sb_dn_temp_idx].high : 0.0);
-         if(g_sb_dn_temp_idx>=0 && g_sb_dn_temp_idx<n)
+         __SB_DrawV("SHADOW_BREAK_D_" + tag, r.time, clrGold);
+         S.time_sb = r.time;
+
+         int from = (cend >= 0 ? cend : 0);
+         if(from > j) from = j;
+         S.temp_idx   = __SB_LeftmostMaxHigh_ExInside(rates, insideHL, from, j);
+         S.temp_level = (S.temp_idx >= 0 && S.temp_idx < n ? rates[S.temp_idx].high : 0.0);
+
+         if(S.temp_idx >= 0 && S.temp_idx < n)
          {
-            __SB_DrawTempC1("temp-c1-sw_d_" + IntegerToString(g_sb_dn_serial_current), rates[g_sb_dn_temp_idx].time);
-            g_sb_dn_time_temp = rates[g_sb_dn_temp_idx].time;
+            __SB_DrawTempC1("temp-c1-sw_d_" + tag, rates[S.temp_idx].time);
+            S.time_temp = rates[S.temp_idx].time;
          }
-         
-         // --- NEW: از لحظه تشخیص SB ⇒ مسابقه HWBB متوقف و موج‌ها پاک‌سازی شوند
+
+         // NEW: از لحظهٔ تشخیص SB ⇒ مسابقه HWBB متوقف و موج‌ها پاک‌سازی شوند
          Race_InternalClearAll();
          Markers_Clear_Waves_CurrentScan();
 
-         g_sb_dn_watch_active = true;
-         g_sb_dn_inval_done   = false;
+         S.watch_active = true;
+         S.inval_done   = false;
       }
       return;
    }
 
-   // 2) پایش invalidator تا قبل از تأیید SW
-   if(g_sb_dn_watch_active && !g_sb_dn_inval_done)
+   // 2) پایش invalidator برای DOWN
+   if(S.watch_active && !S.inval_done)
    {
-      // الف) تأیید SW با بدنه (close < level) ⇒ توقف پایش
-      if(r.close < g_sb_dn_level)
+      // الف) تأیید SW با بدنه (close < level) ⇒ پایش متوقف
+      if(r.close < S.level)
       {
-         g_sb_dn_watch_active = false;
+         S.watch_active = false;
          return;
       }
-      // ب) ابطال temp-c1-sw (wick/body بالای High(temp))
-      if(g_sb_dn_temp_idx>=0 && (r.high > g_sb_dn_temp_level || r.close > g_sb_dn_temp_level))
+
+      // ب) ابطال temp-c1-sw (wick/body بالاتر از High(temp)) ⇒ invalidator
+      if(S.temp_idx >= 0 && (r.high > S.temp_level || r.close > S.temp_level))
       {
-         __SB_DrawInvalidator("invalidator_d_" + IntegerToString(g_sb_dn_serial_current), r.time);
-         g_sb_dn_time_inval  = r.time;
-         g_sb_dn_inval_done  = true;
-         g_sb_dn_watch_active= false;
+         __SB_DrawInvalidator("invalidator_d_" + IntegerToString(S.serial_current), r.time);
+         S.time_inval   = r.time;
+         S.inval_done   = true;
+         S.watch_active = false;
       }
    }
 }
 
-// === Query helpers for external modules (DOWN) ===
-inline bool     SB_DN_InvalidatorReady(){ return g_sb_dn_inval_done; }
-inline datetime SB_DN_SBTime()          { return g_sb_dn_time_sb;    }
-inline void     SB_DN_ClearCycle()      { SB_DN_Reset();             }
-inline bool     SB_DN_BinaryPhaseActive(){ return (g_sb_dn_sb_marked && g_sb_dn_watch_active); }
+// Query helpers برای context فعلی (DOWN)
+inline bool     SB_DN_InvalidatorReady()
+{
+   const int idx = __SB_DN_EnsureSlot();
+   const SB_DN_State S = g_sb_dn_states[idx];
+   return S.inval_done;
+}
+
+inline datetime SB_DN_SBTime()
+{
+   const int idx = __SB_DN_EnsureSlot();
+   const SB_DN_State S = g_sb_dn_states[idx];
+   return S.time_sb;
+}
+
+inline void     SB_DN_ClearCycle()
+{
+   SB_DN_Reset();
+}
+
+inline bool     SB_DN_BinaryPhaseActive()
+{
+   const int idx = __SB_DN_EnsureSlot();
+   const SB_DN_State S = g_sb_dn_states[idx];
+   return (S.sb_marked && S.watch_active);
+}
 
 #endif // WAVEBOT_SHADOWBREAKER_MQH

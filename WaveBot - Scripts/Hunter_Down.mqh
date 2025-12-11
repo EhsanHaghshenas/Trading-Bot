@@ -19,6 +19,76 @@ static datetime g_sw_seed_d_xtime  = 0;      // زمان کراس ext lq
 static double   g_sw_seed_d_level  = 0.0;    // Low(C1 هانتر)
 static int      g_sw_counter_d     = 0;
 
+// ---------------- Hunter-DOWN Context (for major/minor worlds) ----------------
+struct HunterDownContext
+{
+   int      hw_counter;      // همان g_hw_counter_d
+   datetime lq_time_seen;    // همان g_lq_time_seen_d
+   bool     marked_for_lq;   // همان g_marked_for_lq_d
+
+   bool     sw_seed_active;  // همان g_sw_seed_d_active
+   int      sw_seed_c1;      // همان g_sw_seed_d_c1
+   datetime sw_seed_xtime;   // همان g_sw_seed_d_xtime
+   double   sw_seed_level;   // همان g_sw_seed_d_level
+   int      sw_counter;      // همان g_sw_counter_d
+};
+
+// مقداردهی اولیهٔ یک کانتکست خالی (شروع یک دنیا)
+inline void Hunter_DN_ContextInit(HunterDownContext &ctx)
+{
+   ctx.hw_counter    = 0;
+   ctx.lq_time_seen  = 0;
+   ctx.marked_for_lq = false;
+
+   ctx.sw_seed_active = false;
+   ctx.sw_seed_c1     = -1;
+   ctx.sw_seed_xtime  = 0;
+   ctx.sw_seed_level  = 0.0;
+   ctx.sw_counter     = 0;
+}
+
+// خروجی گرفتن از وضعیت فعلی ماژول به داخل کانتکست
+inline void Hunter_DN_ContextExport(HunterDownContext &ctx)
+{
+   ctx.hw_counter    = g_hw_counter_d;
+   ctx.lq_time_seen  = g_lq_time_seen_d;
+   ctx.marked_for_lq = g_marked_for_lq_d;
+
+   ctx.sw_seed_active = g_sw_seed_d_active;
+   ctx.sw_seed_c1     = g_sw_seed_d_c1;
+   ctx.sw_seed_xtime  = g_sw_seed_d_xtime;
+   ctx.sw_seed_level  = g_sw_seed_d_level;
+   ctx.sw_counter     = g_sw_counter_d;
+}
+
+// لود کردن وضعیت از کانتکست به متغیرهای داخلی ماژول
+inline void Hunter_DN_ContextImport(const HunterDownContext &ctx)
+{
+   g_hw_counter_d     = ctx.hw_counter;
+   g_lq_time_seen_d   = ctx.lq_time_seen;
+   g_marked_for_lq_d  = ctx.marked_for_lq;
+
+   g_sw_seed_d_active = ctx.sw_seed_active;
+   g_sw_seed_d_c1     = ctx.sw_seed_c1;
+   g_sw_seed_d_xtime  = ctx.sw_seed_xtime;
+   g_sw_seed_d_level  = ctx.sw_seed_level;
+   g_sw_counter_d     = ctx.sw_counter;
+}
+
+// ریست کامل وضعیت داخلی Hunter-DOWN (برای شروع از صفر)
+inline void Hunter_DN_ResetGlobals()
+{
+   g_hw_counter_d     = 0;
+   g_lq_time_seen_d   = 0;
+   g_marked_for_lq_d  = false;
+
+   g_sw_seed_d_active = false;
+   g_sw_seed_d_c1     = -1;
+   g_sw_seed_d_xtime  = 0;
+   g_sw_seed_d_level  = 0.0;
+   g_sw_counter_d     = 0;
+}
+
 // === NEW: expose C1 index/time for the last valid Hunter-DOWN seed ===
 inline int SW_DOWN_C1Index()
 {

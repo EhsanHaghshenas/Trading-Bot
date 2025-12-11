@@ -142,6 +142,34 @@ struct RacePathBState
    int      postBreak_c1_ref;    // مرجع C1_W3 پس از body-break
 };
 
+// =======================[ RaceContext: snapshot کامل وضعیت مسابقه ]=======================
+//
+// این struct تمام state داخلی RaceCoordinator را در خود جمع می‌کند تا بتوانیم
+// آن را برای دنیای ماژور/مینور جداگانه نگه داریم و هر زمان لازم بود وارد/خارج کنیم.
+struct RaceContext
+{
+   bool      locked;             // معادل g_race_locked
+   Direction mode;               // معادل g_race_mode
+   int       hwbb_idx;           // معادل g_race_hwbb_idx
+   datetime  hwbb_time;          // معادل g_race_hwbb_time
+   string    winner;             // معادل g_race_winner
+   datetime  winner_time;        // معادل g_race_winner_time
+
+   // نقطه‌ی مرجع برای MTC (LOW/HIGH C1 Hunter در هر سمت)
+   double    ref_mtc_up;         // معادل g_race_ref_mtc_up
+   double    ref_mtc_down;       // معادل g_race_ref_mtc_down
+
+   // Active ref (آخرین مرجع MTC که فعال است)
+   double    active_ref_up;         // معادل g_active_ref_up
+   datetime  active_ref_up_time;    // معادل g_active_ref_up_time
+   double    active_ref_down;       // معادل g_active_ref_down
+   datetime  active_ref_down_time;  // معادل g_active_ref_down_time
+
+   // وضعیت داخلی Path-B برای Mode=UP و Mode=DOWN
+   RacePathBState pb_up;         // قبلاً g_pb_up
+   RacePathBState pb_down;       // قبلاً g_pb_down
+};
+
 static RacePathBState g_pb_up;    // وقتی Mode=UP است (مسیر B = اسکن DOWN)
 static RacePathBState g_pb_down;  // وقتی Mode=DOWN است (مسیر B = اسکن UP)
 
@@ -169,6 +197,74 @@ inline void Race_InternalClearAll()
    Race_ResetPathB(g_pb_down);
    g_race_ref_mtc_up   = 0.0;
    g_race_ref_mtc_down = 0.0;
+}
+
+// =======================[ Helperهای کانتکست ]=======================
+
+// ریست‌کردن یک RaceContext مستقل از global
+inline void Race_ContextReset(RaceContext &ctx)
+{
+   ctx.locked      = false;
+   ctx.mode        = DIR_UP;
+   ctx.hwbb_idx    = -1;
+   ctx.hwbb_time   = 0;
+   ctx.winner      = "";
+   ctx.winner_time = 0;
+
+   ctx.ref_mtc_up   = 0.0;
+   ctx.ref_mtc_down = 0.0;
+
+   ctx.active_ref_up        = 0.0;
+   ctx.active_ref_up_time   = 0;
+   ctx.active_ref_down      = 0.0;
+   ctx.active_ref_down_time = 0;
+
+   Race_ResetPathB(ctx.pb_up);
+   Race_ResetPathB(ctx.pb_down);
+}
+
+// کپی‌کردن state فعلی global به داخل یک کانتکست (Export)
+inline void Race_ContextExport(RaceContext &ctx)
+{
+   ctx.locked      = g_race_locked;
+   ctx.mode        = g_race_mode;
+   ctx.hwbb_idx    = g_race_hwbb_idx;
+   ctx.hwbb_time   = g_race_hwbb_time;
+   ctx.winner      = g_race_winner;
+   ctx.winner_time = g_race_winner_time;
+
+   ctx.ref_mtc_up   = g_race_ref_mtc_up;
+   ctx.ref_mtc_down = g_race_ref_mtc_down;
+
+   ctx.active_ref_up        = g_active_ref_up;
+   ctx.active_ref_up_time   = g_active_ref_up_time;
+   ctx.active_ref_down      = g_active_ref_down;
+   ctx.active_ref_down_time = g_active_ref_down_time;
+
+   ctx.pb_up   = g_pb_up;
+   ctx.pb_down = g_pb_down;
+}
+
+// وارد کردن یک کانتکست روی global (Import)
+inline void Race_ContextImport(const RaceContext &ctx)
+{
+   g_race_locked      = ctx.locked;
+   g_race_mode        = ctx.mode;
+   g_race_hwbb_idx    = ctx.hwbb_idx;
+   g_race_hwbb_time   = ctx.hwbb_time;
+   g_race_winner      = ctx.winner;
+   g_race_winner_time = ctx.winner_time;
+
+   g_race_ref_mtc_up   = ctx.ref_mtc_up;
+   g_race_ref_mtc_down = ctx.ref_mtc_down;
+
+   g_active_ref_up        = ctx.active_ref_up;
+   g_active_ref_up_time   = ctx.active_ref_up_time;
+   g_active_ref_down      = ctx.active_ref_down;
+   g_active_ref_down_time = ctx.active_ref_down_time;
+
+   g_pb_up   = ctx.pb_up;
+   g_pb_down = ctx.pb_down;
 }
 
 inline bool Race_IsLocked() { return g_race_locked; }

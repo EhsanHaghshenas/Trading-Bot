@@ -25,6 +25,106 @@ static double   g_bb_level_d     = 0.0;
 static datetime g_bb_cross_time_d= 0;
 static int      g_bb_counter_d   = 0;
 
+// -------------------- Context for Hunter_BodyBreak (UP + DOWN) --------------------
+struct HWBBContext
+{
+   // UP side
+   datetime bb_lq_time_u;      // ext lq فعال (UP) - زمان
+   bool     bb_done_u;         // آیا برای این LQ مارک زده‌ایم؟
+   bool     bb_armed_u;        // بازوگذاری پس از Hunter معتبر
+   double   bb_level_u;        // سطح جاریِ شکست با بدنه (ارتقاپذیر)
+   datetime bb_cross_time_u;   // از این زمان به بعد پایش می‌کنیم
+   int      bb_counter_u;      // شمارنده‌ی مارکرها (UP)
+
+   // DOWN side
+   datetime bb_lq_time_d;      // ext lq فعال (DOWN) - زمان
+   bool     bb_done_d;
+   bool     bb_armed_d;
+   double   bb_level_d;
+   datetime bb_cross_time_d;
+   int      bb_counter_d;      // شمارنده‌ی مارکرها (DOWN)
+};
+
+// مقداردهی اولیهٔ یک کانتکست خالی (برای شروع یک دنیا: ماژور/مینور)
+inline void HW_BB_ContextInit(HWBBContext &ctx)
+{
+   // UP
+   ctx.bb_lq_time_u    = 0;
+   ctx.bb_done_u       = false;
+   ctx.bb_armed_u      = false;
+   ctx.bb_level_u      = 0.0;
+   ctx.bb_cross_time_u = 0;
+   ctx.bb_counter_u    = 0;
+
+   // DOWN
+   ctx.bb_lq_time_d    = 0;
+   ctx.bb_done_d       = false;
+   ctx.bb_armed_d      = false;
+   ctx.bb_level_d      = 0.0;
+   ctx.bb_cross_time_d = 0;
+   ctx.bb_counter_d    = 0;
+}
+
+// Export: کپی‌کردن وضعیت فعلی globalها به داخل کانتکست
+inline void HW_BB_ContextExport(HWBBContext &ctx)
+{
+   // UP
+   ctx.bb_lq_time_u    = g_bb_lq_time_u;
+   ctx.bb_done_u       = g_bb_done_u;
+   ctx.bb_armed_u      = g_bb_armed_u;
+   ctx.bb_level_u      = g_bb_level_u;
+   ctx.bb_cross_time_u = g_bb_cross_time_u;
+   ctx.bb_counter_u    = g_bb_counter_u;
+
+   // DOWN
+   ctx.bb_lq_time_d    = g_bb_lq_time_d;
+   ctx.bb_done_d       = g_bb_done_d;
+   ctx.bb_armed_d      = g_bb_armed_d;
+   ctx.bb_level_d      = g_bb_level_d;
+   ctx.bb_cross_time_d = g_bb_cross_time_d;
+   ctx.bb_counter_d    = g_bb_counter_d;
+}
+
+// Import: اعمال یک کانتکست روی متغیرهای داخلی global
+inline void HW_BB_ContextImport(const HWBBContext &ctx)
+{
+   // UP
+   g_bb_lq_time_u    = ctx.bb_lq_time_u;
+   g_bb_done_u       = ctx.bb_done_u;
+   g_bb_armed_u      = ctx.bb_armed_u;
+   g_bb_level_u      = ctx.bb_level_u;
+   g_bb_cross_time_u = ctx.bb_cross_time_u;
+   g_bb_counter_u    = ctx.bb_counter_u;
+
+   // DOWN
+   g_bb_lq_time_d    = ctx.bb_lq_time_d;
+   g_bb_done_d       = ctx.bb_done_d;
+   g_bb_armed_d      = ctx.bb_armed_d;
+   g_bb_level_d      = ctx.bb_level_d;
+   g_bb_cross_time_d = ctx.bb_cross_time_d;
+   g_bb_counter_d    = ctx.bb_counter_d;
+}
+
+// ریست مستقیم globalها (شروع تازه بدون context)
+inline void HW_BB_ResetGlobals()
+{
+   // UP
+   g_bb_lq_time_u    = 0;
+   g_bb_done_u       = false;
+   g_bb_armed_u      = false;
+   g_bb_level_u      = 0.0;
+   g_bb_cross_time_u = 0;
+   g_bb_counter_u    = 0;
+
+   // DOWN
+   g_bb_lq_time_d    = 0;
+   g_bb_done_d       = false;
+   g_bb_armed_d      = false;
+   g_bb_level_d      = 0.0;
+   g_bb_cross_time_d = 0;
+   g_bb_counter_d    = 0;
+}
+
 // ---------- کمک‌کارها ----------
 inline void HW_BB_UP_ResetIfNewLQ()
 {
