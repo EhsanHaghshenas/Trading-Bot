@@ -9,11 +9,11 @@ struct W2DownContext
    int  last_i2;         // قدم اول موج۲ (اگر پیدا شد)
    int  last_i3;         // قدم دوم موج۲ (اگر پیدا شد)
    int  last_i4;         // قدم سوم موج۲ (اگر نیاز بود و پیدا شد)
-   int  last_need;       // تعداد قدم‌های لازم (۲ اگر C1 قرمز، ۳ اگر C1 سبز)
+   int  last_need;       // تعداد قدم‌های لازم (۲ اگر C1 سبز، ۳ اگر C1 قرمز)
    int  last_scanned_to; // آخرین ایندسی که عملاً تا آنجا اسکن/بررسی شد (برای دیباگ)
 };
 
-// کانتکست پیش‌فرض برای دنیای ماژور (جهت سازگاری)
+// کانتکست پیش‌فرض برای دنیای ماژور
 static W2DownContext g_w2d_ctx_major;
 
 inline void W2Down_ResetCtx(W2DownContext &ctx)
@@ -38,125 +38,6 @@ inline bool InsideEffBodyC1_Down(const MqlRates &r, const double c1LowEff, const
    return (r.high <= c1HighEff && r.low >= c1LowEff);
 }
 
-// -------------------- Wave2_Down: Context-based wrappers --------------------
-// همان منطق تابع‌های اصلی را صدا می‌کنیم، ولی نتیجه و ایندکس‌ها را در کانتکست ذخیره می‌کنیم
-// تا بتوانیم در دنیاهای موازی (ماژور/مینور) بدون تداخل state کار کنیم.
-
-// نسخهٔ context-based برای تابع اصلی LocalOnly_Down
-inline bool CheckWave2_FromIndex_LocalOnly_Down_Ctx(W2DownContext &ctx,
-                                                     const MqlRates &rates[],
-                                                     const bool &insideClusterHL[],
-                                                     const double &bodyLowEff[],
-                                                     const double &bodyHighEff[],
-                                                     const int n, const int i1,
-                                                     int &i2, int &i3, int &i4)
-{
-   // اجرای منطق اصلی بدون تغییر
-   bool ok = CheckWave2_FromIndex_LocalOnly_Down(rates,
-                                                 insideClusterHL,
-                                                 bodyLowEff,
-                                                 bodyHighEff,
-                                                 n, i1, i2, i3, i4);
-
-   // به‌روزرسانی کانتکست
-   ctx.last_result   = ok;
-   ctx.last_c1_index = i1;
-   ctx.last_i2       = i2;
-   ctx.last_i3       = i3;
-   ctx.last_i4       = i4;
-
-   // مشابه Wave2: تعداد قدم‌های لازم بر اساس رنگ C1
-   if(i1 >= 0 && i1 < n)
-   {
-      const bool c1Bull = (rates[i1].close > rates[i1].open);
-      ctx.last_need = (c1Bull ? 2 : 3);
-   }
-   else
-   {
-      ctx.last_need = 0;
-   }
-
-   // آخرین ایندکس مؤثرِ اسکن‌شده (برای دیباگ مسیر موج۲)
-   ctx.last_scanned_to = (i4 >= 0 ? i4
-                         : (i3 >= 0 ? i3
-                         : (i2 >= 0 ? i2
-                         : i1)));
-
-   return ok;
-}
-
-// نسخهٔ context-based برای Hunter_Down
-inline bool CheckWave2FromIndex_Hunter_Down_Ctx(W2DownContext &ctx,
-                                                const MqlRates &rates[],
-                                                const bool &insideClusterHL[],
-                                                const double &bodyLowEff[],
-                                                const double &bodyHighEff[],
-                                                const int n, const int i1,
-                                                int &i2, int &i3, int &i4)
-{
-   // Hunter نسخهٔ رپِر روی LocalOnly است؛ همان را صدا می‌زنیم
-   bool ok = CheckWave2FromIndex_Hunter_Down(rates,
-                                             insideClusterHL,
-                                             bodyLowEff,
-                                             bodyHighEff,
-                                             n, i1, i2, i3, i4);
-
-   // به‌روزرسانی کانتکست مشابه بالا
-   ctx.last_result   = ok;
-   ctx.last_c1_index = i1;
-   ctx.last_i2       = i2;
-   ctx.last_i3       = i3;
-   ctx.last_i4       = i4;
-
-   if(i1 >= 0 && i1 < n)
-   {
-      const bool c1Bull = (rates[i1].close > rates[i1].open);
-      ctx.last_need = (c1Bull ? 2 : 3);
-   }
-   else
-   {
-      ctx.last_need = 0;
-   }
-
-   ctx.last_scanned_to = (i4 >= 0 ? i4
-                         : (i3 >= 0 ? i3
-                         : (i2 >= 0 ? i2
-                         : i1)));
-
-   return ok;
-}
-
-// نسخه‌های کمکی برای دنیای ماژور (اختیاری؛ برای سازگاری ساده‌تر)
-inline bool CheckWave2_FromIndex_LocalOnly_Down_Major(const MqlRates &rates[],
-                                                      const bool &insideClusterHL[],
-                                                      const double &bodyLowEff[],
-                                                      const double &bodyHighEff[],
-                                                      const int n, const int i1,
-                                                      int &i2, int &i3, int &i4)
-{
-   return CheckWave2_FromIndex_LocalOnly_Down_Ctx(g_w2d_ctx_major,
-                                                  rates,
-                                                  insideClusterHL,
-                                                  bodyLowEff,
-                                                  bodyHighEff,
-                                                  n, i1, i2, i3, i4);
-}
-
-inline bool CheckWave2FromIndex_Hunter_Down_Major(const MqlRates &rates[],
-                                                  const bool &insideClusterHL[],
-                                                  const double &bodyLowEff[],
-                                                  const double &bodyHighEff[],
-                                                  const int n, const int i1,
-                                                  int &i2, int &i3, int &i4)
-{
-   return CheckWave2FromIndex_Hunter_Down_Ctx(g_w2d_ctx_major,
-                                              rates,
-                                              insideClusterHL,
-                                              bodyLowEff,
-                                              bodyHighEff,
-                                              n, i1, i2, i3, i4);
-}
-
 // موج۲ صعودی (برای روند نزولی) + «اسکیپ همهٔ داخل‌ها»
 // نکتهٔ کلیدی: barrierHigh = بزرگ‌ترین High دیده‌شده از آخرین قدم تأییدشده.
 // هر کندلی (سبز/قرمز) می‌تواند barrierHigh را ارتقا بدهد؛ پذیرش قدمِ سبز فقط وقتی مجاز است
@@ -179,23 +60,37 @@ bool CheckWave2_FromIndex_LocalOnly_Down(const MqlRates &rates[],
    const double C1_HighEff = bodyHighEff[i1];
 
    int    found      = 0;
-   double barrierHigh= H1; // سقف پویا از آخرین قدم تاییدشده یا C1
+   double barrierHigh= H1; // سقف پویا از آخرین قدم تا الان
 
    for(int j=i1+1; j<n && (j-i1)<=InpMaxBarsInWave; ++j)
    {
       // اسکیپ خوشهٔ inside سراسری
-      if(insideClusterHL[j])               { if(rates[j].high > barrierHigh) barrierHigh = rates[j].high; continue; }
+      if(insideClusterHL[j])
+      {
+         if(rates[j].high > barrierHigh)
+            barrierHigh = rates[j].high;
+         continue;
+      }
 
       // ابطال: نباید L1 شکسته شود
-      if(rates[j].low < L1) return false;
+      if(rates[j].low < L1)
+         return false;
 
       // داخل بدنهٔ مؤثر C1 ⇒ اسکیپ (و ارتقای barrier در صورت لزوم)
       if(InsideEffBodyC1_Down(rates[j], C1_LowEff, C1_HighEff))
-      { if(rates[j].high > barrierHigh) barrierHigh = rates[j].high; continue; }
+      {
+         if(rates[j].high > barrierHigh)
+            barrierHigh = rates[j].high;
+         continue;
+      }
 
       // بعد از C1 فقط سبزها شمارش می‌شوند؛ اما کندل قرمز می‌تواند barrier را ارتقا دهد
       if(rates[j].close <= rates[j].open)
-      { if(rates[j].high > barrierHigh) barrierHigh = rates[j].high; continue; }
+      {
+         if(rates[j].high > barrierHigh)
+            barrierHigh = rates[j].high;
+         continue;
+      }
 
       // پذیرش قدمِ سبز فقط اگر High آن از «بزرگ‌ترین High از آخرین قدم» بالاتر رود
       if(rates[j].high > barrierHigh)
@@ -207,13 +102,15 @@ bool CheckWave2_FromIndex_LocalOnly_Down(const MqlRates &rates[],
          if(found==2) i3=j;
          if(found==3) i4=j;
 
-         if(found>=need) return true;
+         if(found>=need)
+            return true;
+
          continue;
       }
 
-      // اگر قدم پذیرفته نشد، barrier را با این کندل به‌روز نگه‌دار
-      if(rates[j].high > barrierHigh) barrierHigh = rates[j].high;
+      // سبز اما High داخل سقف پویا ⇒ اسکیپ
    }
+
    return false;
 }
 
@@ -224,7 +121,171 @@ bool CheckWave2FromIndex_Hunter_Down(const MqlRates &rates[],
                                      const int n, const int i1,
                                      int &i2, int &i3, int &i4)
 {
-   return CheckWave2_FromIndex_LocalOnly_Down(rates,insideClusterHL,bodyLowEff,bodyHighEff,n,i1,i2,i3,i4);
+   return CheckWave2_FromIndex_LocalOnly_Down(rates,
+                                              insideClusterHL,
+                                              bodyLowEff,
+                                              bodyHighEff,
+                                              n,
+                                              i1,
+                                              i2,
+                                              i3,
+                                              i4);
+}
+
+// -------------------- Wave2_Down: Context-based wrappers --------------------
+// توجه: این توابع فقط state را در کانتکست ذخیره می‌کنند و منطق W2 را تغییر نمی‌دهند.
+
+inline bool CheckWave2_FromIndex_LocalOnly_Down_Ctx(
+      W2DownContext      &ctx,
+      const MqlRates     &rates[],
+      const bool         &insideClusterHL[],
+      const double       &bodyLowEff[],
+      const double       &bodyHighEff[],
+      const int           n,
+      const int           i1,
+      int                &i2,
+      int                &i3,
+      int                &i4
+   )
+{
+   bool ok = CheckWave2_FromIndex_LocalOnly_Down(
+                rates,
+                insideClusterHL,
+                bodyLowEff,
+                bodyHighEff,
+                n,
+                i1,
+                i2,
+                i3,
+                i4
+             );
+
+   ctx.last_result   = ok;
+   ctx.last_c1_index = i1;
+   ctx.last_i2       = i2;
+   ctx.last_i3       = i3;
+   ctx.last_i4       = i4;
+
+   if(i1 >= 0 && i1 < n)
+   {
+      const bool c1Bull = (rates[i1].close > rates[i1].open);
+      ctx.last_need = (c1Bull ? 2 : 3);
+   }
+   else
+   {
+      ctx.last_need = 0;
+   }
+
+   int scanned_to = i1;
+   if(i2 >= 0) scanned_to = i2;
+   if(i3 >= 0) scanned_to = i3;
+   if(i4 >= 0) scanned_to = i4;
+   ctx.last_scanned_to = scanned_to;
+
+   return ok;
+}
+
+inline bool CheckWave2FromIndex_Hunter_Down_Ctx(
+      W2DownContext      &ctx,
+      const MqlRates     &rates[],
+      const bool         &insideClusterHL[],
+      const double       &bodyLowEff[],
+      const double       &bodyHighEff[],
+      const int           n,
+      const int           i1,
+      int                &i2,
+      int                &i3,
+      int                &i4
+   )
+{
+   bool ok = CheckWave2FromIndex_Hunter_Down(
+                rates,
+                insideClusterHL,
+                bodyLowEff,
+                bodyHighEff,
+                n,
+                i1,
+                i2,
+                i3,
+                i4
+             );
+
+   ctx.last_result   = ok;
+   ctx.last_c1_index = i1;
+   ctx.last_i2       = i2;
+   ctx.last_i3       = i3;
+   ctx.last_i4       = i4;
+
+   if(i1 >= 0 && i1 < n)
+   {
+      const bool c1Bull = (rates[i1].close > rates[i1].open);
+      ctx.last_need = (c1Bull ? 2 : 3);
+   }
+   else
+   {
+      ctx.last_need = 0;
+   }
+
+   int scanned_to = i1;
+   if(i2 >= 0) scanned_to = i2;
+   if(i3 >= 0) scanned_to = i3;
+   if(i4 >= 0) scanned_to = i4;
+   ctx.last_scanned_to = scanned_to;
+
+   return ok;
+}
+
+// نسخه‌های کمکی برای دنیای ماژور (استفادهٔ راحت بدون مدیریت مستقیم کانتکست)
+inline bool CheckWave2_FromIndex_LocalOnly_Down_Major(
+      const MqlRates     &rates[],
+      const bool         &insideClusterHL[],
+      const double       &bodyLowEff[],
+      const double       &bodyHighEff[],
+      const int           n,
+      const int           i1,
+      int                &i2,
+      int                &i3,
+      int                &i4
+   )
+{
+   return CheckWave2_FromIndex_LocalOnly_Down_Ctx(
+             g_w2d_ctx_major,
+             rates,
+             insideClusterHL,
+             bodyLowEff,
+             bodyHighEff,
+             n,
+             i1,
+             i2,
+             i3,
+             i4
+          );
+}
+
+inline bool CheckWave2FromIndex_Hunter_Down_Major(
+      const MqlRates     &rates[],
+      const bool         &insideClusterHL[],
+      const double       &bodyLowEff[],
+      const double       &bodyHighEff[],
+      const int           n,
+      const int           i1,
+      int                &i2,
+      int                &i3,
+      int                &i4
+   )
+{
+   return CheckWave2FromIndex_Hunter_Down_Ctx(
+             g_w2d_ctx_major,
+             rates,
+             insideClusterHL,
+             bodyLowEff,
+             bodyHighEff,
+             n,
+             i1,
+             i2,
+             i3,
+             i4
+          );
 }
 
 #endif // WAVEBOT_WAVE2_DOWN_MQH

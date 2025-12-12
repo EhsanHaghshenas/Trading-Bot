@@ -18,7 +18,6 @@ static int      g_sw_seed_d_c1     = -1;     // اندیس C1 هانتر
 static datetime g_sw_seed_d_xtime  = 0;      // زمان کراس ext lq
 static double   g_sw_seed_d_level  = 0.0;    // Low(C1 هانتر)
 static int      g_sw_counter_d     = 0;
-
 // ---------------- Hunter-DOWN Context (for major/minor worlds) ----------------
 struct HunterDownContext
 {

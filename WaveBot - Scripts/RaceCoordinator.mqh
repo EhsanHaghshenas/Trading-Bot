@@ -141,7 +141,6 @@ struct RacePathBState
    bool     postBreak_c1_lock;   // آیا C1_W3 قفل شده؟
    int      postBreak_c1_ref;    // مرجع C1_W3 پس از body-break
 };
-
 // =======================[ RaceContext: snapshot کامل وضعیت مسابقه ]=======================
 //
 // این struct تمام state داخلی RaceCoordinator را در خود جمع می‌کند تا بتوانیم
@@ -166,8 +165,8 @@ struct RaceContext
    datetime  active_ref_down_time;  // معادل g_active_ref_down_time
 
    // وضعیت داخلی Path-B برای Mode=UP و Mode=DOWN
-   RacePathBState pb_up;         // قبلاً g_pb_up
-   RacePathBState pb_down;       // قبلاً g_pb_down
+   RacePathBState pb_up;         // snapshot از g_pb_up
+   RacePathBState pb_down;       // snapshot از g_pb_down
 };
 
 static RacePathBState g_pb_up;    // وقتی Mode=UP است (مسیر B = اسکن DOWN)
@@ -198,10 +197,9 @@ inline void Race_InternalClearAll()
    g_race_ref_mtc_up   = 0.0;
    g_race_ref_mtc_down = 0.0;
 }
+// ---------------------- Helperهای کانتکست مسابقه ----------------------
 
-// =======================[ Helperهای کانتکست ]=======================
-
-// ریست‌کردن یک RaceContext مستقل از global
+// مقداردهی اولیهٔ یک کانتکست خالی (برای ساخت world جدید: ماژور/مینور)
 inline void Race_ContextReset(RaceContext &ctx)
 {
    ctx.locked      = false;
@@ -219,6 +217,7 @@ inline void Race_ContextReset(RaceContext &ctx)
    ctx.active_ref_down      = 0.0;
    ctx.active_ref_down_time = 0;
 
+   // Path-B داخلی این کانتکست را هم مثل حالت اولیه ریست می‌کنیم
    Race_ResetPathB(ctx.pb_up);
    Race_ResetPathB(ctx.pb_down);
 }
@@ -245,7 +244,7 @@ inline void Race_ContextExport(RaceContext &ctx)
    ctx.pb_down = g_pb_down;
 }
 
-// وارد کردن یک کانتکست روی global (Import)
+// برگرداندن یک snapshot ذخیره‌شده به داخل globalها (Import)
 inline void Race_ContextImport(const RaceContext &ctx)
 {
    g_race_locked      = ctx.locked;

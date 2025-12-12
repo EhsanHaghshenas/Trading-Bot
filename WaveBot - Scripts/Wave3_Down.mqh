@@ -61,18 +61,32 @@ bool CheckWave3CountOnly_Local_Down(const MqlRates &rates[],
    for(int j=i1_w3+1; j<n && (j-i1_w3)<=InpMaxBarsInWave; ++j)
    {
       // اسکیپ خوشهٔ inside سراسری
-      if(insideClusterHL[j])               { if(rates[j].low < barrierLow) barrierLow = rates[j].low; continue; }
+      if(insideClusterHL[j])
+      {
+         if(rates[j].low < barrierLow)
+            barrierLow = rates[j].low;
+         continue;
+      }
 
       // ابطال: نباید H1 شکسته شود
-      if(rates[j].high > H1) return false;
+      if(rates[j].high > H1)
+         return false;
 
       // داخل بدنهٔ مؤثر C1 ⇒ اسکیپ (و به‌روزرسانی barrier)
       if(rates[j].high <= C1_HighEff && rates[j].low >= C1_LowEff)
-      { if(rates[j].low < barrierLow) barrierLow = rates[j].low; continue; }
+      {
+         if(rates[j].low < barrierLow)
+            barrierLow = rates[j].low;
+         continue;
+      }
 
       // بعد از C1 فقط قرمزها شمارش می‌شوند؛ اما کندل سبز می‌تواند barrier را کاهش دهد
       if(rates[j].close >= rates[j].open)
-      { if(rates[j].low < barrierLow) barrierLow = rates[j].low; continue; }
+      {
+         if(rates[j].low < barrierLow)
+            barrierLow = rates[j].low;
+         continue;
+      }
 
       // پذیرش قدمِ قرمز فقط اگر Low آن از «کوچک‌ترین Low از آخرین قدم» پایین‌تر رود
       if(rates[j].low < barrierLow)
@@ -84,12 +98,17 @@ bool CheckWave3CountOnly_Local_Down(const MqlRates &rates[],
          if(found==2) k3=j;
          if(found==3) k4=j;
 
-         if(found>=need){ end_index_out=(k4>=0?k4:k3); return true; }
+         if(found>=need)
+         {
+            end_index_out = (k4>=0 ? k4 : k3);
+            return true;
+         }
          continue;
       }
 
       // اگر قدم پذیرفته نشد، barrier را با این کندل به‌روز نگه‌دار
-      if(rates[j].low < barrierLow) barrierLow = rates[j].low;
+      if(rates[j].low < barrierLow)
+         barrierLow = rates[j].low;
    }
    return false;
 }
@@ -98,19 +117,33 @@ bool CheckWave3CountOnly_Local_Down(const MqlRates &rates[],
 // همان منطق تابع اصلی را اجرا می‌کنیم، اما خروجی و اطلاعات موج۳ را در کانتکست
 // ذخیره می‌کنیم تا در دنیاهای ماژور/مینور بدون تداخل state استفاده شوند.
 
-inline bool CheckWave3CountOnly_Local_Down_Ctx(W3DownContext &ctx,
-                                               const MqlRates &rates[],
-                                               const bool &insideClusterHL[],
-                                               const double &bodyLowEff[], const double &bodyHighEff[],
-                                               const int n, const int i1_w3,
-                                               int &k2, int &k3, int &k4, int &end_index_out)
+inline bool CheckWave3CountOnly_Local_Down_Ctx(
+      W3DownContext    &ctx,
+      const MqlRates   &rates[],
+      const bool       &insideClusterHL[],
+      const double     &bodyLowEff[],
+      const double     &bodyHighEff[],
+      const int         n,
+      const int         i1_w3,
+      int              &k2,
+      int              &k3,
+      int              &k4,
+      int              &end_index_out
+   )
 {
    // اجرای منطق اصلی بدون هیچ تغییری
-   bool ok = CheckWave3CountOnly_Local_Down(rates,
-                                            insideClusterHL,
-                                            bodyLowEff, bodyHighEff,
-                                            n, i1_w3,
-                                            k2, k3, k4, end_index_out);
+   bool ok = CheckWave3CountOnly_Local_Down(
+                rates,
+                insideClusterHL,
+                bodyLowEff,
+                bodyHighEff,
+                n,
+                i1_w3,
+                k2,
+                k3,
+                k4,
+                end_index_out
+             );
 
    // ذخیرهٔ نتایج در کانتکست
    ctx.last_result    = ok;
@@ -135,18 +168,32 @@ inline bool CheckWave3CountOnly_Local_Down_Ctx(W3DownContext &ctx,
 }
 
 // نسخهٔ کمکی برای دنیای ماژور (برای راحتی و سازگاری در آینده)
-inline bool CheckWave3CountOnly_Local_Down_Major(const MqlRates &rates[],
-                                                 const bool &insideClusterHL[],
-                                                 const double &bodyLowEff[], const double &bodyHighEff[],
-                                                 const int n, const int i1_w3,
-                                                 int &k2, int &k3, int &k4, int &end_index_out)
+inline bool CheckWave3CountOnly_Local_Down_Major(
+      const MqlRates   &rates[],
+      const bool       &insideClusterHL[],
+      const double     &bodyLowEff[],
+      const double     &bodyHighEff[],
+      const int         n,
+      const int         i1_w3,
+      int              &k2,
+      int              &k3,
+      int              &k4,
+      int              &end_index_out
+   )
 {
-   return CheckWave3CountOnly_Local_Down_Ctx(g_w3d_ctx_major,
-                                             rates,
-                                             insideClusterHL,
-                                             bodyLowEff, bodyHighEff,
-                                             n, i1_w3,
-                                             k2, k3, k4, end_index_out);
+   return CheckWave3CountOnly_Local_Down_Ctx(
+             g_w3d_ctx_major,
+             rates,
+             insideClusterHL,
+             bodyLowEff,
+             bodyHighEff,
+             n,
+             i1_w3,
+             k2,
+             k3,
+             k4,
+             end_index_out
+          );
 }
 
 #endif // WAVEBOT_WAVE3_DOWN_MQH

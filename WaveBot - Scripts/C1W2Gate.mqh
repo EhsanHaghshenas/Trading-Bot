@@ -1,344 +1,253 @@
-// C1W2Gate.mqh
-
 #ifndef WAVEBOT_C1W2GATE_MQH
 #define WAVEBOT_C1W2GATE_MQH
 
-// ------------------------------
-// Context for C1–W2 and Path-B
-// ------------------------------
-struct C1W2GateCtx
-{
-   // Main c1–w2 hard gate (after base pair)
-   bool   up_active;
-   int    up_idx;
-   double up_level;
+// وضعیت برای اسکنِ W2 صعودیِ بعد از یک جفتِ صعودی
+static bool   g_c1w2_up_active = false;
+static int    g_c1w2_up_idx    = -1;     // اندیس کندلِ کاندید جاری
+static double g_c1w2_up_level  = 0.0;    // سطح پایش ابطال = High(c1)
 
-   bool   dn_active;
-   int    dn_idx;
-   double dn_level;
+// وضعیت برای اسکنِ W2 نزولیِ بعد از یک جفتِ نزولی
+static bool   g_c1w2_dn_active = false;
+static int    g_c1w2_dn_idx    = -1;     // اندیس کندلِ کاندید جاری
+static double g_c1w2_dn_level  = 0.0;    // سطح پایش ابطال = Low(c1)
 
-   // Path-B strict gate (after HWBB)
-   // PB_DN  => scanning DOWN (Mode=UP)
-   bool   pb_dn_active;
-   int    pb_dn_idx;
-   double pb_dn_level;
-
-   // PB_UP  => scanning UP (Mode=DOWN)
-   bool   pb_up_active;
-   int    pb_up_idx;
-   double pb_up_level;
-};
-
-// کانتکست پیش‌فرض که تمام کدهای قدیمی (بدون ctx) از آن استفاده می‌کنند
-static C1W2GateCtx g_c1w2_default_ctx;
-
-// --- helpers برای یک کانتکست ---
-
-inline void C1W2Gate_InitCtx(C1W2GateCtx &ctx)
-{
-   ctx.up_active  = false;
-   ctx.up_idx     = -1;
-   ctx.up_level   = 0.0;
-
-   ctx.dn_active  = false;
-   ctx.dn_idx     = -1;
-   ctx.dn_level   = 0.0;
-
-   ctx.pb_dn_active = false;
-   ctx.pb_dn_idx    = -1;
-   ctx.pb_dn_level  = 0.0;
-
-   ctx.pb_up_active = false;
-   ctx.pb_up_idx    = -1;
-   ctx.pb_up_level  = 0.0;
-}
-
-// ریست کامل state داخلی ماژول (جهت شروع اسکن جدید / تغییر سمبل / تایم‌فریم)
-inline void C1W2Gate_ResetGlobals()
-{
-   C1W2Gate_InitCtx(g_c1w2_default_ctx);
-}
-
-// snapshot helpers برای دنیای ماژور/مینور
-inline void C1W2Gate_ExportCtx(C1W2GateCtx &dst)
-{
-   dst = g_c1w2_default_ctx;
-}
-
-inline void C1W2Gate_ImportCtx(const C1W2GateCtx &src)
-{
-   g_c1w2_default_ctx = src;
-}
-
-// =====================================================
-//   UP: بعد از جفت صعودی  (Mode = UP; scan W2-UP)
-// =====================================================
-
-// نسخهٔ کانتکست‌محور
-inline void C1W2_UP_Start_Ctx(C1W2GateCtx &ctx,
-                              const MqlRates &rates[],
-                              const int idx)
-{
-   ctx.up_active = true;
-   ctx.up_idx    = idx;
-   ctx.up_level  = rates[idx].high; // بعدِ جفتِ صعودی: پایشِ High
-}
-
-// نسخهٔ بدون ctx (سازگار با کد فعلی) ⇒ روی کانتکست پیش‌فرض
+// ---------- UP ----------
 inline void C1W2_UP_Start(const MqlRates &rates[], const int idx)
 {
-   C1W2_UP_Start_Ctx(g_c1w2_default_ctx, rates, idx);
-}
-
-inline void C1W2_UP_OnW2Locked_Ctx(C1W2GateCtx &ctx)
-{
-   // به‌محض قفل‌شدن W2 (ورود به WAIT_CONFIRM)، قانون c1_w2 برای این سیکل تمام است
-   ctx.up_active = false;
+   g_c1w2_up_active = true;
+   g_c1w2_up_idx    = idx;
+   g_c1w2_up_level  = rates[idx].high; // بعدِ جفتِ صعودی: پایشِ High
 }
 
 inline void C1W2_UP_OnW2Locked()
 {
-   C1W2_UP_OnW2Locked_Ctx(g_c1w2_default_ctx);
+   // به‌محض قفل‌شدن W2 (ورود به WAIT_CONFIRM)، قانون c1_w2 برای این سیکل تمام است
+   g_c1w2_up_active = false;
 }
 
-inline bool C1W2_UP_ShouldAllowAt_Ctx(C1W2GateCtx &ctx,
-                                      const MqlRates &rates[],
-                                      const int i,
-                                      bool &reanchored)
+inline bool C1W2_UP_ShouldAllowAt(const MqlRates &rates[], const int i, bool &reanchored)
 {
    reanchored = false;
-   if(!ctx.up_active) return true;        // گِیت خاموش ⇒ اجازهٔ بررسی
-   if(i <  ctx.up_idx) return true;       // قبل از کاندید ⇒ بی‌اثر
-   if(i == ctx.up_idx) return true;       // خودِ کندلِ کاندید ⇒ مجاز
+   if(!g_c1w2_up_active) return true;        // گِیت خاموش ⇒ اجازهٔ بررسی
+   if(i <  g_c1w2_up_idx) return true;       // قبل از کاندید (از نظر زمانی) ⇒ بی‌اثر
+   if(i == g_c1w2_up_idx) return true;       // خودِ کندلِ کاندید ⇒ شروع مجاز
 
    // i > کاندید: داخل «پنجرهٔ ممنوعه» هستیم مگر اینکه شکست رخ دهد:
-   if(rates[i].high > ctx.up_level)       // شکست با wick یا body (STRICT: >)
+   if(rates[i].high > g_c1w2_up_level)       // شکست با wick یا body (STRICT: >)
    {
       // ابطال کاندید قبلی و ری‌انکر روی همین کندل
-      ctx.up_idx   = i;
-      ctx.up_level = rates[i].high;
-      reanchored   = true;
-      return true;                         // از همین کندل، شمارش W2 از نو مجاز است
+      g_c1w2_up_idx   = i;
+      g_c1w2_up_level = rates[i].high;
+      reanchored      = true;
+      return true;                           // از همین کندل، شمارش W2 از نو مجاز است
    }
    // هنوز شکست روی سطح پایش رخ نداده ⇒ ممنوعیت
    return false;
 }
 
-inline bool C1W2_UP_ShouldAllowAt(const MqlRates &rates[],
-                                  const int i,
-                                  bool &reanchored)
-{
-   return C1W2_UP_ShouldAllowAt_Ctx(g_c1w2_default_ctx, rates, i, reanchored);
-}
-
-// =====================================================
-//   DOWN: بعد از جفت نزولی  (Mode = DOWN; scan W2-DOWN)
-// =====================================================
-
-inline void C1W2_DN_Start_Ctx(C1W2GateCtx &ctx,
-                              const MqlRates &rates[],
-                              const int idx)
-{
-   ctx.dn_active = true;
-   ctx.dn_idx    = idx;
-   ctx.dn_level  = rates[idx].low; // بعدِ جفتِ نزولی: پایشِ Low
-}
-
+// ---------- DOWN ----------
 inline void C1W2_DN_Start(const MqlRates &rates[], const int idx)
 {
-   C1W2_DN_Start_Ctx(g_c1w2_default_ctx, rates, idx);
-}
-
-inline void C1W2_DN_OnW2Locked_Ctx(C1W2GateCtx &ctx)
-{
-   ctx.dn_active = false;
+   g_c1w2_dn_active = true;
+   g_c1w2_dn_idx    = idx;
+   g_c1w2_dn_level  = rates[idx].low; // بعدِ جفتِ نزولی: پایشِ Low
 }
 
 inline void C1W2_DN_OnW2Locked()
 {
-   C1W2_DN_OnW2Locked_Ctx(g_c1w2_default_ctx);
+   g_c1w2_dn_active = false;
 }
 
-inline bool C1W2_DN_ShouldAllowAt_Ctx(C1W2GateCtx &ctx,
-                                      const MqlRates &rates[],
-                                      const int i,
-                                      bool &reanchored)
+inline bool C1W2_DN_ShouldAllowAt(const MqlRates &rates[], const int i, bool &reanchored)
 {
    reanchored = false;
-   if(!ctx.dn_active) return true;
-   if(i <  ctx.dn_idx) return true;
-   if(i == ctx.dn_idx) return true;
+   if(!g_c1w2_dn_active) return true;
+   if(i <  g_c1w2_dn_idx) return true;
+   if(i == g_c1w2_dn_idx) return true;
 
    // i > کاندید: اجازه فقط اگر Low با هر نوع عبور شکسته شود
-   if(rates[i].low < ctx.dn_level)        // STRICT: <
+   if(rates[i].low < g_c1w2_dn_level)        // STRICT: <
    {
-      ctx.dn_idx   = i;
-      ctx.dn_level = rates[i].low;
-      reanchored   = true;
-      return true;
-   }
-   return false;
-}
-
-inline bool C1W2_DN_ShouldAllowAt(const MqlRates &rates[],
-                                  const int i,
-                                  bool &reanchored)
-{
-   return C1W2_DN_ShouldAllowAt_Ctx(g_c1w2_default_ctx, rates, i, reanchored);
-}
-
-// =====================================================
-//   Path-B Strict Gate (after HWBB)
-//   NOTE: "PB_DN" => Path-B while scanning DOWN (Mode=UP)
-//         "PB_UP" => Path-B while scanning UP   (Mode=DOWN)
-// =====================================================
-
-// ---- DOWN scan (Mode=UP) ----
-
-inline void C1W2_PB_DN_Enable_Ctx(C1W2GateCtx &ctx)
-{
-   ctx.pb_dn_active = true;
-   ctx.pb_dn_idx    = -1;
-   ctx.pb_dn_level  = 0.0;
-}
-
-inline void C1W2_PB_DN_Disable_Ctx(C1W2GateCtx &ctx)
-{
-   ctx.pb_dn_active = false;
-   ctx.pb_dn_idx    = -1;
-   ctx.pb_dn_level  = 0.0;
-}
-
-inline void C1W2_PB_DN_OnW2Locked_Ctx(C1W2GateCtx &ctx)
-{
-   C1W2_PB_DN_Disable_Ctx(ctx);
-}
-
-inline void C1W2_PB_DN_Reanchor_Ctx(C1W2GateCtx &ctx,
-                                    const MqlRates &rates[],
-                                    const int i)
-{
-   if(i < 0) return;
-   ctx.pb_dn_idx   = i;
-   ctx.pb_dn_level = rates[i].low;
-}
-
-inline bool C1W2_PB_DN_ShouldAllowAt_Ctx(C1W2GateCtx &ctx,
-                                         const MqlRates &rates[],
-                                         const int i,
-                                         bool &reanchored)
-{
-   reanchored = false;
-   if(!ctx.pb_dn_active) return true;
-
-   if(ctx.pb_dn_idx < 0)
-   {
-      ctx.pb_dn_idx   = i;
-      ctx.pb_dn_level = rates[i].low;
-      return true;
-   }
-   if(i == ctx.pb_dn_idx)
-      return true;
-
-   if(rates[i].low < ctx.pb_dn_level || rates[i].close < ctx.pb_dn_level)
-   {
-      ctx.pb_dn_idx   = i;
-      ctx.pb_dn_level = rates[i].low;
+      g_c1w2_dn_idx   = i;
+      g_c1w2_dn_level = rates[i].low;
       reanchored      = true;
       return true;
    }
    return false;
 }
 
-// نسخه‌های بدون ctx برای سازگاری با کد فعلی
-inline void C1W2_PB_DN_Enable()      { C1W2_PB_DN_Enable_Ctx(g_c1w2_default_ctx); }
-inline void C1W2_PB_DN_Disable()     { C1W2_PB_DN_Disable_Ctx(g_c1w2_default_ctx); }
-inline void C1W2_PB_DN_OnW2Locked()  { C1W2_PB_DN_OnW2Locked_Ctx(g_c1w2_default_ctx); }
+// ===== Path-B Strict Gate (after HWBB) =====
+// NOTE: "PB_DN" => Path-B while scanning DOWN (Mode=UP)
+//       "PB_UP" => Path-B while scanning UP   (Mode=DOWN)
 
+// ---- DOWN scan (Mode=UP) ----
+static bool   g_pb_dn_active = false;
+static int    g_pb_dn_idx    = -1;
+static double g_pb_dn_level  = 0.0;    // monitor: Low of locked C1
+
+inline void C1W2_PB_DN_Enable()  { g_pb_dn_active=true;  g_pb_dn_idx=-1; g_pb_dn_level=0.0; }
+inline void C1W2_PB_DN_Disable() { g_pb_dn_active=false; g_pb_dn_idx=-1; g_pb_dn_level=0.0; }
+inline void C1W2_PB_DN_OnW2Locked(){ C1W2_PB_DN_Disable(); }
 inline void C1W2_PB_DN_Reanchor(const MqlRates &rates[], const int i)
 {
-   C1W2_PB_DN_Reanchor_Ctx(g_c1w2_default_ctx, rates, i);
+   if(i<0) return;
+   g_pb_dn_idx   = i;
+   g_pb_dn_level = rates[i].low;
 }
 
-inline bool C1W2_PB_DN_ShouldAllowAt(const MqlRates &rates[],
-                                     const int i,
-                                     bool &reanchored)
+// اجازه‌ی بررسی C1 جدید در Path-B فقط اگر «ابطال با Low/Close پایین‌تر از سطحِ C1 فعلی» رخ داده باشد
+inline bool C1W2_PB_DN_ShouldAllowAt(const MqlRates &rates[], const int i, bool &reanchored)
 {
-   return C1W2_PB_DN_ShouldAllowAt_Ctx(g_c1w2_default_ctx, rates, i, reanchored);
+   reanchored=false;
+   if(!g_pb_dn_active) return true;
+
+   if(g_pb_dn_idx < 0){ g_pb_dn_idx=i; g_pb_dn_level=rates[i].low; return true; }
+   if(i==g_pb_dn_idx)  return true;
+
+   if(rates[i].low < g_pb_dn_level || rates[i].close < g_pb_dn_level)
+   {
+      g_pb_dn_idx   = i;
+      g_pb_dn_level = rates[i].low;
+      reanchored    = true;
+      return true;
+   }
+   return false;
 }
 
 // ---- UP scan (Mode=DOWN) ----
-
-inline void C1W2_PB_UP_Enable_Ctx(C1W2GateCtx &ctx)
+static bool   g_pb_up_active = false;
+static int    g_pb_up_idx    = -1;
+static double g_pb_up_level  = 0.0;    // monitor: High of locked C1
+// ------------------------------
+// Context snapshot for C1W2Gate (C1–W2 + Path-B)
+// ------------------------------
+struct C1W2GateContext
 {
-   ctx.pb_up_active = true;
-   ctx.pb_up_idx    = -1;
-   ctx.pb_up_level  = 0.0;
+   // Main C1–W2 hard gate state (after base pair)
+   bool   c1w2_up_active;
+   int    c1w2_up_idx;
+   double c1w2_up_level;
+
+   bool   c1w2_dn_active;
+   int    c1w2_dn_idx;
+   double c1w2_dn_level;
+
+   // Path-B strict gate (after HWBB)
+   bool   pb_dn_active;
+   int    pb_dn_idx;
+   double pb_dn_level;
+
+   bool   pb_up_active;
+   int    pb_up_idx;
+   double pb_up_level;
+};
+
+// مقداردهی اولیهٔ یک کانتکست خالی (برای ساخت world جدید: ماژور/مینور)
+inline void C1W2Gate_ContextInit(C1W2GateContext &ctx)
+{
+   ctx.c1w2_up_active = false;
+   ctx.c1w2_up_idx    = -1;
+   ctx.c1w2_up_level  = 0.0;
+
+   ctx.c1w2_dn_active = false;
+   ctx.c1w2_dn_idx    = -1;
+   ctx.c1w2_dn_level  = 0.0;
+
+   ctx.pb_dn_active   = false;
+   ctx.pb_dn_idx      = -1;
+   ctx.pb_dn_level    = 0.0;
+
+   ctx.pb_up_active   = false;
+   ctx.pb_up_idx      = -1;
+   ctx.pb_up_level    = 0.0;
 }
 
-inline void C1W2_PB_UP_Disable_Ctx(C1W2GateCtx &ctx)
+// Export: کپی وضعیت فعلی globalها به داخل کانتکست
+inline void C1W2Gate_ContextExport(C1W2GateContext &ctx)
 {
-   ctx.pb_up_active = false;
-   ctx.pb_up_idx    = -1;
-   ctx.pb_up_level  = 0.0;
+   ctx.c1w2_up_active = g_c1w2_up_active;
+   ctx.c1w2_up_idx    = g_c1w2_up_idx;
+   ctx.c1w2_up_level  = g_c1w2_up_level;
+
+   ctx.c1w2_dn_active = g_c1w2_dn_active;
+   ctx.c1w2_dn_idx    = g_c1w2_dn_idx;
+   ctx.c1w2_dn_level  = g_c1w2_dn_level;
+
+   ctx.pb_dn_active   = g_pb_dn_active;
+   ctx.pb_dn_idx      = g_pb_dn_idx;
+   ctx.pb_dn_level    = g_pb_dn_level;
+
+   ctx.pb_up_active   = g_pb_up_active;
+   ctx.pb_up_idx      = g_pb_up_idx;
+   ctx.pb_up_level    = g_pb_up_level;
 }
 
-inline void C1W2_PB_UP_OnW2Locked_Ctx(C1W2GateCtx &ctx)
+// Import: برگرداندن وضعیت ذخیره‌شدهٔ کانتکست به متغیرهای global
+inline void C1W2Gate_ContextImport(const C1W2GateContext &ctx)
 {
-   C1W2_PB_UP_Disable_Ctx(ctx);
+   g_c1w2_up_active = ctx.c1w2_up_active;
+   g_c1w2_up_idx    = ctx.c1w2_up_idx;
+   g_c1w2_up_level  = ctx.c1w2_up_level;
+
+   g_c1w2_dn_active = ctx.c1w2_dn_active;
+   g_c1w2_dn_idx    = ctx.c1w2_dn_idx;
+   g_c1w2_dn_level  = ctx.c1w2_dn_level;
+
+   g_pb_dn_active   = ctx.pb_dn_active;
+   g_pb_dn_idx      = ctx.pb_dn_idx;
+   g_pb_dn_level    = ctx.pb_dn_level;
+
+   g_pb_up_active   = ctx.pb_up_active;
+   g_pb_up_idx      = ctx.pb_up_idx;
+   g_pb_up_level    = ctx.pb_up_level;
 }
 
-inline void C1W2_PB_UP_Reanchor_Ctx(C1W2GateCtx &ctx,
-                                    const MqlRates &rates[],
-                                    const int i)
+// ریست کامل وضعیت گِیت C1–W2 و Path-B در world فعلی
+inline void C1W2Gate_ResetGlobals()
 {
-   if(i < 0) return;
-   ctx.pb_up_idx   = i;
-   ctx.pb_up_level = rates[i].high;
+   g_c1w2_up_active = false;
+   g_c1w2_up_idx    = -1;
+   g_c1w2_up_level  = 0.0;
+
+   g_c1w2_dn_active = false;
+   g_c1w2_dn_idx    = -1;
+   g_c1w2_dn_level  = 0.0;
+
+   g_pb_dn_active   = false;
+   g_pb_dn_idx      = -1;
+   g_pb_dn_level    = 0.0;
+
+   g_pb_up_active   = false;
+   g_pb_up_idx      = -1;
+   g_pb_up_level    = 0.0;
 }
 
-inline bool C1W2_PB_UP_ShouldAllowAt_Ctx(C1W2GateCtx &ctx,
-                                         const MqlRates &rates[],
-                                         const int i,
-                                         bool &reanchored)
+inline void C1W2_PB_UP_Enable()  { g_pb_up_active=true;  g_pb_up_idx=-1; g_pb_up_level=0.0; }
+inline void C1W2_PB_UP_Disable() { g_pb_up_active=false; g_pb_up_idx=-1; g_pb_up_level=0.0; }
+inline void C1W2_PB_UP_OnW2Locked(){ C1W2_PB_UP_Disable(); }
+inline void C1W2_PB_UP_Reanchor(const MqlRates &rates[], const int i)
 {
-   reanchored = false;
-   if(!ctx.pb_up_active) return true;
+   if(i<0) return;
+   g_pb_up_idx   = i;
+   g_pb_up_level = rates[i].high;
+}
 
-   if(ctx.pb_up_idx < 0)
+inline bool C1W2_PB_UP_ShouldAllowAt(const MqlRates &rates[], const int i, bool &reanchored)
+{
+   reanchored=false;
+   if(!g_pb_up_active) return true;
+
+   if(g_pb_up_idx < 0){ g_pb_up_idx=i; g_pb_up_level=rates[i].high; return true; }
+   if(i==g_pb_up_idx)  return true;
+
+   if(rates[i].high > g_pb_up_level || rates[i].close > g_pb_up_level)
    {
-      ctx.pb_up_idx   = i;
-      ctx.pb_up_level = rates[i].high;
-      return true;
-   }
-   if(i == ctx.pb_up_idx)
-      return true;
-
-   if(rates[i].high > ctx.pb_up_level || rates[i].close > ctx.pb_up_level)
-   {
-      ctx.pb_up_idx   = i;
-      ctx.pb_up_level = rates[i].high;
-      reanchored      = true;
+      g_pb_up_idx   = i;
+      g_pb_up_level = rates[i].high;
+      reanchored    = true;
       return true;
    }
    return false;
-}
-
-// نسخه‌های بدون ctx
-inline void C1W2_PB_UP_Enable()      { C1W2_PB_UP_Enable_Ctx(g_c1w2_default_ctx); }
-inline void C1W2_PB_UP_Disable()     { C1W2_PB_UP_Disable_Ctx(g_c1w2_default_ctx); }
-inline void C1W2_PB_UP_OnW2Locked()  { C1W2_PB_UP_OnW2Locked_Ctx(g_c1w2_default_ctx); }
-
-inline void C1W2_PB_UP_Reanchor(const MqlRates &rates[], const int i)
-{
-   C1W2_PB_UP_Reanchor_Ctx(g_c1w2_default_ctx, rates, i);
-}
-
-inline bool C1W2_PB_UP_ShouldAllowAt(const MqlRates &rates[],
-                                     const int i,
-                                     bool &reanchored)
-{
-   return C1W2_PB_UP_ShouldAllowAt_Ctx(g_c1w2_default_ctx, rates, i, reanchored);
 }
 
 #endif // WAVEBOT_C1W2GATE_MQH

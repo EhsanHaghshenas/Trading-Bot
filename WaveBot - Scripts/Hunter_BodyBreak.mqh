@@ -45,7 +45,7 @@ struct HWBBContext
    int      bb_counter_d;      // شمارنده‌ی مارکرها (DOWN)
 };
 
-// مقداردهی اولیهٔ یک کانتکست خالی (برای شروع یک دنیا: ماژور/مینور)
+// مقداردهی اولیهٔ یک کانتکست خالی (برای شروع دنیای ماژور/مینور)
 inline void HW_BB_ContextInit(HWBBContext &ctx)
 {
    // UP
@@ -65,7 +65,7 @@ inline void HW_BB_ContextInit(HWBBContext &ctx)
    ctx.bb_counter_d    = 0;
 }
 
-// Export: کپی‌کردن وضعیت فعلی globalها به داخل کانتکست
+// Export: کپی‌کردن وضعیت فعلی globalها به داخل کانتکست (برای ذخیره‌ی world فعلی)
 inline void HW_BB_ContextExport(HWBBContext &ctx)
 {
    // UP
@@ -85,7 +85,7 @@ inline void HW_BB_ContextExport(HWBBContext &ctx)
    ctx.bb_counter_d    = g_bb_counter_d;
 }
 
-// Import: اعمال یک کانتکست روی متغیرهای داخلی global
+// Import: برگرداندن وضعیت ذخیره‌شده‌ی یک کانتکست به globalها (برای سوییچ world)
 inline void HW_BB_ContextImport(const HWBBContext &ctx)
 {
    // UP
@@ -105,7 +105,7 @@ inline void HW_BB_ContextImport(const HWBBContext &ctx)
    g_bb_counter_d    = ctx.bb_counter_d;
 }
 
-// ریست مستقیم globalها (شروع تازه بدون context)
+// ریست‌کردن خود globalها (مثلاً برای شروع یک ریس جدید در همان کانتکست فعال)
 inline void HW_BB_ResetGlobals()
 {
    // UP
