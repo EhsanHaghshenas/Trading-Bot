@@ -1,5 +1,6 @@
 #ifndef WAVEBOT_EXTLQ_DOWN_MQH
 #define WAVEBOT_EXTLQ_DOWN_MQH
+#include <WaveBot/Markers.mqh>
 
 // -------------------- وضعیت ext lq فعلی (Down) --------------------
 static bool     g_extD_has   = false;
@@ -81,18 +82,20 @@ inline void ExtLQ_Down_ContextImport(const ExtLQDownContext &ctx)
 #define EXTLQ_D_LINE_CURR  "EXTLQ_D_CURR"
 #define EXTLQ_D_LINE_PREV  "EXTLQ_D_PREV"
 
-inline void ExtLQ_Down_DeleteLine(const string name)
+inline void ExtLQ_Down_DeleteLine(const string base)
 {
-   if(ObjectFind(0,name)!=-1) ObjectDelete(0,name);
+   const string name = __ScanPrefix() + base;
+   if(ObjectFind(0, name) != -1) ObjectDelete(0, name);
 }
 
-inline void ExtLQ_Down_DrawLine(const string name, const double price, const color col, const ENUM_LINE_STYLE st)
+inline void ExtLQ_Down_DrawLine(const string base, const double price, const color col, const ENUM_LINE_STYLE st)
 {
-   if(ObjectFind(0,name)==-1) ObjectCreate(0,name,OBJ_HLINE,0,0,price);
-   ObjectSetDouble(0,name,OBJPROP_PRICE,price);
-   ObjectSetInteger(0,name,OBJPROP_COLOR,col);
-   ObjectSetInteger(0,name,OBJPROP_STYLE,st);
-   ObjectSetInteger(0,name,OBJPROP_WIDTH,1);
+   const string name = __ScanPrefix() + base;
+   if(ObjectFind(0, name) == -1) ObjectCreate(0, name, OBJ_HLINE, 0, 0, price);
+   ObjectSetDouble(0, name, OBJPROP_PRICE, price);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, col);
+   ObjectSetInteger(0, name, OBJPROP_STYLE, st);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
 }
 
 inline bool ExtLQ_Down_Has(){ return g_extD_has; }
