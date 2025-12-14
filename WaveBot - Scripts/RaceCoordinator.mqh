@@ -157,6 +157,10 @@ struct RaceContext
    datetime  hwbb_time;          // معادل g_race_hwbb_time
    string    winner;             // معادل g_race_winner
    datetime  winner_time;        // معادل g_race_winner_time
+   
+   int       race_counter;          // g_race_counter
+   int       ref_hist_up_counter;   // g_ref_hist_up_counter
+   int       ref_hist_down_counter; // g_ref_hist_down_counter
 
    // نقطه‌ی مرجع برای MTC (LOW/HIGH C1 Hunter در هر سمت)
    double    ref_mtc_up;         // معادل g_race_ref_mtc_up
@@ -213,6 +217,10 @@ inline void Race_ContextReset(RaceContext &ctx)
    ctx.winner      = "";
    ctx.winner_time = 0;
 
+   ctx.race_counter          = 0;
+   ctx.ref_hist_up_counter   = 0;
+   ctx.ref_hist_down_counter = 0;
+
    ctx.ref_mtc_up   = 0.0;
    ctx.ref_mtc_down = 0.0;
 
@@ -221,7 +229,6 @@ inline void Race_ContextReset(RaceContext &ctx)
    ctx.active_ref_down      = 0.0;
    ctx.active_ref_down_time = 0;
 
-   // Path-B داخلی این کانتکست را هم مثل حالت اولیه ریست می‌کنیم
    Race_ResetPathB(ctx.pb_up);
    Race_ResetPathB(ctx.pb_down);
 }
@@ -235,6 +242,10 @@ inline void Race_ContextExport(RaceContext &ctx)
    ctx.hwbb_time   = g_race_hwbb_time;
    ctx.winner      = g_race_winner;
    ctx.winner_time = g_race_winner_time;
+   
+   ctx.race_counter          = g_race_counter;
+   ctx.ref_hist_up_counter   = g_ref_hist_up_counter;
+   ctx.ref_hist_down_counter = g_ref_hist_down_counter;
 
    ctx.ref_mtc_up   = g_race_ref_mtc_up;
    ctx.ref_mtc_down = g_race_ref_mtc_down;
@@ -257,6 +268,10 @@ inline void Race_ContextImport(const RaceContext &ctx)
    g_race_hwbb_time   = ctx.hwbb_time;
    g_race_winner      = ctx.winner;
    g_race_winner_time = ctx.winner_time;
+   
+   g_race_counter          = ctx.race_counter;
+   g_ref_hist_up_counter   = ctx.ref_hist_up_counter;
+   g_ref_hist_down_counter = ctx.ref_hist_down_counter;
 
    g_race_ref_mtc_up   = ctx.ref_mtc_up;
    g_race_ref_mtc_down = ctx.ref_mtc_down;
