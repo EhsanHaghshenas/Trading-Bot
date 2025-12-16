@@ -3,45 +3,23 @@
 
 #include <WaveBot/Types.mqh>
 #include <WaveBot/Markers.mqh>
-
 #include <WaveBot/ExtLQ.mqh>
 #include <WaveBot/ExtLQ_Down.mqh>
-
 #include <WaveBot/Hunter.mqh>
 #include <WaveBot/Hunter_Down.mqh>
 #include <WaveBot/Hunter_BodyBreak.mqh>
-
 #include <WaveBot/RaceCoordinator.mqh>
 #include <WaveBot/C1PreLock.mqh>
 #include <WaveBot/C1W2Gate.mqh>
 #include <WaveBot/SWGate.mqh>
 #include <WaveBot/ShadowBreaker.mqh>
 #include <WaveBot/W3ChainGuard.mqh>
-
 #include <WaveBot/FSMS.mqh>
 #include <WaveBot/FSMS_SW.mqh>
-
 #include <WaveBot/StrongRange.mqh>
 #include <WaveBot/SR_Gate.mqh>
 #include <WaveBot/SR_Mitigator.mqh>
 #include <WaveBot/SR_GoozBaghali.mqh>
-
-// ------------------------------------------------------------------
-// Forward declarations (برای جلوگیری از include-cycle)
-// ------------------------------------------------------------------
-int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf,
-                                     const datetime from_time, const datetime to_time,
-                                     const bool init_ext,
-                                     const double init_ext_price,
-                                     const datetime init_ext_time,
-                                     const string tag_suffix);
-
-int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf,
-                                          const datetime from_time, const datetime to_time,
-                                          const bool init_ext,
-                                          const double init_ext_price,
-                                          const datetime init_ext_time,
-                                          const string tag_suffix);
 
 // ------------------------------------------------------------------
 // World snapshot (MAJ / MIN)
@@ -78,6 +56,71 @@ static bool         g_wbwm_inited         = false;
 static WBWorldContext g_wbwm_major;
 static WBWorldContext g_wbwm_minor;
 static int          g_wbwm_minor_scan_seq = 0;
+
+// -------- NEW: step-per-candle MIN engine state (session-based) --------
+static bool                g_wbwm_minor_active       = false;
+static FSMS_SW_MinorSession g_wbwm_minor_sess;
+static int                 g_wbwm_minor_scan_id      = 0;
+static string              g_wbwm_minor_tag_suffix   = "";
+
+// guard: prevent double-run on same MAJ bar inside the same MAJ scan
+static int                 g_wbwm_last_maj_scan_id   = -1;
+static datetime            g_wbwm_last_maj_time      = 0;
+
+// NEW: minor session lifecycle
+static FSMS_SW_MinorSession g_wbwm_minor_s;
+// ------------------------------------------------------------------
+// MinorOff Stop-Gate (MIN world only)
+// ???: ??? ???? ??? ???? ???? ?????? ?? ???/?????? MinorOff ?? MAJ
+// ------------------------------------------------------------------
+static bool     g_wbwm_minor_stop_armed  = false;
+static datetime g_wbwm_minor_stop_start = 0;
+static double   g_wbwm_minor_stop_l1    = 0.0;
+static double   g_wbwm_minor_stop_l2    = 0.0;
+
+inline void WBWM_MinorStop_Disarm()
+{
+   g_wbwm_minor_stop_armed  = false;
+   g_wbwm_minor_stop_start  = 0;
+   g_wbwm_minor_stop_l1     = 0.0;
+   g_wbwm_minor_stop_l2     = 0.0;
+}
+
+inline void WBWM_MinorStop_Arm(const datetime starter_time,
+                               const double   off_level_1,
+                               const double   off_level_2)
+{
+   g_wbwm_minor_stop_armed  = true;
+   g_wbwm_minor_stop_start  = starter_time;
+   g_wbwm_minor_stop_l1     = off_level_1;
+   g_wbwm_minor_stop_l2     = off_level_2;
+}
+
+inline bool WBWM_MinorStop_ShouldStop(const MqlRates &r)
+{
+   if(!g_wbwm_minor_stop_armed) return false;
+
+   // Off ??? ??? ?? ???? ???? MinorStarter ????? ???
+   if(r.time <= g_wbwm_minor_stop_start) return false;
+
+   const double low  = r.low;
+   const double high = r.high;
+
+   bool crossed = false;
+
+   if(g_wbwm_minor_stop_l1 > 0.0)
+   {
+      if(low <= g_wbwm_minor_stop_l1 && high >= g_wbwm_minor_stop_l1)
+         crossed = true;
+   }
+   if(!crossed && g_wbwm_minor_stop_l2 > 0.0)
+   {
+      if(low <= g_wbwm_minor_stop_l2 && high >= g_wbwm_minor_stop_l2)
+         crossed = true;
+   }
+
+   return crossed;
+}
 
 // -------------------- helpers --------------------
 inline void __WBWM_InitExtLQUpContext(ExtLQContext &ctx)
@@ -176,9 +219,34 @@ inline void WBWM_ContextImport(const WBWorldContext &ctx)
 inline void WBWM_Init()
 {
    if(g_wbwm_inited) return;
+
    WBWM_ContextInit(g_wbwm_major);
    WBWM_ContextInit(g_wbwm_minor);
+
+   g_wbwm_minor_scan_seq     = 0;
+   g_wbwm_minor_active       = false;
+   g_wbwm_minor_scan_id      = 0;
+   g_wbwm_minor_tag_suffix   = "";
+
+   g_wbwm_last_maj_scan_id   = -1;
+   g_wbwm_last_maj_time      = 0;
+
    g_wbwm_inited = true;
+}
+
+// Delete only objects that belong to the current prefix (current g_scan_id + namespace)
+inline void WBWM_DeleteAllObjects_CurrentScan()
+{
+   const string p    = __ScanPrefix();
+   const int    plen = StringLen(p);
+
+   for(int i = ObjectsTotal(0) - 1; i >= 0; --i)
+   {
+      string on = ObjectName(0, i);
+      if(on == "" || StringLen(on) < plen) continue;
+      if(StringSubstr(on, 0, plen) != p)   continue;
+      ObjectDelete(0, on);
+   }
 }
 
 inline int __WBWM_FindMinorOffIndex(const MqlRates &rates[], const int n,
@@ -252,60 +320,114 @@ inline void __WBWM_ApplyMinorInitialExtLQ_NoDraw(const FSMS_SW_MinorSession &s)
 }
 
 // ------------------------------------------------------------------
-// MAIN entry: call from MAJ API loops after FSMS_SW_OnBarCtx()
+// MAIN entry: called from MAJ API loops after FSMS_SW_OnBarCtx()
+// Signature must match API calls: (rates,n,upto_j,to_time)
 // ------------------------------------------------------------------
-inline void WBWM_ProcessMinorStarterEvents(const MqlRates &rates[], const int n, const datetime major_to_time)
+inline void WBWM_ProcessMinorStarterEvents(const MqlRates &rates[],
+                                          const int n,
+                                          const int upto_j,
+                                          const datetime major_to_time)
 {
-   WBWM_Init();
+   if(!g_wbwm_inited)
+      WBWM_Init();
 
-   // prevent recursion: only in MAJ world
+   // Only MAJ drives MIN (never run inside MIN)
    if(Markers_GetNamespace() != "MAJ")
       return;
 
+   if(n <= 0 || upto_j < 0 || upto_j >= n)
+      return;
+
+   // guard: prevent double-call on the same bar within the same MAJ scan
+   const int      maj_scan_id = g_scan_id;
+   const datetime maj_t       = rates[upto_j].time;
+
+   if(g_wbwm_last_maj_scan_id == maj_scan_id && g_wbwm_last_maj_time == maj_t)
+      return;
+
+   g_wbwm_last_maj_scan_id = maj_scan_id;
+   g_wbwm_last_maj_time    = maj_t;
+
+   // --- 1) Consume ALL pending starter events (keep the latest) ---
    FSMS_SW_MinorSession s;
    while(FSMS_SW_PopMinorStartEvent(s))
    {
       if(!s.used) continue;
       if(s.starter_time <= 0) continue;
 
-      datetime from_time = s.starter_time;
-      datetime to_time   = major_to_time;
+      g_wbwm_minor_active     = true;
+      g_wbwm_minor_sess       = s;
+      g_wbwm_minor_scan_id    = (1000000 + (++g_wbwm_minor_scan_seq));
+      g_wbwm_minor_tag_suffix = "_minor_" + s.tag;
+   }
 
-      int off_idx = __WBWM_FindMinorOffIndex(rates, n, s.starter_idx, s.off_level_1, s.off_level_2);
-      if(off_idx >= 0 && off_idx < n)
-         to_time = rates[off_idx].time;
-
-      if(to_time < from_time)
+   // --- 2) If MIN is active: STOP immediately when MAJ session is closed (MinorOff) ---
+   if(g_wbwm_minor_active)
+   {
+      // if the MAJ session is no longer open => MIN must be OFF from THIS candle onward
+      if(FSMS_SW_Session_FindOpen(g_wbwm_minor_sess.tag, g_wbwm_minor_sess.dir) < 0)
       {
-         datetime tmp = from_time;
-         from_time = to_time;
-         to_time   = tmp;
+         g_wbwm_minor_active = false;
+
+         // hard safety: MAJ must remain MAJ
+         Markers_SetNamespace("MAJ");
+         g_scan_id = maj_scan_id;
+         return;
       }
 
-      // 1) export MAJ world
+      // --- 3) Run MIN step only up to THIS MAJ candle time ---
+      datetime step_to_time = maj_t;
+      if(major_to_time > 0 && step_to_time > major_to_time)
+         step_to_time = major_to_time;
+
+      if(step_to_time < g_wbwm_minor_sess.starter_time)
+         return;
+
+      // Export MAJ snapshot (so MAJ continues with no side effects)
       WBWM_ContextExport(g_wbwm_major);
 
-      // 2) import fresh MIN world
+      // Build a clean MIN world for this candle-step
       WBWM_ContextInit(g_wbwm_minor);
       g_wbwm_minor.markers_ns = "MIN";
-      g_wbwm_minor.scan_id    = (1000000 + (++g_wbwm_minor_scan_seq));
+      g_wbwm_minor.scan_id    = g_wbwm_minor_scan_id;
       WBWM_ContextImport(g_wbwm_minor);
 
-      // 3) apply initial minor extLQ (no draw)
-      __WBWM_ApplyMinorInitialExtLQ_NoDraw(s);
+      // Clear previous MIN objects of THIS session (to avoid orphan objects during rescan)
+      WBWM_DeleteAllObjects_CurrentScan();
 
-      // 4) run minor scan
-      string suffix = "_minor_" + s.tag;
-      if(s.dir == DIR_UP)
-         API_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, from_time, to_time, false, 0.0, 0, suffix);
+      // Apply initial extLQ anchor for MIN logic (no draw)
+      __WBWM_ApplyMinorInitialExtLQ_NoDraw(g_wbwm_minor_sess);
+
+      // Run MIN scan up to current candle (NO bump scan id)
+      if(g_wbwm_minor_sess.dir == DIR_UP)
+      {
+         API_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF,
+                                          g_wbwm_minor_sess.starter_time,
+                                          step_to_time,
+                                          true,
+                                          g_wbwm_minor_sess.ext_init_price,
+                                          g_wbwm_minor_sess.ext_init_time,
+                                          g_wbwm_minor_tag_suffix,
+                                          false);
+      }
       else
-         API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, from_time, to_time, false, 0.0, 0, suffix);
+      {
+         API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF,
+                                               g_wbwm_minor_sess.starter_time,
+                                               step_to_time,
+                                               true,
+                                               g_wbwm_minor_sess.ext_init_price,
+                                               g_wbwm_minor_sess.ext_init_time,
+                                               g_wbwm_minor_tag_suffix,
+                                               false);
+      }
 
-      // 5) keep MIN snapshot updated (optional)
-      WBWM_ContextExport(g_wbwm_minor);
-
-      // 6) restore MAJ world
+      // Restore MAJ snapshot
       WBWM_ContextImport(g_wbwm_major);
+
+      // HARD safety: force MAJ back (even if something leaked)
+      Markers_SetNamespace("MAJ");
+      g_scan_id = maj_scan_id;
    }
 }
 
