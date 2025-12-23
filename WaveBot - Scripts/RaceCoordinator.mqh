@@ -286,6 +286,21 @@ inline void Race_ContextImport(const RaceContext &ctx)
 }
 
 inline bool Race_IsLocked() { return g_race_locked; }
+// --------------------[ Nested Scan Helpers (World-Aware) ]--------------------
+// این helperها باعث می‌شوند اسکن‌های تو در تو (که از داخل RaceCoordinator فراخوانی می‌شوند)
+// در دنیای MIN، namespace/scan_id را به MAJ تغییر ندهند و همچنین از محدودهٔ اسکن فعلی
+// جلوتر نپرند (عدم استفاده از TimeCurrent در بک‌تست/اسکن‌های مرحله‌ای).
+inline bool __Race_IsMajorWorld()
+{
+   const string ns = Markers_GetNamespace();
+   return (ns == "" || ns == "MAJ");
+}
+
+inline datetime __Race_ScanToTime(const MqlRates &rates[], const int n)
+{
+   if(n > 0) return rates[n-1].time;
+   return TimeCurrent();
+}
 
 // --- NEW: fail-safe unlock on new ext LQ (called by Hunter side)
 // اگر مسابقه قفل باشد و از سمت مقابلِ مود فعلی ext lq جدیدی با زمان بعد از HWBB برسد، قفل را باز کن.
@@ -570,6 +585,8 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
             if(S.have_w3 && S.breakAchieved)
             {
                const datetime bt = rates[(S.bodyBreakIdx>=0?S.bodyBreakIdx:j)].time;
+
+               // اگر این رخداد زودتر از برنده‌ی موجود باشد، B برنده است
                if(g_race_winner=="" || bt < g_race_winner_time)
                {
                   g_race_winner="B"; g_race_winner_time=bt;
@@ -578,14 +595,25 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
 
                   const int __c1=(S.c1>=0?S.c1:g_race_hwbb_idx);
                   datetime __from = rates[__c1].time - (PeriodSeconds(InpTF)*5);
-                  datetime __to   = TimeCurrent();
+                  datetime __to   = __Race_ScanToTime(rates, n);
+                  const bool __bump = __Race_IsMajorWorld();
                   if(g_race_mode==DIR_UP)
-                     API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to);
+                     API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to,
+                                                           false, 0.0, 0, "", __bump);
 
                   Race_InternalClearAll();
                }
-               progressed=true; break;
+               else
+               {
+                  // Fail-safe: اگر به هر دلیل برنده قبلاً تعیین شده ولی race هنوز قفل است، قفل را باز کن
+                  if(g_race_locked)
+                     Race_InternalClearAll();
+               }
+
+               // IMPORTANT: این نقطه ترمینال است؛ ادامه‌ی while باعث لوپ بی‌نهایت می‌شود.
+               return;
             }
+
          }
          if(!progressed) break;
       }
@@ -773,6 +801,7 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
             if(S.have_w3 && S.breakAchieved)
             {
                const datetime bt = rates[(S.bodyBreakIdx>=0?S.bodyBreakIdx:j)].time;
+
                if(g_race_winner=="" || bt < g_race_winner_time)
                {
                   g_race_winner="B"; g_race_winner_time=bt;
@@ -781,14 +810,24 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
 
                   const int __c1=(S.c1>=0?S.c1:g_race_hwbb_idx);
                   datetime __from = rates[__c1].time - (PeriodSeconds(InpTF)*5);
-                  datetime __to   = TimeCurrent();
+                  datetime __to   = __Race_ScanToTime(rates, n);
+                  const bool __bump = __Race_IsMajorWorld();
                   if(g_race_mode==DIR_DOWN)
-                     API_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to);
+                     API_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to,
+                                                       false, 0.0, 0, "", __bump);
 
                   Race_InternalClearAll();
                }
-               progressed=true; break;
+               else
+               {
+                  if(g_race_locked)
+                     Race_InternalClearAll();
+               }
+
+               // IMPORTANT: این نقطه ترمینال است؛ ادامه‌ی while باعث لوپ بی‌نهایت می‌شود.
+               return;
             }
+
          }
          if(!progressed) break;
       }
@@ -1020,7 +1059,7 @@ inline void Race_SpecialRefBreak_MTC_Down(const MqlRates &rates[], const int n, 
    // 0) انتقال فوری ext lq به سمت DOWN بر مبنای ref تنظیم‌شده از HWBB(UP)
    //    (این همان Highِ C1ِ Hunter-UP است که قبلاً با Race_SetRefLevelForMTC_Down ست شده)
    if(g_race_ref_mtc_down > 0.0)
-      ExtLQ_Down_Set(g_race_ref_mtc_down, bt);   // <— کلید حل مشکل
+      ExtLQ_Down_Set(g_race_ref_mtc_down, bt);   // <-- کلید حل مشکل
 
    // 1) خروجی‌های MTC (مارکر BB + REF فعال)
    Race_MarkWin_B(DIR_UP, bt);
@@ -1033,11 +1072,16 @@ inline void Race_SpecialRefBreak_MTC_Down(const MqlRates &rates[], const int n, 
    SW_UP_ClearSeed();
 
    // 3) اسکن فشردهٔ DOWN از خود کندل BB (از همین لحظه Hunter روی ext lq جدید فعال است)
+   //    نکته: در دنیای MIN نباید namespace/scan_id به MAJ سوئیچ کند.
    const datetime __from = bt;
-   const datetime __to   = TimeCurrent();
+   const datetime __to   = __Race_ScanToTime(rates, n);
+   const bool     __bump = __Race_IsMajorWorld();
+
    if(__prev_mode == DIR_UP)
-      API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to);
+      API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to,
+                                            false, 0.0, 0, "", __bump);
 }
+
 
 // SPECIAL: ref-down body-break by HWBB(DOWN) => immediate MTC_UP win (Path B)
 inline void Race_SpecialRefBreak_MTC_Up(const MqlRates &rates[], const int n, const int j)
@@ -1048,7 +1092,7 @@ inline void Race_SpecialRefBreak_MTC_Up(const MqlRates &rates[], const int n, co
 
    // 0) انتقال فوری ext lq به سمت UP بر مبنای ref تنظیم‌شده از HWBB(DOWN)
    if(g_race_ref_mtc_up > 0.0)
-      ExtLQ_Set(g_race_ref_mtc_up, bt);          // <— کلید حل مشکل (سمت UP)
+      ExtLQ_Set(g_race_ref_mtc_up, bt);          // <-- کلید حل مشکل (سمت UP)
 
    // 1) خروجی‌های MTC (مارکر BB + REF فعال)
    Race_MarkWin_B(DIR_DOWN, bt);
@@ -1061,10 +1105,14 @@ inline void Race_SpecialRefBreak_MTC_Up(const MqlRates &rates[], const int n, co
    SW_DOWN_ClearSeed();
 
    // 3) اسکن فشردهٔ UP از همان کندل BB
+   //    نکته: در دنیای MIN نباید namespace/scan_id به MAJ سوئیچ کند.
    const datetime __from = bt;
-   const datetime __to   = TimeCurrent();
+   const datetime __to   = __Race_ScanToTime(rates, n);
+   const bool     __bump = __Race_IsMajorWorld();
+
    if(__prev_mode == DIR_DOWN)
-      API_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to);
+      API_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to,
+                                       false, 0.0, 0, "", __bump);
 }
 
 #endif // WAVEBOT_RACECOORDINATOR_MQH
