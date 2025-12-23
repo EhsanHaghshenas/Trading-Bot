@@ -18,17 +18,18 @@
 #include <WaveBot/Hunter.mqh>      // for SW_UP_ClearSeed()
 #include <WaveBot/Hunter_Down.mqh> // for SW_DOWN_ClearSeed()
 
-//------------------------------ وضعیت کلی مسابقه ------------------------------
+//------------------------------ ????? ??? ?????? ------------------------------
 static bool      g_race_locked       = false;
-static Direction g_race_mode         = DIR_UP;   // Mode لحظهٔ شروع مسابقه
-static int       g_race_hwbb_idx     = -1;       // ایندکس کندل HWBB
-static datetime  g_race_hwbb_time    = 0;        // زمان HWBB
-static string    g_race_winner       = "";       // "A" یا "B"
+static Direction g_race_mode         = DIR_UP;   // Mode ????? ???? ??????
+static int       g_race_hwbb_idx     = -1;       // ?????? ???? HWBB
+static datetime  g_race_hwbb_time    = 0;        // ???? HWBB
+static datetime  g_world_hwbb_time   = 0;        // ???? ????? HWBB ?? ??? world (???? ??????? ?? ?? HWBB)
+static string    g_race_winner       = "";       // "A" ?? "B"
 static datetime  g_race_winner_time  = 0;
-static int       g_race_counter      = 0;        // برای نام‌گذاری مارکرها
-// نقطهٔ مرجع برای ترسیم بعد از MTC
-static double   g_race_ref_mtc_up   = 0.0;  // mtc_up ⇒ Lowِ C1ِ Hunter(DOWN)
-static double   g_race_ref_mtc_down = 0.0;  // mtc_down ⇒ Highِ C1ِ Hunter(UP)
+static int       g_race_counter      = 0;        // ???? ????????? ???????
+// ????? ???? ???? ????? ??? ?? MTC
+static double   g_race_ref_mtc_up   = 0.0;  // mtc_up ? Low? C1? Hunter(DOWN)
+static double   g_race_ref_mtc_down = 0.0;  // mtc_down ? High? C1? Hunter(UP)
 
 // -----[ Reference History (draw immediately when created) ]-----
 static int g_ref_hist_up_counter   = 0;
@@ -64,7 +65,7 @@ inline bool Race_RefDown_IsActive() { return (g_active_ref_down_time > g_active_
 inline double Race_ActiveRef_Up()   { return g_active_ref_up; }
 inline double Race_ActiveRef_Down() { return g_active_ref_down; }
 
-// رسم فوری تاریخچه‌ی مرجع برای MTC_UP (مرجع از سمت DOWN می‌آید)
+// ??? ???? ????????? ???? ???? MTC_UP (???? ?? ??? DOWN ??????)
 inline void Race_DrawRefHistory_Up(const double price, const datetime t)
 {
    if(price <= 0.0) return;
@@ -85,7 +86,7 @@ inline void Race_DrawRefHistory_Up(const double price, const datetime t)
 }
 
 
-// رسم فوری تاریخچه‌ی مرجع برای MTC_DOWN (مرجع از سمت UP می‌آید)
+// ??? ???? ????????? ???? ???? MTC_DOWN (???? ?? ??? UP ??????)
 inline void Race_DrawRefHistory_Down(const double price, const datetime t)
 {
    if(price <= 0.0) return;
@@ -105,80 +106,81 @@ inline void Race_DrawRefHistory_Down(const double price, const datetime t)
       MarkV("REF_DN_HIST_T_" + IntegerToString(g_ref_hist_down_counter), t, clrWhite);
 }
 
-// ست‌کننده‌ها (از Hunter_BodyBreak فراخوانی می‌شوند)
+// ??????????? (?? Hunter_BodyBreak ???????? ???????)
 inline void Race_SetRefLevelForMTC_Up(const double price)   { g_race_ref_mtc_up   = price; }
 inline void Race_SetRefLevelForMTC_Down(const double price) { g_race_ref_mtc_down = price; }
 
 enum RState { R_IDLE=0, R_SEARCH_W2=1, R_WAIT_CONFIRM=2 };
 
-// وضعیت داخلی مسیر B برای هر حالت
+// ????? ????? ???? B ???? ?? ????
 struct RacePathBState
 {
    bool     init;
    int      state;            // R_SEARCH_W2 / R_WAIT_CONFIRM
    int      idx;
 
-   // W2 جاری
+   // W2 ????
    int      c1,c2,c3,c4,cend;
 
-   // وضعیت W3
+   // ????? W3
    bool     have_w3;
    int      w3_c1, k2,k3,k4, w3_end;
 
-   // کاندید C1 برای مسیر مستقیم
+   // ?????? C1 ???? ???? ??????
    int      w3_cand;
-   double   w3_cand_low;      // برای اسکن UP
-   double   w3_cand_high;     // برای اسکن DOWN
+   double   w3_cand_low;      // ???? ???? UP
+   double   w3_cand_high;     // ???? ???? DOWN
 
-   // مدیریت wick/body-break
+   // ?????? wick/body-break
    bool     wickActive;
    int      firstWickIdx, wickBreakIdx;
    double   bodyBreakLevel;
    bool     breakAchieved;
    int      bodyBreakIdx;
 
-   // --- MTC candidate tracking (از HWBB)
+   // --- MTC candidate tracking (?? HWBB)
    int      mtc_c1_cand;
    double   mtc_c1_level;
 
-   // --- NEW: Guard پس از body-break: قفل C1_W3
-   bool     postBreak_c1_lock;   // آیا C1_W3 قفل شده؟
-   int      postBreak_c1_ref;    // مرجع C1_W3 پس از body-break
+   // --- NEW: Guard ?? ?? body-break: ??? C1_W3
+   bool     postBreak_c1_lock;   // ??? C1_W3 ??? ????
+   int      postBreak_c1_ref;    // ???? C1_W3 ?? ?? body-break
 };
-// =======================[ RaceContext: snapshot کامل وضعیت مسابقه ]=======================
+// =======================[ RaceContext: snapshot ???? ????? ?????? ]=======================
 //
-// این struct تمام state داخلی RaceCoordinator را در خود جمع می‌کند تا بتوانیم
-// آن را برای دنیای ماژور/مینور جداگانه نگه داریم و هر زمان لازم بود وارد/خارج کنیم.
+// ??? struct ???? state ????? RaceCoordinator ?? ?? ??? ??? ?????? ?? ???????
+// ?? ?? ???? ????? ?????/????? ??????? ??? ????? ? ?? ???? ???? ??? ????/???? ????.
 struct RaceContext
 {
-   bool      locked;             // معادل g_race_locked
-   Direction mode;               // معادل g_race_mode
-   int       hwbb_idx;           // معادل g_race_hwbb_idx
-   datetime  hwbb_time;          // معادل g_race_hwbb_time
-   string    winner;             // معادل g_race_winner
-   datetime  winner_time;        // معادل g_race_winner_time
+   bool      locked;             // ????? g_race_locked
+   Direction mode;               // ????? g_race_mode
+   int       hwbb_idx;           // ????? g_race_hwbb_idx
+   datetime  hwbb_time;          // ????? g_race_hwbb_time
+   datetime  world_hwbb_time;    // ???? HWBB ?? ??? world (????? g_world_hwbb_time)
+   string    winner;             // ????? g_race_winner
+   datetime  winner_time;        // ????? g_race_winner_time
    
    int       race_counter;          // g_race_counter
    int       ref_hist_up_counter;   // g_ref_hist_up_counter
    int       ref_hist_down_counter; // g_ref_hist_down_counter
 
-   // نقطه‌ی مرجع برای MTC (LOW/HIGH C1 Hunter در هر سمت)
-   double    ref_mtc_up;         // معادل g_race_ref_mtc_up
-   double    ref_mtc_down;       // معادل g_race_ref_mtc_down
+   // ?????? ???? ???? MTC (LOW/HIGH C1 Hunter ?? ?? ???)
+   double    ref_mtc_up;         // ????? g_race_ref_mtc_up
+   double    ref_mtc_down;       // ????? g_race_ref_mtc_down
 
-   // Active ref (آخرین مرجع MTC که فعال است)
-   double    active_ref_up;         // معادل g_active_ref_up
-   datetime  active_ref_up_time;    // معادل g_active_ref_up_time
-   double    active_ref_down;       // معادل g_active_ref_down
-   datetime  active_ref_down_time;  // معادل g_active_ref_down_time
+   // Active ref (????? ???? MTC ?? ???? ???)
+   double    active_ref_up;         // ????? g_active_ref_up
+   datetime  active_ref_up_time;    // ????? g_active_ref_up_time
+   double    active_ref_down;       // ????? g_active_ref_down
+   datetime  active_ref_down_time;  // ????? g_active_ref_down_time
 
-   // وضعیت داخلی Path-B برای Mode=UP و Mode=DOWN
-   RacePathBState pb_up;         // snapshot از g_pb_up
-   RacePathBState pb_down;       // snapshot از g_pb_down
+   // ????? ????? Path-B ???? Mode=UP ? Mode=DOWN
+   RacePathBState pb_up;         // snapshot ?? g_pb_up
+   RacePathBState pb_down;       // snapshot ?? g_pb_down
 };
 
-static RacePathBState g_pb_up;    // وقتی Mode=UP است (مسیر B = اسکن DOWN)
-static RacePathBState g_pb_down;  // وقتی Mode=DOWN است (مسیر B = اسکن UP)
+static RacePathBState g_pb_up;    // ???? Mode=UP ??? (???? B = ???? DOWN)
+static RacePathBState g_pb_down;  // ???? Mode=DOWN ??? (???? B = ???? UP)
 
 inline void Race_ResetPathB(RacePathBState &S)
 {
@@ -205,15 +207,16 @@ inline void Race_InternalClearAll()
    g_race_ref_mtc_up   = 0.0;
    g_race_ref_mtc_down = 0.0;
 }
-// ---------------------- Helperهای کانتکست مسابقه ----------------------
+// ---------------------- Helper??? ??????? ?????? ----------------------
 
-// مقداردهی اولیهٔ یک کانتکست خالی (برای ساخت world جدید: ماژور/مینور)
+// ???????? ?????? ?? ??????? ???? (???? ???? world ????: ?????/?????)
 inline void Race_ContextReset(RaceContext &ctx)
 {
    ctx.locked      = false;
    ctx.mode        = DIR_UP;
    ctx.hwbb_idx    = -1;
    ctx.hwbb_time   = 0;
+   ctx.world_hwbb_time = 0;
    ctx.winner      = "";
    ctx.winner_time = 0;
 
@@ -233,13 +236,14 @@ inline void Race_ContextReset(RaceContext &ctx)
    Race_ResetPathB(ctx.pb_down);
 }
 
-// کپی‌کردن state فعلی global به داخل یک کانتکست (Export)
+// ???????? state ???? global ?? ???? ?? ??????? (Export)
 inline void Race_ContextExport(RaceContext &ctx)
 {
    ctx.locked      = g_race_locked;
    ctx.mode        = g_race_mode;
    ctx.hwbb_idx    = g_race_hwbb_idx;
    ctx.hwbb_time   = g_race_hwbb_time;
+   ctx.world_hwbb_time = g_world_hwbb_time;
    ctx.winner      = g_race_winner;
    ctx.winner_time = g_race_winner_time;
    
@@ -259,13 +263,14 @@ inline void Race_ContextExport(RaceContext &ctx)
    ctx.pb_down = g_pb_down;
 }
 
-// برگرداندن یک snapshot ذخیره‌شده به داخل globalها (Import)
+// ????????? ?? snapshot ????????? ?? ???? global?? (Import)
 inline void Race_ContextImport(const RaceContext &ctx)
 {
    g_race_locked      = ctx.locked;
    g_race_mode        = ctx.mode;
    g_race_hwbb_idx    = ctx.hwbb_idx;
    g_race_hwbb_time   = ctx.hwbb_time;
+   g_world_hwbb_time  = ctx.world_hwbb_time;
    g_race_winner      = ctx.winner;
    g_race_winner_time = ctx.winner_time;
    
@@ -286,10 +291,14 @@ inline void Race_ContextImport(const RaceContext &ctx)
 }
 
 inline bool Race_IsLocked() { return g_race_locked; }
+inline bool     Race_WorldHWBBSeen()  { return (g_world_hwbb_time > 0); }
+inline datetime Race_WorldHWBBTime()  { return g_world_hwbb_time; }
+// FSMS is an early (pre-HWBB) detector; in MIN world we stop it after the first HWBB is seen
+inline bool Race_ShouldAllowFSMS(){ return !(StringCompare(Markers_GetNamespace(),"MIN")==0 && Race_WorldHWBBSeen()); }
 // --------------------[ Nested Scan Helpers (World-Aware) ]--------------------
-// این helperها باعث می‌شوند اسکن‌های تو در تو (که از داخل RaceCoordinator فراخوانی می‌شوند)
-// در دنیای MIN، namespace/scan_id را به MAJ تغییر ندهند و همچنین از محدودهٔ اسکن فعلی
-// جلوتر نپرند (عدم استفاده از TimeCurrent در بک‌تست/اسکن‌های مرحله‌ای).
+// ??? helper?? ???? ??????? ???????? ?? ?? ?? (?? ?? ???? RaceCoordinator ???????? ???????)
+// ?? ????? MIN? namespace/scan_id ?? ?? MAJ ????? ????? ? ?????? ?? ??????? ???? ????
+// ????? ????? (??? ??????? ?? TimeCurrent ?? ??????/???????? ????????).
 inline bool __Race_IsMajorWorld()
 {
    const string ns = Markers_GetNamespace();
@@ -303,18 +312,18 @@ inline datetime __Race_ScanToTime(const MqlRates &rates[], const int n)
 }
 
 // --- NEW: fail-safe unlock on new ext LQ (called by Hunter side)
-// اگر مسابقه قفل باشد و از سمت مقابلِ مود فعلی ext lq جدیدی با زمان بعد از HWBB برسد، قفل را باز کن.
+// ??? ?????? ??? ???? ? ?? ??? ?????? ??? ???? ext lq ????? ?? ???? ??? ?? HWBB ????? ??? ?? ??? ??.
 inline void Race_TryUnlockOnNewLQ_Notify(const Direction lq_side, const datetime lq_time)
 {
    if(!g_race_locked) return;
    if(lq_time <= 0 || lq_time < g_race_hwbb_time) return;
 
-   // اگر مسابقه با Mode=UP شروع شده، ext lq معتبرِ سمت DOWN نشانه‌ی برنده بودن B است (و بالعکس)
+   // ??? ?????? ?? Mode=UP ???? ???? ext lq ?????? ??? DOWN ??????? ????? ???? B ??? (? ??????)
    if(g_race_mode == DIR_UP  && lq_side == DIR_DOWN){ Race_InternalClearAll(); return; }
    if(g_race_mode == DIR_DOWN&& lq_side == DIR_UP  ){ Race_InternalClearAll(); return; }
 }
 
-// مارکرهای خروجی مسابقه
+// ???????? ????? ??????
 inline void Race_MarkStart(const Direction mode, const datetime t)
 {
    ++g_race_counter;
@@ -334,21 +343,32 @@ inline void Race_MarkWin_B(const Direction mode, const datetime t)
    MarkV( (mode==DIR_UP ? "MTC_D_" : "MTC_U_") + tag, t, (mode==DIR_UP?clrFireBrick:clrLime) );
 }
 
-//--------------------------- شروع مسابقه از HWBB ------------------------------
+//--------------------------- ???? ?????? ?? HWBB ------------------------------
 inline void Race_Start_UP(const MqlRates &rates[], const int n, const int hwbb_idx)
 {
-   if(g_race_locked) return; // امنیت
+   if(g_race_locked) return; // ?????
    g_race_locked     = true;
    g_race_mode       = DIR_UP;
    g_race_hwbb_idx   = hwbb_idx;
-   g_race_hwbb_time  = (hwbb_idx>=0 && hwbb_idx<n? rates[hwbb_idx].time : TimeCurrent());
-   g_race_winner     = ""; g_race_winner_time=0;
+   g_race_hwbb_time  = (hwbb_idx>=0 && hwbb_idx<n ? rates[hwbb_idx].time : TimeCurrent());
+
+   // remember: HWBB happened in this world-run (do NOT clear inside Race_InternalClearAll)
+   if(g_world_hwbb_time <= 0 || g_race_hwbb_time > g_world_hwbb_time)
+      g_world_hwbb_time = g_race_hwbb_time;
+
+   g_race_winner     = ""; 
+   g_race_winner_time= 0;
+
    Race_ResetPathB(g_pb_up);
-   g_pb_up.init=true; g_pb_up.state=R_SEARCH_W2; g_pb_up.idx = MathMax(0, hwbb_idx);
-      // NEW: start C1 candidate from the HWBB bar (Mode=UP ⇒ scanning DOWN)
-   g_pb_up.mtc_c1_cand = -1;
+   g_pb_up.init=true;
+   g_pb_up.state=R_SEARCH_W2;
+   g_pb_up.idx = MathMax(0, hwbb_idx);
+
+   g_pb_up.mtc_c1_cand  = -1;
    g_pb_up.mtc_c1_level = 0.0;
+
    Race_MarkStart(DIR_UP, g_race_hwbb_time);
+
    // Enable strict C1-W2 gate for Path-B (scanning DOWN)
    C1W2_PB_DN_Enable();
 }
@@ -359,27 +379,39 @@ inline void Race_Start_DOWN(const MqlRates &rates[], const int n, const int hwbb
    g_race_locked     = true;
    g_race_mode       = DIR_DOWN;
    g_race_hwbb_idx   = hwbb_idx;
-   g_race_hwbb_time  = (hwbb_idx>=0 && hwbb_idx<n? rates[hwbb_idx].time : TimeCurrent());
-   g_race_winner     = ""; g_race_winner_time=0;
+   g_race_hwbb_time  = (hwbb_idx>=0 && hwbb_idx<n ? rates[hwbb_idx].time : TimeCurrent());
+
+   // remember: HWBB happened in this world-run
+   if(g_world_hwbb_time <= 0 || g_race_hwbb_time > g_world_hwbb_time)
+      g_world_hwbb_time = g_race_hwbb_time;
+
+   g_race_winner     = "";
+   g_race_winner_time= 0;
+
    Race_ResetPathB(g_pb_down);
-   g_pb_down.init=true; g_pb_down.state=R_SEARCH_W2; g_pb_down.idx = MathMax(0, hwbb_idx);
-      // NEW: start C1 candidate from the HWBB bar (Mode=DOWN ⇒ scanning UP)
-   g_pb_down.mtc_c1_cand = -1;
+   g_pb_down.init=true;
+   g_pb_down.state=R_SEARCH_W2;
+   g_pb_down.idx = MathMax(0, hwbb_idx);
+
+   g_pb_down.mtc_c1_cand  = -1;
    g_pb_down.mtc_c1_level = 0.0;
+
    Race_MarkStart(DIR_DOWN, g_race_hwbb_time);
+
    // Enable strict C1-W2 gate for Path-B (scanning UP)
    C1W2_PB_UP_Enable();
 }
 
-//--------------------------- اعلام مسیر A (SW هم‌جهت) -------------------------
+
+//--------------------------- ????? ???? A (SW ??????) -------------------------
 inline void Race_OnSWConfirmed_UP(const MqlRates &rates[], const int n, const int w3_c1, const int bodyBreakIdx)
 {
    if(!g_race_locked || g_race_mode!=DIR_UP) return;
    if(bodyBreakIdx<0 || bodyBreakIdx>=n) return;
    const datetime t = rates[bodyBreakIdx].time;
-   if(t < g_race_hwbb_time) return; // حتما بعد از HWBB
+   if(t < g_race_hwbb_time) return; // ???? ??? ?? HWBB
 
-   // اگر هنوز برنده‌ای تعیین نشده یا این زودتر است:
+   // ??? ???? ???????? ????? ???? ?? ??? ????? ???:
    if(g_race_winner=="" || t < g_race_winner_time)
    {
       g_race_winner="A"; g_race_winner_time=t;
@@ -403,8 +435,8 @@ inline void Race_OnSWConfirmed_DOWN(const MqlRates &rates[], const int n, const 
    }
 }
 
-//--------------------------- مسیر B برای Mode=UP (اسکن DOWN) ------------------
-// از خود HWBB: W2(DOWN) -> W3(DOWN)+body-break. هرکدام زودتر از SW هم‌جهت رخ دهد، برنده است.
+//--------------------------- ???? B ???? Mode=UP (???? DOWN) ------------------
+// ?? ??? HWBB: W2(DOWN) -> W3(DOWN)+body-break. ?????? ????? ?? SW ?????? ?? ???? ????? ???.
 inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const double &bodyLowEff[], const double &bodyHighEff[], const int n, const int upto_j)
 {
    if(!g_race_locked || g_race_mode!=DIR_UP) return;
@@ -425,16 +457,16 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
             {
                if(rates[i].close < Race_ActiveRef_Up())
                {
-                  // برنده‌ی B با MTC_DOWN (بدون نیاز به W2/W3)
+                  // ??????? B ?? MTC_DOWN (???? ???? ?? W2/W3)
                   Race_SpecialRefBreak_MTC_Down(rates, n, i);
-                  return;   // Race_* خودش قفل را آزاد و اسکن بعدی را هندل می‌کند
+                  return;   // Race_* ???? ??? ?? ???? ? ???? ???? ?? ???? ??????
                }
             }
             
             // --- STRICT Path-B Gate (DOWN scan) ---
             bool __re=false;
             if(!C1W2_PB_DN_ShouldAllowAt(rates, i, __re)) continue;
-            if(__re) S.idx=i;    // re-anchor روی همین کندل
+            if(__re) S.idx=i;    // re-anchor ??? ???? ????
 
             if(insideHL[i]) continue;
 
@@ -447,7 +479,7 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
             // --- Lock W2 context (W2 found) ---
             S.c1=i; S.c2=i2; S.c3=i3; S.c4=i4; S.cend=(S.c4>=0?S.c4:S.c3);
 
-            // پس از قفل W2، گیت Path-B دیگر نیازی نیست
+            // ?? ?? ??? W2? ??? Path-B ???? ????? ????
             C1W2_PB_DN_OnW2Locked();
 
             // reset W3 state
@@ -513,14 +545,14 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
                }
             }
 
-            // Chain-Invalidation در پنجره‌ی ویکی (pre-body): rewind و همزمان re-anchor گیت Path-B
+            // Chain-Invalidation ?? ??????? ???? (pre-body): rewind ? ?????? re-anchor ??? Path-B
             {
                int __rew=-1;
                if(ChainInv_PreBody_WickWindow_DN_OnBar(rates,insideHL,n,j,
                      S.breakAchieved,S.wickActive,S.firstWickIdx,
                      S.w3_c1,S.w3_cand,__rew))
                {
-                  C1W2_PB_DN_Reanchor(rates, __rew); // گیت هم دقیقاً روی بارِ ویک قفل شود
+                  C1W2_PB_DN_Reanchor(rates, __rew); // ??? ?? ?????? ??? ???? ??? ??? ???
                   S.idx          = __rew;
                   S.state        = R_SEARCH_W2;
                   progressed     = true;
@@ -557,7 +589,7 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
                { S.have_w3=true; if(S.w3_c1<0) S.w3_c1=startIdx; S.k2=a2; S.k3=a3; S.k4=a4; S.w3_end=w3e; }
             }
 
-            // Guard: change of C1_W3 after body-break ⇒ invalidate W2
+            // Guard: change of C1_W3 after body-break ? invalidate W2
             if(S.breakAchieved && !S.have_w3)
             {
                int __c1_now = (S.w3_c1>=0 ? S.w3_c1 : S.w3_cand);
@@ -586,42 +618,54 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
             {
                const datetime bt = rates[(S.bodyBreakIdx>=0?S.bodyBreakIdx:j)].time;
 
-               // اگر این رخداد زودتر از برنده‌ی موجود باشد، B برنده است
                if(g_race_winner=="" || bt < g_race_winner_time)
                {
-                  g_race_winner="B"; g_race_winner_time=bt;
+                  g_race_winner      = "B";
+                  g_race_winner_time = bt;
+
                   Race_MarkWin_B(DIR_UP, bt);
                   Race_DrawW2W3_MTC_Down(rates, n, S);
 
+                  // Compute scan window before clearing race state
                   const int __c1=(S.c1>=0?S.c1:g_race_hwbb_idx);
                   datetime __from = rates[__c1].time - (PeriodSeconds(InpTF)*5);
                   datetime __to   = __Race_ScanToTime(rates, n);
                   const bool __bump = __Race_IsMajorWorld();
-                  if(g_race_mode==DIR_UP)
+                  Direction __prev_mode = g_race_mode;
+
+                  // IMPORTANT: nested scan must run with race unlocked
+                  Race_InternalClearAll();
+
+                  // Fail-safe cleanup (in case ref was missing)
+                  SR_AllowOnly(DIR_DOWN);
+                  SW_UP_ClearSeed();
+                  SWGate_ResetGlobals();
+
+                  if(__prev_mode==DIR_UP)
                      API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to,
                                                            false, 0.0, 0, "", __bump);
-
-                  Race_InternalClearAll();
                }
                else
                {
-                  // Fail-safe: اگر به هر دلیل برنده قبلاً تعیین شده ولی race هنوز قفل است، قفل را باز کن
                   if(g_race_locked)
                      Race_InternalClearAll();
                }
 
-               // IMPORTANT: این نقطه ترمینال است؛ ادامه‌ی while باعث لوپ بی‌نهایت می‌شود.
+               // terminal
                return;
             }
-
          }
-         if(!progressed) break;
+
+         if(!progressed)
+            break;
       }
    }
+
    g_pb_up = S;
 }
 
-//--------------------------- مسیر B برای Mode=DOWN (اسکن UP) -------------------
+
+//--------------------------- ???? B ???? Mode=DOWN (???? UP) -------------------
 inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], const double &bodyLowEff[], const double &bodyHighEff[], const int n, const int upto_j)
 {
    if(!g_race_locked || g_race_mode!=DIR_DOWN) return;
@@ -663,7 +707,6 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
             // --- Lock W2 ---
             S.c1=i; S.c2=i2; S.c3=i3; S.c4=i4; S.cend=(S.c4>=0?S.c4:S.c3);
 
-            // پس از قفل W2، گیت Path-B دیگر لازم نیست
             C1W2_PB_UP_OnW2Locked();
 
             // reset W3
@@ -676,7 +719,6 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
             S.breakAchieved  = false;
             S.bodyBreakIdx   = -1;
 
-            // post body-break guard
             S.postBreak_c1_lock=false;
             S.postBreak_c1_ref =-1;
 
@@ -690,7 +732,6 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
 
          for(int j=S.idx; j<=limit; ++j)
          {
-            // --- SPECIAL: active ref-down body-break after HWBB (Mode=DOWN -> Path-B=MTC_UP)
             if(Race_RefDown_IsActive() && j >= g_race_hwbb_idx)
             {
                if(rates[j].close > Race_ActiveRef_Down())
@@ -773,7 +814,7 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
                { S.have_w3=true; if(S.w3_c1<0) S.w3_c1=startIdx; S.k2=a2; S.k3=a3; S.k4=a4; S.w3_end=w3e; }
             }
 
-            // Guard: change of C1_W3 after body-break ⇒ invalidate W2
+            // Guard: change of C1_W3 after body-break ? invalidate W2
             if(S.breakAchieved && !S.have_w3)
             {
                int __c1_now = (S.w3_c1>=0 ? S.w3_c1 : S.w3_cand);
@@ -804,7 +845,9 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
 
                if(g_race_winner=="" || bt < g_race_winner_time)
                {
-                  g_race_winner="B"; g_race_winner_time=bt;
+                  g_race_winner      = "B";
+                  g_race_winner_time = bt;
+
                   Race_MarkWin_B(DIR_DOWN, bt);
                   Race_DrawW2W3_MTC_Up(rates, n, S);
 
@@ -812,11 +855,17 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
                   datetime __from = rates[__c1].time - (PeriodSeconds(InpTF)*5);
                   datetime __to   = __Race_ScanToTime(rates, n);
                   const bool __bump = __Race_IsMajorWorld();
-                  if(g_race_mode==DIR_DOWN)
-                     API_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to,
-                                                       false, 0.0, 0, "", __bump);
+                  Direction __prev_mode = g_race_mode;
 
                   Race_InternalClearAll();
+
+                  SR_AllowOnly(DIR_UP);
+                  SW_DOWN_ClearSeed();
+                  SWGate_ResetGlobals();
+
+                  if(__prev_mode==DIR_DOWN)
+                     API_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to,
+                                                      false, 0.0, 0, "", __bump);
                }
                else
                {
@@ -824,16 +873,18 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
                      Race_InternalClearAll();
                }
 
-               // IMPORTANT: این نقطه ترمینال است؛ ادامه‌ی while باعث لوپ بی‌نهایت می‌شود.
                return;
             }
-
          }
-         if(!progressed) break;
+
+         if(!progressed)
+            break;
       }
    }
+
    g_pb_down = S;
 }
+
 
 // =====================[ MTC Drawing Helpers ]=====================
 inline void Race_DrawW2W3_MTC_Down(const MqlRates &rates[], const int n, const RacePathBState &S)
@@ -894,9 +945,12 @@ inline void Race_DrawW2W3_MTC_Down(const MqlRates &rates[], const int n, const R
       SB_DN_BringToFront();
    }
 
+   // --- IMPORTANT cleanup after MTC
    SR_AllowOnly(DIR_DOWN);
    SW_UP_ClearSeed();
+   SWGate_ResetGlobals();
 }
+
 
 inline void Race_DrawW2W3_MTC_Up(const MqlRates &rates[], const int n, const RacePathBState &S)
 {
@@ -933,7 +987,6 @@ inline void Race_DrawW2W3_MTC_Up(const MqlRates &rates[], const int n, const Rac
       ObjectSetInteger(0, rname, OBJPROP_WIDTH, 1);
       ObjectSetInteger(0, rname, OBJPROP_STYLE, STYLE_SOLID);
 
-      // keep only the latest MTC ref INSIDE current namespace
       const string p = __ScanPrefix();
       const int plen = StringLen(p);
 
@@ -958,7 +1011,9 @@ inline void Race_DrawW2W3_MTC_Up(const MqlRates &rates[], const int n, const Rac
 
    SR_AllowOnly(DIR_UP);
    SW_DOWN_ClearSeed();
+   SWGate_ResetGlobals();
 }
+
 
 // Draw MTC_DOWN only (special-case): just BB + REF, no W2/W3
 inline void Race_DrawMTCOnly_Down(const MqlRates &rates[], const int n, const int bodyIdx)
@@ -980,7 +1035,6 @@ inline void Race_DrawMTCOnly_Down(const MqlRates &rates[], const int n, const in
       ObjectSetInteger(0, rname, OBJPROP_WIDTH, 1);
       ObjectSetInteger(0, rname, OBJPROP_STYLE, STYLE_SOLID);
 
-      // keep only the latest MTC ref INSIDE current namespace
       const string p = __ScanPrefix();
       const int plen = StringLen(p);
 
@@ -999,10 +1053,13 @@ inline void Race_DrawMTCOnly_Down(const MqlRates &rates[], const int n, const in
       Race_ActivateRef_Down(g_race_ref_mtc_down, (bodyIdx>=0 && bodyIdx<n ? rates[bodyIdx].time : TimeCurrent()));
       SB_UP_BringToFront();
       SB_DN_BringToFront();
-      SR_AllowOnly(DIR_DOWN);
-      SW_UP_ClearSeed();
    }
+
+   SR_AllowOnly(DIR_DOWN);
+   SW_UP_ClearSeed();
+   SWGate_ResetGlobals();
 }
+
 
 
 // Draw MTC_UP only (special-case): just BB + REF, no W2/W3
@@ -1025,7 +1082,6 @@ inline void Race_DrawMTCOnly_Up(const MqlRates &rates[], const int n, const int 
       ObjectSetInteger(0, rname, OBJPROP_WIDTH, 1);
       ObjectSetInteger(0, rname, OBJPROP_STYLE, STYLE_SOLID);
 
-      // keep only the latest MTC ref INSIDE current namespace
       const string p = __ScanPrefix();
       const int plen = StringLen(p);
 
@@ -1044,10 +1100,13 @@ inline void Race_DrawMTCOnly_Up(const MqlRates &rates[], const int n, const int 
       Race_ActivateRef_Up(g_race_ref_mtc_up, (bodyIdx>=0 && bodyIdx<n ? rates[bodyIdx].time : TimeCurrent()));
       SB_UP_BringToFront();
       SB_DN_BringToFront();
-      SR_AllowOnly(DIR_UP);
-      SW_DOWN_ClearSeed();
    }
+
+   SR_AllowOnly(DIR_UP);
+   SW_DOWN_ClearSeed();
+   SWGate_ResetGlobals();
 }
+
 
 // SPECIAL: ref-up body-break by HWBB(UP) => immediate MTC_DOWN win (Path B)
 inline void Race_SpecialRefBreak_MTC_Down(const MqlRates &rates[], const int n, const int j)
@@ -1056,23 +1115,23 @@ inline void Race_SpecialRefBreak_MTC_Down(const MqlRates &rates[], const int n, 
    g_race_winner      = "B";
    g_race_winner_time = bt;
 
-   // 0) انتقال فوری ext lq به سمت DOWN بر مبنای ref تنظیم‌شده از HWBB(UP)
-   //    (این همان Highِ C1ِ Hunter-UP است که قبلاً با Race_SetRefLevelForMTC_Down ست شده)
+   // 0) ?????? ???? ext lq ?? ??? DOWN ?? ????? ref ????????? ?? HWBB(UP)
+   //    (??? ???? High? C1? Hunter-UP ??? ?? ????? ?? Race_SetRefLevelForMTC_Down ?? ???)
    if(g_race_ref_mtc_down > 0.0)
-      ExtLQ_Down_Set(g_race_ref_mtc_down, bt);   // <-- کلید حل مشکل
+      ExtLQ_Down_Set(g_race_ref_mtc_down, bt);   // <-- ???? ?? ????
 
-   // 1) خروجی‌های MTC (مارکر BB + REF فعال)
+   // 1) ????????? MTC (????? BB + REF ????)
    Race_MarkWin_B(DIR_UP, bt);
    Race_DrawMTCOnly_Down(rates, n, j);
 
-   // 2) پیش از اسکن بعدی، قفل مسابقه را آزاد کن
+   // 2) ??? ?? ???? ????? ??? ?????? ?? ???? ??
    Direction __prev_mode = g_race_mode;
    Race_InternalClearAll();
    SR_AllowOnly(DIR_DOWN);
    SW_UP_ClearSeed();
 
-   // 3) اسکن فشردهٔ DOWN از خود کندل BB (از همین لحظه Hunter روی ext lq جدید فعال است)
-   //    نکته: در دنیای MIN نباید namespace/scan_id به MAJ سوئیچ کند.
+   // 3) ???? ?????? DOWN ?? ??? ???? BB (?? ???? ???? Hunter ??? ext lq ???? ???? ???)
+   //    ????: ?? ????? MIN ????? namespace/scan_id ?? MAJ ????? ???.
    const datetime __from = bt;
    const datetime __to   = __Race_ScanToTime(rates, n);
    const bool     __bump = __Race_IsMajorWorld();
@@ -1090,22 +1149,22 @@ inline void Race_SpecialRefBreak_MTC_Up(const MqlRates &rates[], const int n, co
    g_race_winner      = "B";
    g_race_winner_time = bt;
 
-   // 0) انتقال فوری ext lq به سمت UP بر مبنای ref تنظیم‌شده از HWBB(DOWN)
+   // 0) ?????? ???? ext lq ?? ??? UP ?? ????? ref ????????? ?? HWBB(DOWN)
    if(g_race_ref_mtc_up > 0.0)
-      ExtLQ_Set(g_race_ref_mtc_up, bt);          // <-- کلید حل مشکل (سمت UP)
+      ExtLQ_Set(g_race_ref_mtc_up, bt);          // <-- ???? ?? ???? (??? UP)
 
-   // 1) خروجی‌های MTC (مارکر BB + REF فعال)
+   // 1) ????????? MTC (????? BB + REF ????)
    Race_MarkWin_B(DIR_DOWN, bt);
    Race_DrawMTCOnly_Up(rates, n, j);
 
-   // 2) آزادسازی قفل
+   // 2) ???????? ???
    Direction __prev_mode = g_race_mode;
    Race_InternalClearAll();
    SR_AllowOnly(DIR_UP);
    SW_DOWN_ClearSeed();
 
-   // 3) اسکن فشردهٔ UP از همان کندل BB
-   //    نکته: در دنیای MIN نباید namespace/scan_id به MAJ سوئیچ کند.
+   // 3) ???? ?????? UP ?? ???? ???? BB
+   //    ????: ?? ????? MIN ????? namespace/scan_id ?? MAJ ????? ???.
    const datetime __from = bt;
    const datetime __to   = __Race_ScanToTime(rates, n);
    const bool     __bump = __Race_IsMajorWorld();
