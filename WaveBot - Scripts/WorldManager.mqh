@@ -1,6 +1,9 @@
 #ifndef WAVEBOT_WORLDMANAGER_MQH
 #define WAVEBOT_WORLDMANAGER_MQH
 
+#include <WaveBot/Runtime.mqh>   // NEW: runtime scan context (symbol/timeframe)
+
+
 #include <WaveBot/Types.mqh>
 #include <WaveBot/Markers.mqh>
 #include <WaveBot/ExtLQ.mqh>
@@ -234,6 +237,42 @@ inline void WBWM_Init()
    g_wbwm_inited = true;
 }
 
+// --- NEW: Reset WorldManager state so the EA can run multiple independent scans (needed for M15 Slave sessions) ---
+inline void WBWM_Reset()
+{
+   g_wbwm_inited = false;
+   g_wbwm_minor_scan_seq   = 0;
+   g_wbwm_minor_active     = false;
+   g_wbwm_minor_scan_id    = 0;
+   g_wbwm_minor_tag_suffix = "";
+   g_wbwm_last_maj_scan_id = -1;
+   g_wbwm_last_maj_time    = 0;
+
+   // Clear the current minor session snapshot
+   g_wbwm_minor_sess.used=false;
+   g_wbwm_minor_sess.open=false;
+   g_wbwm_minor_sess.dir=DIR_UP;
+   g_wbwm_minor_sess.tag="";
+   g_wbwm_minor_sess.starter_idx=-1;
+   g_wbwm_minor_sess.starter_time=0;
+   g_wbwm_minor_sess.off_idx=-1;
+   g_wbwm_minor_sess.off_time=0;
+   g_wbwm_minor_sess.off_level_1=0.0;
+   g_wbwm_minor_sess.off_level_2=0.0;
+   g_wbwm_minor_sess.c1_w3_idx=-1;
+   g_wbwm_minor_sess.c1_w3_time=0;
+   g_wbwm_minor_sess.ext_init_price=0.0;
+   g_wbwm_minor_sess.ext_init_time=0;
+   g_wbwm_minor_sess.w2_minor_c1_idx=-1;
+   g_wbwm_minor_sess.w2_minor_start_time=0;
+   g_wbwm_minor_sess.bars_between=0;
+
+   WBWM_MinorStop_Disarm();
+   WBWM_ContextInit(g_wbwm_major);
+   WBWM_ContextInit(g_wbwm_minor);
+}
+
+
 // Delete only objects that belong to the current prefix (current g_scan_id + namespace)
 inline void WBWM_DeleteAllObjects_CurrentScan()
 {
@@ -401,7 +440,7 @@ inline void WBWM_ProcessMinorStarterEvents(const MqlRates &rates[],
       // Run MIN scan up to current candle (NO bump scan id)
       if(g_wbwm_minor_sess.dir == DIR_UP)
       {
-         API_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF,
+         API_RunScanSequential_W2W3_Hunter(WBRT_Symbol(), WBRT_TF(),
                                           g_wbwm_minor_sess.starter_time,
                                           step_to_time,
                                           true,
@@ -412,7 +451,7 @@ inline void WBWM_ProcessMinorStarterEvents(const MqlRates &rates[],
       }
       else
       {
-         API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF,
+         API_Down_RunScanSequential_W2W3_Hunter(WBRT_Symbol(), WBRT_TF(),
                                                g_wbwm_minor_sess.starter_time,
                                                step_to_time,
                                                true,

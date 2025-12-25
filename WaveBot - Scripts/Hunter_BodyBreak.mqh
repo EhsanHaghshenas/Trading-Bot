@@ -276,8 +276,6 @@ inline void HW_BB_DOWN_OnBar(const MqlRates &r, const MqlRates &rates[], const i
          return;
       }
 
-      // ---------------------------------------------------------------------------------------
-
       g_bb_done_d  = true;
       g_bb_armed_d = false;
       return;
