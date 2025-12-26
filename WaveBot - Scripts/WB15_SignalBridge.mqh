@@ -312,10 +312,13 @@ inline bool __WB15_ShouldStop(const WB15ActiveState &st, const int stop_kind, co
    if(!st.active) return false;
    if(stop_dir != __WB15_Opposite(st.start_dir)) return false;
 
-   // FSMS sessions are stopped by MinorStarter only
+   // FSMS sessions are stopped by MAJ MinorStarter OR MAJ MTC (both in opposite direction)
    if(st.start_kind == WB15_KIND_START_FSMS)
    {
-      return (stop_kind == WB15_KIND_STOP_MINORSTARTER);
+      // FSMS is a MAJ-only start trigger; stop must also be MAJ
+      if(stop_ns != WB15_NS_MAJ) return false;
+
+      return (stop_kind == WB15_KIND_STOP_MINORSTARTER || stop_kind == WB15_KIND_STOP_MTC);
    }
 
    // HWX/HWBB/GOOZ sessions are stopped by MTC
@@ -328,6 +331,7 @@ inline bool __WB15_ShouldStop(const WB15ActiveState &st, const int stop_kind, co
 
    return false;
 }
+
 
 inline void WB15_SlaveInit()
 {
