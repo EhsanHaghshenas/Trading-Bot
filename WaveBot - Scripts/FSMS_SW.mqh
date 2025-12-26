@@ -482,6 +482,9 @@ inline void FSMS_SW_RecordMinorPair_DN(const MqlRates &rates[], const int n, con
    // --- ثبت وضعیت MinorStarter_D برای منطق MinorOff + ساخت Session ---
    if(S.bodyBreakIdx >= 0 && S.bodyBreakIdx < n)
    {
+      // NEW (H4->M15 bridge): MinorStarter is a STOP trigger for FSMS sessions
+      WB15_PublishStopMinorStarter(InpSymbol, DIR_DOWN, rates[S.bodyBreakIdx].time);
+
       g_minor_starter_d_active = true;
       g_minor_starter_d_idx    = S.bodyBreakIdx;
       g_minor_starter_d_tag    = tag;
@@ -588,6 +591,9 @@ inline void FSMS_SW_RecordMinorPair_UP(const MqlRates &rates[], const int n, con
    // --- ثبت وضعیت MinorStarter_U برای منطق MinorOff + ساخت Session ---
    if(S.bodyBreakIdx >= 0 && S.bodyBreakIdx < n)
    {
+      // NEW (H4->M15 bridge): MinorStarter is a STOP trigger for FSMS sessions
+      WB15_PublishStopMinorStarter(InpSymbol, DIR_UP, rates[S.bodyBreakIdx].time);
+
       g_minor_starter_u_active = true;
       g_minor_starter_u_idx    = S.bodyBreakIdx;
       g_minor_starter_u_tag    = tag;

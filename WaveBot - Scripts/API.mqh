@@ -1,9 +1,6 @@
 #ifndef WAVEBOT_API_MQH
 #define WAVEBOT_API_MQH
 
-#include <WaveBot/Runtime.mqh>   // NEW: runtime scan context (symbol/timeframe)
-
-
 #include <WaveBot/Utils.mqh>
 #include <WaveBot/Markers.mqh>
 #include <WaveBot/Data.mqh>
@@ -106,9 +103,6 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
                                       const datetime init_ext_time=0,
                                       const string tag_suffix="", const bool bump_scan_id=true)
 {
-   // --- NEW: Set runtime context for nested modules (WorldManager/RaceCoordinator) ---
-   WBRT_Set(sym, tf);
-
    // --- HARD GUARD: MAJ scan must never be dragged into MIN namespace ---
    int __maj_scan_id = g_scan_id;
 
@@ -170,7 +164,6 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
          bool found=false;
          for(int i=idx; i<n; ++i)
          {
-         WB15_OnMasterProgress(rates[i].time);
                         // --- HARD GUARD: keep MAJ scan pinned to its namespace/scan_id ---
             if(bump_scan_id)
             {
@@ -269,7 +262,6 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
 
          for(int j=idx; j<n; ++j)
          {
-         WB15_OnMasterProgress(rates[j].time);
                         // --- HARD GUARD: keep MAJ scan pinned to its namespace/scan_id ---
             if(bump_scan_id)
             {

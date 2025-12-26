@@ -34,6 +34,8 @@ input bool InpRunShadowBreakerOnce = false;  // ??? true ????? ?????? SB_RunOneS
 #include <WaveBot/Utils.mqh>
 #include <WaveBot/Data.mqh>
 #include <WaveBot/Markers.mqh>
+// NEW: Simple H4->M15 bridge (signals + candle counting)
+#include <WaveBot/WB15_SignalBridge.mqh>
 #include <WaveBot/Wave2.mqh>
 #include <WaveBot/Wave3.mqh>
 #include <WaveBot/Wave2_Down.mqh>
@@ -56,25 +58,20 @@ int g_scan_id = 0;
 enum WBRole { WBROLE_STANDALONE=0, WBROLE_MASTER_H4=1, WBROLE_SLAVE_M15=2 };
 WBRole g_role = WBROLE_STANDALONE;
 
-// Slave state (processed GV version / re-entrancy guard)
-int  g_wb15_ver_processed = -1;
-bool g_wb15_busy = false;
-
 inline WBRole __WB_DetectRole()
 {
    ENUM_TIMEFRAMES tf = (ENUM_TIMEFRAMES)Period();
-   if(tf==PERIOD_H4)  return WBROLE_MASTER_H4;
-   if(tf==PERIOD_M15) return WBROLE_SLAVE_M15;
+   if(tf == PERIOD_H4)  return WBROLE_MASTER_H4;
+   if(tf == PERIOD_M15) return WBROLE_SLAVE_M15;
    return WBROLE_STANDALONE;
 }
 
 inline ENUM_TIMEFRAMES __WB_EffectiveTF()
 {
-   if(g_role==WBROLE_MASTER_H4)  return PERIOD_H4;
-   if(g_role==WBROLE_SLAVE_M15) return PERIOD_M15;
+   if(g_role == WBROLE_MASTER_H4)  return PERIOD_H4;
+   if(g_role == WBROLE_SLAVE_M15) return PERIOD_M15;
    return InpTF; // legacy standalone mode
 }
-
 // ============================================================================
 // Minor session runner (Phase-1: Minor inside Major)
 // ============================================================================
@@ -213,641 +210,20 @@ void ResolveWindow(datetime &start, datetime &stop)
    stop  = TimeCurrent();
 }
 
-// =================================================================================================
-// NEW: H4->M15 Master/Slave bridge (Global Variables of the Terminal, no interface files)
-// =================================================================================================
-
-// GV naming (compact to avoid name-length limits)
-
-// =================================================================================================
-// WB15 Bridge (H4 master -> M15 slave) - STREAMING sessions
-// =================================================================================================
-
-// --- GlobalVariable key helpers
-string __WB15_Base(const string sym) { return("WB15_" + sym); }
-string __WB15_Key(const string sym, const string what) { return(__WB15_Base(sym) + "_" + what); }
-string __WB15_KeyVer(const string sym) { return(__WB15_Key(sym, "VER")); }
-string __WB15_KeyCnt(const string sym) { return(__WB15_Key(sym, "CNT")); }
-string __WB15_KeyRun(const string sym) { return(__WB15_Key(sym, "RUN")); }
-
-string __WB15_KeyS(const string sym, const int idx) { return(__WB15_Base(sym) + "_S" + IntegerToString(idx)); }
-string __WB15_KeySField(const string sym, const int idx, const string fld) { return(__WB15_KeyS(sym, idx) + "_" + fld); }
-
-void __WB15_BumpVer(const string sym)
-{
-   string keyVer = __WB15_KeyVer(sym);
-   int ver = 0;
-   if(GlobalVariableCheck(keyVer))
-      ver = (int)GlobalVariableGet(keyVer);
-   GlobalVariableSet(keyVer, (double)(ver + 1));
-}
-
-int __WB15_GetCnt(const string sym)
-{
-   string keyCnt = __WB15_KeyCnt(sym);
-   if(!GlobalVariableCheck(keyCnt)) return 0;
-   return (int)GlobalVariableGet(keyCnt);
-}
-
-void __WB15_SetCnt(const string sym, const int cnt)
-{
-   GlobalVariableSet(__WB15_KeyCnt(sym), (double)cnt);
-}
-
-// --- WB15 session descriptors
-enum WB15Dir  { WB15_DIR_UNKNOWN = 0, WB15_DIR_UP = 1, WB15_DIR_DOWN = -1 };
-enum WB15NS   { WB15_NS_MAJ = 1, WB15_NS_MIN = 2 };
-enum WB15EvType
-{
-   WB15_EV_NONE        = 0,
-   WB15_EV_HWX         = 1,
-   WB15_EV_HWBB        = 2,
-   WB15_EV_FSMS        = 3,
-   WB15_EV_GOOZ        = 4,
-   WB15_EV_MTC         = 5,
-   WB15_EV_MINORSTARTER= 6
-};
-
-struct WB15Session
-{
-   datetime start;
-   datetime stop;     // while open: progress time; when closed: final stop time
-   int group;         // 1=HWX/HWBB start, 2=FSMS start, 3=GOOZ start
-   int ns;            // WB15_NS_MAJ / WB15_NS_MIN
-   int start_dir;     // WB15Dir (may be UNKNOWN for HWX start)
-   bool open;         // true while session is running
-};
-
-void __WB15_PutSession(const string sym, const int idx, const WB15Session &s)
-{
-   GlobalVariableSet(__WB15_KeySField(sym, idx, "A"), (double)s.start);
-   GlobalVariableSet(__WB15_KeySField(sym, idx, "B"), (double)s.stop);
-   GlobalVariableSet(__WB15_KeySField(sym, idx, "G"), (double)s.group);
-   GlobalVariableSet(__WB15_KeySField(sym, idx, "N"), (double)s.ns);
-   GlobalVariableSet(__WB15_KeySField(sym, idx, "D"), (double)s.start_dir);
-   GlobalVariableSet(__WB15_KeySField(sym, idx, "O"), (double)(s.open ? 1.0 : 0.0));
-}
-
-bool __WB15_GetSession(const string sym, const int idx, WB15Session &s)
-{
-   string base = __WB15_KeyS(sym, idx);
-   string kA = base + "_A";
-   string kB = base + "_B";
-   string kG = base + "_G";
-   string kN = base + "_N";
-   string kD = base + "_D";
-   string kO = base + "_O";
-
-   if(!GlobalVariableCheck(kA) || !GlobalVariableCheck(kB))
-      return false;
-
-   s.start = (datetime)GlobalVariableGet(kA);
-   s.stop  = (datetime)GlobalVariableGet(kB);
-   s.group = GlobalVariableCheck(kG) ? (int)GlobalVariableGet(kG) : 0;
-   s.ns    = GlobalVariableCheck(kN) ? (int)GlobalVariableGet(kN) : 0;
-   s.start_dir = GlobalVariableCheck(kD) ? (int)GlobalVariableGet(kD) : 0;
-   s.open  = GlobalVariableCheck(kO) ? ((int)GlobalVariableGet(kO) != 0) : false;
-   return true;
-}
-
-void __WB15_ClearList(const string sym)
-{
-   int cnt = __WB15_GetCnt(sym);
-   for(int i = 0; i < cnt; i++)
-   {
-      GlobalVariableDel(__WB15_KeySField(sym, i, "A"));
-      GlobalVariableDel(__WB15_KeySField(sym, i, "B"));
-      GlobalVariableDel(__WB15_KeySField(sym, i, "G"));
-      GlobalVariableDel(__WB15_KeySField(sym, i, "N"));
-      GlobalVariableDel(__WB15_KeySField(sym, i, "D"));
-      GlobalVariableDel(__WB15_KeySField(sym, i, "O"));
-   }
-   GlobalVariableDel(__WB15_KeyCnt(sym));
-   // NOTE: keep VER (it will be bumped), and RUN (it will be overwritten)
-}
-
-// -------------------------------------------------------------------------------------------------
-// MASTER (H4) - streaming builder
-// -------------------------------------------------------------------------------------------------
-#define WB15_SEEN_MAX 128
-static string g_wb15_seen_keys[WB15_SEEN_MAX];
-static int    g_wb15_seen_pos = 0;
-
-static bool     g_wb15_stream_enabled = false;
-static string   g_wb15_stream_sym     = "";
-static int      g_wb15_stream_tfsec   = 0;
-
-static int      g_wb15_stream_cnt     = 0;
-static int      g_wb15_stream_open_idx= -1;
-
-static bool     g_wb15_stream_active  = false;
-static int      g_wb15_stream_group   = 0;
-static int      g_wb15_stream_ns      = 0;
-static datetime g_wb15_stream_start   = 0;
-static int      g_wb15_stream_start_dir = WB15_DIR_UNKNOWN;
-
-static bool     g_wb15_stream_waiting_hwbb = false;
-static datetime g_wb15_stream_hwbb_time    = 0;
-static int      g_wb15_stream_hwbb_dir     = WB15_DIR_UNKNOWN;
-
-static int      g_wb15_stream_expect_dir   = WB15_DIR_UNKNOWN; // for FSMS group
-static datetime g_wb15_stream_last_progress= 0;
-
-void __WB15_StreamResetSeen()
-{
-   for(int i = 0; i < WB15_SEEN_MAX; i++)
-      g_wb15_seen_keys[i] = "";
-   g_wb15_seen_pos = 0;
-}
-
-void __WB15_MasterStream_Begin(const string sym, const ENUM_TIMEFRAMES master_tf)
-{
-   g_wb15_stream_enabled = true;
-   g_wb15_stream_sym = sym;
-   g_wb15_stream_tfsec = PeriodSeconds(master_tf);
-
-   g_wb15_stream_cnt = 0;
-   g_wb15_stream_open_idx = -1;
-   g_wb15_stream_active = false;
-
-   g_wb15_stream_group = 0;
-   g_wb15_stream_ns    = 0;
-   g_wb15_stream_start = 0;
-   g_wb15_stream_start_dir = WB15_DIR_UNKNOWN;
-
-   g_wb15_stream_waiting_hwbb = false;
-   g_wb15_stream_hwbb_time = 0;
-   g_wb15_stream_hwbb_dir  = WB15_DIR_UNKNOWN;
-
-   g_wb15_stream_expect_dir = WB15_DIR_UNKNOWN;
-   g_wb15_stream_last_progress = 0;
-
-   __WB15_StreamResetSeen();
-
-   // Reset GV list and signal new run
-   __WB15_ClearList(sym);
-   __WB15_SetCnt(sym, 0);
-   GlobalVariableSet(__WB15_KeyRun(sym), (double)TimeLocal());
-   __WB15_BumpVer(sym);
-}
-
-void __WB15_MasterStream_StartSession(const int group, const int ns, const datetime start, const int start_dir)
-{
-   WB15Session s;
-   s.start = start;
-   s.stop  = start;
-   s.group = group;
-   s.ns    = ns;
-   s.start_dir = start_dir;
-   s.open  = true;
-
-   int idx = g_wb15_stream_cnt;
-   __WB15_PutSession(g_wb15_stream_sym, idx, s);
-   g_wb15_stream_cnt = idx + 1;
-   __WB15_SetCnt(g_wb15_stream_sym, g_wb15_stream_cnt);
-
-   g_wb15_stream_open_idx = idx;
-   g_wb15_stream_active = true;
-   g_wb15_stream_group = group;
-   g_wb15_stream_ns    = ns;
-   g_wb15_stream_start = start;
-   g_wb15_stream_start_dir = start_dir;
-   g_wb15_stream_last_progress = start;
-
-   __WB15_BumpVer(g_wb15_stream_sym);
-}
-
-void __WB15_MasterStream_UpdateProgress(const datetime cur_time)
-{
-   if(!g_wb15_stream_active || g_wb15_stream_open_idx < 0) return;
-
-   datetime p = cur_time;
-   if(p < g_wb15_stream_start) p = g_wb15_stream_start;
-   if(p <= g_wb15_stream_last_progress) return;
-
-   g_wb15_stream_last_progress = p;
-   GlobalVariableSet(__WB15_KeySField(g_wb15_stream_sym, g_wb15_stream_open_idx, "B"), (double)p);
-}
-
-void __WB15_MasterStream_CloseSession(const datetime stop_time)
-{
-   if(!g_wb15_stream_active || g_wb15_stream_open_idx < 0) return;
-
-   datetime st = stop_time;
-   if(st < g_wb15_stream_start) st = g_wb15_stream_start;
-
-   GlobalVariableSet(__WB15_KeySField(g_wb15_stream_sym, g_wb15_stream_open_idx, "B"), (double)st);
-   GlobalVariableSet(__WB15_KeySField(g_wb15_stream_sym, g_wb15_stream_open_idx, "O"), 0.0);
-
-   g_wb15_stream_active = false;
-   g_wb15_stream_open_idx = -1;
-
-   g_wb15_stream_group = 0;
-   g_wb15_stream_ns    = 0;
-   g_wb15_stream_start = 0;
-   g_wb15_stream_start_dir = WB15_DIR_UNKNOWN;
-
-   g_wb15_stream_waiting_hwbb = false;
-   g_wb15_stream_hwbb_time = 0;
-   g_wb15_stream_hwbb_dir  = WB15_DIR_UNKNOWN;
-   g_wb15_stream_expect_dir = WB15_DIR_UNKNOWN;
-   g_wb15_stream_last_progress = 0;
-
-   __WB15_BumpVer(g_wb15_stream_sym);
-}
-
-bool __WB15_ParseMarkerToEvent(const string marker_name, int &ev_type, int &ev_dir)
-{
-   ev_type = WB15_EV_NONE;
-   ev_dir  = WB15_DIR_UNKNOWN;
-
-   if(StringFind(marker_name, "HW_") == 0 && StringFind(marker_name, "_X") > 0)
-   {
-      ev_type = WB15_EV_HWX;
-      ev_dir  = WB15_DIR_UNKNOWN;
-      return true;
-   }
-
-   if(StringFind(marker_name, "HWBB_U_") == 0) { ev_type = WB15_EV_HWBB; ev_dir = WB15_DIR_UP; return true; }
-   if(StringFind(marker_name, "HWBB_D_") == 0) { ev_type = WB15_EV_HWBB; ev_dir = WB15_DIR_DOWN; return true; }
-
-   if(StringFind(marker_name, "FSMS_U_") == 0) { ev_type = WB15_EV_FSMS; ev_dir = WB15_DIR_UP; return true; }
-   if(StringFind(marker_name, "FSMS_D_") == 0) { ev_type = WB15_EV_FSMS; ev_dir = WB15_DIR_DOWN; return true; }
-
-   if(StringFind(marker_name, "gooz_baghali_U_") == 0) { ev_type = WB15_EV_GOOZ; ev_dir = WB15_DIR_UP; return true; }
-   if(StringFind(marker_name, "gooz_baghali_D_") == 0) { ev_type = WB15_EV_GOOZ; ev_dir = WB15_DIR_DOWN; return true; }
-
-   if(StringFind(marker_name, "MTC_UP_BB_") == 0) { ev_type = WB15_EV_MTC; ev_dir = WB15_DIR_UP; return true; }
-   if(StringFind(marker_name, "MTC_DN_BB_") == 0) { ev_type = WB15_EV_MTC; ev_dir = WB15_DIR_DOWN; return true; }
-
-   if(StringFind(marker_name, "MinorStarter_U_") == 0) { ev_type = WB15_EV_MINORSTARTER; ev_dir = WB15_DIR_UP; return true; }
-   if(StringFind(marker_name, "MinorStarter_D_") == 0) { ev_type = WB15_EV_MINORSTARTER; ev_dir = WB15_DIR_DOWN; return true; }
-
-   return false;
-}
-
-void __WB15_MasterStream_OnEvent(const int ev_type, const int ev_ns, const int ev_dir, const datetime ev_time)
-{
-   if(!g_wb15_stream_enabled) return;
-   if(ev_type == WB15_EV_NONE) return;
-
-   // Always advance progress on any relevant event
-   __WB15_MasterStream_UpdateProgress(ev_time);
-
-   // Start (if inactive)
-   if(!g_wb15_stream_active)
-   {
-      if(ev_type == WB15_EV_HWX || ev_type == WB15_EV_HWBB)
-      {
-         __WB15_MasterStream_StartSession(1, ev_ns, ev_time, (ev_type == WB15_EV_HWBB ? ev_dir : WB15_DIR_UNKNOWN));
-
-         if(ev_type == WB15_EV_HWBB)
-         {
-            g_wb15_stream_waiting_hwbb = false;
-            g_wb15_stream_hwbb_time = ev_time;
-            g_wb15_stream_hwbb_dir  = ev_dir;
-         }
-         else
-         {
-            g_wb15_stream_waiting_hwbb = true;
-            g_wb15_stream_hwbb_time = 0;
-            g_wb15_stream_hwbb_dir  = WB15_DIR_UNKNOWN;
-         }
-         return;
-      }
-
-      if(ev_type == WB15_EV_FSMS && ev_ns == WB15_NS_MAJ)
-      {
-         // IMPORTANT: FSMS start is at candle CLOSE (next candle open)
-         datetime start_at_close = ev_time + g_wb15_stream_tfsec;
-
-         __WB15_MasterStream_StartSession(2, WB15_NS_MAJ, start_at_close, ev_dir);
-         g_wb15_stream_expect_dir = (ev_dir == WB15_DIR_UP ? WB15_DIR_DOWN : WB15_DIR_UP);
-
-         __WB15_MasterStream_UpdateProgress(start_at_close);
-         return;
-      }
-
-      if(ev_type == WB15_EV_GOOZ)
-      {
-         __WB15_MasterStream_StartSession(3, ev_ns, ev_time, ev_dir);
-         g_wb15_stream_waiting_hwbb = true;
-         g_wb15_stream_hwbb_time = 0;
-         g_wb15_stream_hwbb_dir  = WB15_DIR_UNKNOWN;
-         return;
-      }
-
-      return;
-   }
-
-   // Active: GROUP 1 (HWX/HWBB start)
-   if(g_wb15_stream_group == 1)
-   {
-      if(g_wb15_stream_waiting_hwbb)
-      {
-         if(ev_type == WB15_EV_HWBB && ev_ns == g_wb15_stream_ns && ev_time >= g_wb15_stream_start)
-         {
-            g_wb15_stream_waiting_hwbb = false;
-            g_wb15_stream_hwbb_time = ev_time;
-            g_wb15_stream_hwbb_dir  = ev_dir;
-
-            // Update session start_dir if it was HWX (unknown)
-            if(g_wb15_stream_start_dir == WB15_DIR_UNKNOWN && g_wb15_stream_open_idx >= 0)
-            {
-               g_wb15_stream_start_dir = ev_dir;
-               GlobalVariableSet(__WB15_KeySField(g_wb15_stream_sym, g_wb15_stream_open_idx, "D"), (double)ev_dir);
-            }
-         }
-         return;
-      }
-
-      if(ev_type != WB15_EV_MTC || ev_ns != g_wb15_stream_ns) return;
-      if(ev_time < g_wb15_stream_hwbb_time) return;
-
-      int need_dir = (g_wb15_stream_hwbb_dir == WB15_DIR_UP ? WB15_DIR_DOWN : WB15_DIR_UP);
-      if(ev_dir != need_dir) return;
-
-      __WB15_MasterStream_CloseSession(ev_time);
-      return;
-   }
-
-   // Active: GROUP 2 (FSMS start -> MinorStarter stop)
-   if(g_wb15_stream_group == 2)
-   {
-      if(ev_type != WB15_EV_MINORSTARTER || ev_ns != WB15_NS_MAJ) return;
-      if(ev_time < g_wb15_stream_start) return;
-      if(ev_dir != g_wb15_stream_expect_dir) return;
-
-      __WB15_MasterStream_CloseSession(ev_time);
-      return;
-   }
-
-   // Active: GROUP 3 (GOOZ start -> HWBB -> MTC stop)
-   if(g_wb15_stream_group == 3)
-   {
-      if(g_wb15_stream_waiting_hwbb)
-      {
-         if(ev_type == WB15_EV_HWBB && ev_ns == g_wb15_stream_ns && ev_time >= g_wb15_stream_start)
-         {
-            g_wb15_stream_waiting_hwbb = false;
-            g_wb15_stream_hwbb_time = ev_time;
-            g_wb15_stream_hwbb_dir  = ev_dir;
-         }
-         return;
-      }
-
-      if(ev_type != WB15_EV_MTC || ev_ns != g_wb15_stream_ns) return;
-      if(ev_time < g_wb15_stream_hwbb_time) return;
-
-      int need_dir = (g_wb15_stream_hwbb_dir == WB15_DIR_UP ? WB15_DIR_DOWN : WB15_DIR_UP);
-      if(ev_dir != need_dir) return;
-
-      __WB15_MasterStream_CloseSession(ev_time);
-      return;
-   }
-}
-
-// -------------------------------------------------------------------------------------------------
-// HOOKS (called from Markers.mqh / API.mqh / API_Down.mqh)
-// -------------------------------------------------------------------------------------------------
-void WB15_OnMarkerCreated(const string marker_name, const datetime t)
-{
-   if(g_role != WBROLE_MASTER_H4) return;
-   if(!g_wb15_stream_enabled) return;
-
-   int ev_type, ev_dir;
-   if(!__WB15_ParseMarkerToEvent(marker_name, ev_type, ev_dir))
-      return;
-
-   string ns_str = Markers_GetNamespace();
-   int ev_ns = (ns_str == "MAJ" ? WB15_NS_MAJ : WB15_NS_MIN);
-
-   // de-dup (name+time+namespace)
-   string k = ns_str + "|" + marker_name + "|" + IntegerToString((int)t);
-   for(int i = 0; i < WB15_SEEN_MAX; i++)
-      if(g_wb15_seen_keys[i] == k)
-         return;
-
-   g_wb15_seen_keys[g_wb15_seen_pos] = k;
-   g_wb15_seen_pos++;
-   if(g_wb15_seen_pos >= WB15_SEEN_MAX) g_wb15_seen_pos = 0;
-
-   __WB15_MasterStream_OnEvent(ev_type, ev_ns, ev_dir, t);
-}
-
-void WB15_OnMasterProgress(const datetime cur_time)
-{
-   if(g_role != WBROLE_MASTER_H4) return;
-   if(!g_wb15_stream_enabled) return;
-   __WB15_MasterStream_UpdateProgress(cur_time);
-}
-
-// -------------------------------------------------------------------------------------------------
-// SLAVE (M15) - consumes streaming sessions and runs M15 scan
-// -------------------------------------------------------------------------------------------------
-static double    g_wb15_slave_run_seen  = 0.0;
-static int       g_wb15_slave_next_idx  = 0;
-static bool      g_wb15_slave_active    = false;
-static int       g_wb15_slave_idx       = -1;
-
-static bool      g_wb15_slave_boot_done = false;
-static Direction g_wb15_slave_mode_for_run = DIR_UP;
-static datetime  g_wb15_slave_resume_from = 0;
-static datetime  g_wb15_slave_last_to      = 0;
-
-static int       g_wb15_slave_scan_id      = 0;
-
-void __WB15_Slave_Init(const string sym)
-{
-   g_wb15_slave_run_seen = GlobalVariableCheck(__WB15_KeyRun(sym)) ? GlobalVariableGet(__WB15_KeyRun(sym)) : 0.0;
-   g_wb15_slave_next_idx = 0;
-   g_wb15_slave_active   = false;
-   g_wb15_slave_idx      = -1;
-
-   g_wb15_slave_boot_done = false;
-   g_wb15_slave_mode_for_run = DIR_UP;
-   g_wb15_slave_resume_from = 0;
-   g_wb15_slave_last_to = 0;
-
-   g_wb15_slave_scan_id = 0;
-}
-
-void __WB15_DrawBootstrapMarker_M15(const string sym, const ENUM_TIMEFRAMES tf, const datetime t, const int scan_id)
-{
-   // Thick red vertical line
-   string vName = "S" + IntegerToString(scan_id) + "_BOOTSTRAP_M15_V_" + IntegerToString((int)t);
-   if(ObjectFind(0, vName) >= 0) ObjectDelete(0, vName);
-   if(ObjectCreate(0, vName, OBJ_VLINE, 0, t, 0))
-   {
-      ObjectSetInteger(0, vName, OBJPROP_COLOR, clrRed);
-      ObjectSetInteger(0, vName, OBJPROP_WIDTH, 3);
-      ObjectSetInteger(0, vName, OBJPROP_STYLE, STYLE_SOLID);
-      ObjectSetInteger(0, vName, OBJPROP_BACK, false);
-      ObjectSetInteger(0, vName, OBJPROP_SELECTABLE, false);
-      ObjectSetInteger(0, vName, OBJPROP_HIDDEN, false);
-   }
-
-   // Blue text on the same candle
-   int shift = iBarShift(sym, tf, t, false);
-   double price = (shift >= 0 ? iHigh(sym, tf, shift) : iHigh(sym, tf, 0));
-
-   string tName = "S" + IntegerToString(scan_id) + "_BOOTSTRAP_M15_T_" + IntegerToString((int)t);
-   if(ObjectFind(0, tName) >= 0) ObjectDelete(0, tName);
-   if(ObjectCreate(0, tName, OBJ_TEXT, 0, t, price))
-   {
-      ObjectSetString(0, tName, OBJPROP_TEXT, "Bootstrap");
-      ObjectSetInteger(0, tName, OBJPROP_COLOR, clrBlue);
-      ObjectSetInteger(0, tName, OBJPROP_FONTSIZE, 10);
-      ObjectSetInteger(0, tName, OBJPROP_ANCHOR, ANCHOR_CENTER);
-      ObjectSetInteger(0, tName, OBJPROP_BACK, false);
-      ObjectSetInteger(0, tName, OBJPROP_SELECTABLE, false);
-      ObjectSetInteger(0, tName, OBJPROP_HIDDEN, false);
-   }
-}
-
-void __WB15_Slave_StartSession(const string sym, const WB15Session &s)
-{
-   // Dedicated scan_id for each session (so history stays on the chart)
-   ++g_scan_id;
-   g_wb15_slave_scan_id = g_scan_id;
-
-   // Reset worlds
-   Markers_SetNamespace("MAJ");
-   __WB_ResetMinorWorldGlobals();
-   WBWM_Reset();
-   WBWM_Init();
-
-   // Visual marker on the exact bootstrap candle
-   __WB15_DrawBootstrapMarker_M15(sym, PERIOD_M15, s.start, g_wb15_slave_scan_id);
-
-   // Bootstrap runs once (at first scan update)
-   g_wb15_slave_boot_done = false;
-   g_wb15_slave_mode_for_run = DIR_UP;
-   g_wb15_slave_resume_from = s.start;
-   g_wb15_slave_last_to = s.start;
-}
-
-void __WB15_Slave_ScanUpdate(const string sym, const WB15Session &s, const datetime to_time)
-{
-   datetime win_start = s.start;
-   datetime win_stop  = to_time;
-   if(win_stop < win_start) win_stop = win_start;
-
-   if(win_stop <= g_wb15_slave_last_to) return;
-
-   // Keep scan_id fixed during the session (no duplication)
-   g_scan_id = g_wb15_slave_scan_id;
-   Markers_SetNamespace("MAJ");
-
-   if(!g_wb15_slave_boot_done)
-   {
-      BootOutcome boot = Bootstrap_RaceDetect(sym, PERIOD_M15, win_start, win_stop);
-      if(boot.ok)
-      {
-         g_wb15_slave_mode_for_run = boot.mode;
-         g_wb15_slave_resume_from = boot.complete_time + PeriodSeconds(PERIOD_M15);
-      }
-      else
-      {
-         g_wb15_slave_mode_for_run = InpDirection;
-         g_wb15_slave_resume_from = win_start;
-      }
-      if(g_wb15_slave_resume_from < win_start) g_wb15_slave_resume_from = win_start;
-      g_wb15_slave_boot_done = true;
-   }
-
-   datetime resume_from = g_wb15_slave_resume_from;
-   if(resume_from < win_start) resume_from = win_start;
-   if(resume_from > win_stop)  resume_from = win_stop;
-
-   if(g_wb15_slave_mode_for_run == DIR_DOWN)
-      API_Down_RunScanSequential_W2W3_Hunter(sym, PERIOD_M15, resume_from, win_stop, false, 0.0, 0, "", false);
-   else
-      API_RunScanSequential_W2W3_Hunter(sym, PERIOD_M15, resume_from, win_stop, false, 0.0, 0, "", false);
-
-   g_wb15_slave_last_to = win_stop;
-}
-
-void __WB15_Slave_OnTimer(const string sym)
-{
-   // New run detection (reset pointer)
-   double run_id = GlobalVariableCheck(__WB15_KeyRun(sym)) ? GlobalVariableGet(__WB15_KeyRun(sym)) : 0.0;
-   if(run_id != g_wb15_slave_run_seen)
-   {
-      g_wb15_slave_run_seen = run_id;
-      g_wb15_slave_next_idx = 0;
-      g_wb15_slave_active   = false;
-      g_wb15_slave_idx      = -1;
-
-      g_wb15_slave_boot_done = false;
-      g_wb15_slave_resume_from = 0;
-      g_wb15_slave_last_to = 0;
-      g_wb15_slave_scan_id = 0;
-   }
-
-   int cnt = __WB15_GetCnt(sym);
-   if(cnt <= 0) return;
-
-   // Not active: start next available session
-   if(!g_wb15_slave_active)
-   {
-      if(g_wb15_slave_next_idx >= cnt) return;
-
-      WB15Session s;
-      if(!__WB15_GetSession(sym, g_wb15_slave_next_idx, s)) return;
-
-      g_wb15_slave_active = true;
-      g_wb15_slave_idx    = g_wb15_slave_next_idx;
-
-      __WB15_Slave_StartSession(sym, s);
-
-      // Scan immediately up to current progress/stop
-      datetime to_time = s.stop;
-      if(to_time < s.start) to_time = s.start;
-      __WB15_Slave_ScanUpdate(sym, s, to_time);
-
-      // If already closed, finalize now
-      if(!s.open)
-      {
-         g_wb15_slave_next_idx = g_wb15_slave_idx + 1;
-         g_wb15_slave_active = false;
-         g_wb15_slave_idx = -1;
-      }
-      return;
-   }
-
-   // Active: keep scanning until master closes it
-   WB15Session cur;
-   if(!__WB15_GetSession(sym, g_wb15_slave_idx, cur)) return;
-
-   datetime to_time = cur.stop;
-   if(to_time < cur.start) to_time = cur.start;
-
-   __WB15_Slave_ScanUpdate(sym, cur, to_time);
-
-   if(!cur.open && g_wb15_slave_last_to >= to_time)
-   {
-      g_wb15_slave_next_idx = g_wb15_slave_idx + 1;
-      g_wb15_slave_active = false;
-      g_wb15_slave_idx = -1;
-   }
-}
-
-// =================================================================================================
 int OnInit()
 {
    g_role = __WB_DetectRole();
 
-   // Always initialize baselines on MAJ namespace
+   // Ensure WorldManager captures clean baselines before any scan starts
    Markers_SetNamespace("MAJ");
    WBWM_Init();
 
-   // Slave must stay idle until Master publishes a fresh session list
+   // M15 Slave: start in idle mode and wait for Master signals
    if(g_role == WBROLE_SLAVE_M15)
-      __WB15_Slave_Init(InpSymbol);
+      WB15_SlaveInit();
 
-   EventSetTimer(2);
-   return INIT_SUCCEEDED;
+   EventSetTimer(g_role == WBROLE_SLAVE_M15 ? 1 : 2);
+   return(INIT_SUCCEEDED);
 }
 void OnDeinit(const int reason){ EventKillTimer(); }
 void OnTick(){}
@@ -857,20 +233,13 @@ static bool g_sb_ran = false;   // guard: execute once inside EA
 
 void SB_RunOneShot()
 {
-   ++g_scan_id;                 // unique prefix for one-shot scan
+   ++g_scan_id;                 // prefix ????
    datetime start=0, stop=0;
-   ResolveWindow(start, stop);
+   ResolveWindow(start, stop);  // ???? ???? ?? ??? ?? WaveBot.mq5 ???. :contentReference[oaicite:1]{index=1}
 
-   ENUM_TIMEFRAMES tf = __WB_EffectiveTF();
-
-   // WB15 streaming (H4 master -> M15 slave)
-   if(g_role == WBROLE_MASTER_H4)
-      __WB15_MasterStream_Begin(InpSymbol, tf);
-
-
-   // Run ShadowBreaker through the normal API scanners
-   int upPairs   = API_RunScanSequential_W2W3_Hunter(InpSymbol, tf, start, stop);
-   int downPairs = API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, tf, start, stop);
+   // ????? ???? ?? ?? ?? ???? Shadow Breaker ???? API ?? ????? ??????
+   int upPairs   = API_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, start, stop);
+   int downPairs = API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, start, stop);
 
    if(InpDebugPrints)
       Print("[SB] Scan done. Pairs UP=", upPairs, " | Pairs DOWN=", downPairs,
@@ -880,50 +249,63 @@ void SB_RunOneShot()
 // --- OnTimer: ??????? ????? + ????? ??? ?? Mode ????? + ????? Minor sessions ---
 void OnTimer()
 {
-   // SLAVE (M15): stay idle until Master publishes sessions, then run them and go back to idle
+   // SLAVE (M15): only run the simple bridge (no bootstrap / no wave scan)
    if(g_role == WBROLE_SLAVE_M15)
    {
-      __WB15_Slave_OnTimer(InpSymbol);
+      WB15_Slave_OnTimer(InpSymbol);
       return;
    }
 
-   // MASTER (H4) or legacy standalone: run only once (existing behavior)
-   if(g_once) return;
-
+   // Major namespace (default world)
    Markers_SetNamespace("MAJ");
 
+   // --- optional one-shot ShadowBreaker run (replacement for old OnStart)
    if(InpRunShadowBreakerOnce && !g_sb_ran)
    {
-      g_sb_ran = true;
       SB_RunOneShot();
+      g_sb_ran = true;
    }
+
+   if(g_once) return;
+
+   // MASTER (H4): start a fresh run for the M15 bridge (streamed signals)
+   if(g_role == WBROLE_MASTER_H4)
+      WB15_MasterBegin(InpSymbol);
 
    datetime start=0, stop=0;
    ResolveWindow(start, stop);
 
    ENUM_TIMEFRAMES tf = __WB_EffectiveTF();
 
-   // WB15 streaming (H4 master -> M15 slave)
-   if(g_role == WBROLE_MASTER_H4)
-      __WB15_MasterStream_Begin(InpSymbol, tf);
-
-
+   // 1) ?????????: ??????? ?????? ??? UP/DOWN ???? ??? ????? ??? ????????
    BootOutcome boot = Bootstrap_RaceDetect(InpSymbol, tf, start, stop);
-   Direction mode_for_run = InpDirection;
-   datetime resume_from = start;
+
+   Direction mode_for_run = InpDirection;   // fallback
+   datetime  resume_from  = start;          // ??? ??? ???? ????? ?? ?????? ????
+
    if(boot.ok)
    {
       mode_for_run = boot.mode;
+
+      // ?? «???? ????? body-break» ????? ??? ?? ??????????? ??????? ?????? ?????
       resume_from = boot.complete_time + PeriodSeconds(tf);
+
+      if(InpDebugPrints)
+         Print("[BOOT] Winner=", (mode_for_run==DIR_UP?"UP":"DOWN"),
+               " | first pair @ ", TimeToString(boot.complete_time, TIME_DATE|TIME_SECONDS),
+               " | resume_from=", TimeToString(resume_from, TIME_DATE|TIME_SECONDS));
+   }
+   else
+   {
+      if(InpDebugPrints)
+         Print("[BOOT] No completed pair found in window. Fallback to input direction.");
    }
 
-   if(mode_for_run == DIR_UP)
+   // 2) ????? Major scan ??? ?? Mode ????? (?? Fallback)
+   if(mode_for_run==DIR_UP)
       API_RunScanSequential_W2W3_Hunter(InpSymbol, tf, resume_from, stop);
    else
       API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, tf, resume_from, stop);
 
-   // After the H4 Master finishes its run, publish M15 sessions via Terminal Global Variables
-   if(g_role == WBROLE_MASTER_H4)
-   
-   g_once = true;
+   g_once=true;  // ?????? ???? ???? ??? ?? ??? ???? ????? (??? ???? ????? ???? ???)
 }

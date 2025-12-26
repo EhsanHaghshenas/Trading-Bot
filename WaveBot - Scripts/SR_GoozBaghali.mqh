@@ -701,6 +701,9 @@ inline void SR_GoozBaghali_OnBar_UP(const MqlRates &rates[],
 
          MarkCandleText(name, r.time, y, "GBU", clrMagenta);
 
+         // NEW (H4->M15 bridge): GOOZBAGHALI is a START trigger (intrabar)
+         WB15_PublishStartGooz(InpSymbol, DIR_UP, r.time);
+
          // فقط اولین برخورد این ناحیه ⇒ بعد از این کندل دیگر برای این zone، GBU تکرار نمی‌شود
          z.gbu_marked = true;
          // حتماً تغییر را در آرایه هم ذخیره می‌کنیم
@@ -805,6 +808,9 @@ inline void SR_GoozBaghali_OnBar_DOWN(const MqlRates &rates[],
          double y = r.low - pad;
 
          MarkCandleText(name, r.time, y, "GBD", clrMagenta);
+
+         // NEW (H4->M15 bridge): GOOZBAGHALI is a START trigger (intrabar)
+         WB15_PublishStartGooz(InpSymbol, DIR_DOWN, r.time);
 
          z.gbu_marked = true;
          g_srgb_dn_zones[zi] = z;

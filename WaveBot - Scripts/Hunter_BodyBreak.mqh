@@ -184,6 +184,9 @@ inline void HW_BB_UP_OnBar(const MqlRates &r, const MqlRates &rates[], const int
       ++g_bb_counter_u;
       if(InpDrawMarkers) MarkV("HWBB_U_"+IntegerToString(g_bb_counter_u), r.time, clrRoyalBlue);
 
+      // NEW (H4->M15 bridge): HWBB is a START trigger (intrabar)
+      WB15_PublishStartHWBB(InpSymbol, DIR_UP, r.time);
+
       // set ref for POSSIBLE MTC_DOWN (High of Hunter-UP C1) + draw ref history now
       Race_SetRefLevelForMTC_Down(SW_UP_Level());
       //Race_DrawRefHistory_Down(SW_UP_Level(), r.time);
@@ -250,6 +253,9 @@ inline void HW_BB_DOWN_OnBar(const MqlRates &r, const MqlRates &rates[], const i
    {
       ++g_bb_counter_d;
       if(InpDrawMarkers) MarkV("HWBB_D_"+IntegerToString(g_bb_counter_d), r.time, clrDarkOrange);
+
+      // NEW (H4->M15 bridge): HWBB is a START trigger (intrabar)
+      WB15_PublishStartHWBB(InpSymbol, DIR_DOWN, r.time);
 
       // set ref for POSSIBLE MTC_UP (Low of Hunter-DOWN C1) + draw ref history now
       Race_SetRefLevelForMTC_Up(SW_DOWN_Level());

@@ -1,9 +1,6 @@
 #ifndef WAVEBOT_RACECOORDINATOR_MQH
 #define WAVEBOT_RACECOORDINATOR_MQH
 
-#include <WaveBot/Runtime.mqh>   // NEW: runtime scan context (symbol/timeframe)
-
-
 #include <WaveBot/Types.mqh>
 #include <WaveBot/Markers.mqh>
 #include <WaveBot/Utils.mqh>
@@ -631,7 +628,7 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
 
                   // Compute scan window before clearing race state
                   const int __c1=(S.c1>=0?S.c1:g_race_hwbb_idx);
-                  datetime __from = rates[__c1].time - (PeriodSeconds(WBRT_TF())*5);
+                  datetime __from = rates[__c1].time - (PeriodSeconds(InpTF)*5);
                   datetime __to   = __Race_ScanToTime(rates, n);
                   const bool __bump = __Race_IsMajorWorld();
                   Direction __prev_mode = g_race_mode;
@@ -645,7 +642,7 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
                   SWGate_ResetGlobals();
 
                   if(__prev_mode==DIR_UP)
-                     API_Down_RunScanSequential_W2W3_Hunter(WBRT_Symbol(), WBRT_TF(), __from, __to,
+                     API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to,
                                                            false, 0.0, 0, "", __bump);
                }
                else
@@ -855,7 +852,7 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
                   Race_DrawW2W3_MTC_Up(rates, n, S);
 
                   const int __c1=(S.c1>=0?S.c1:g_race_hwbb_idx);
-                  datetime __from = rates[__c1].time - (PeriodSeconds(WBRT_TF())*5);
+                  datetime __from = rates[__c1].time - (PeriodSeconds(InpTF)*5);
                   datetime __to   = __Race_ScanToTime(rates, n);
                   const bool __bump = __Race_IsMajorWorld();
                   Direction __prev_mode = g_race_mode;
@@ -867,7 +864,7 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
                   SWGate_ResetGlobals();
 
                   if(__prev_mode==DIR_DOWN)
-                     API_RunScanSequential_W2W3_Hunter(WBRT_Symbol(), WBRT_TF(), __from, __to,
+                     API_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to,
                                                       false, 0.0, 0, "", __bump);
                }
                else
@@ -911,6 +908,10 @@ inline void Race_DrawW2W3_MTC_Down(const MqlRates &rates[], const int n, const R
    // --- Body-Break (DOWN)
    if(S.bodyBreakIdx >= 0 && S.bodyBreakIdx < n && InpDrawMarkers)
       MarkV("MTC_DN_BB_"+tag, rates[S.bodyBreakIdx].time, clrRed);
+
+   // NEW (H4->M15 bridge): MTC is a STOP trigger (use body-break candle time)
+   if(S.bodyBreakIdx >= 0 && S.bodyBreakIdx < n)
+      WB15_PublishStopMTC(InpSymbol, DIR_DOWN, rates[S.bodyBreakIdx].time);
 
    // --- Reference for this MTC_DOWN
    if(g_race_ref_mtc_down > 0.0)
@@ -977,6 +978,10 @@ inline void Race_DrawW2W3_MTC_Up(const MqlRates &rates[], const int n, const Rac
    if(S.bodyBreakIdx >= 0 && S.bodyBreakIdx < n && InpDrawMarkers)
       MarkV("MTC_UP_BB_"+tag, rates[S.bodyBreakIdx].time, clrBlue);
 
+   // NEW (H4->M15 bridge): MTC is a STOP trigger (use body-break candle time)
+   if(S.bodyBreakIdx >= 0 && S.bodyBreakIdx < n)
+      WB15_PublishStopMTC(InpSymbol, DIR_UP, rates[S.bodyBreakIdx].time);
+
    // --- Reference for this MTC_UP
    if(g_race_ref_mtc_up > 0.0)
    {
@@ -1026,6 +1031,10 @@ inline void Race_DrawMTCOnly_Down(const MqlRates &rates[], const int n, const in
    if(bodyIdx >= 0 && bodyIdx < n && InpDrawMarkers)
       MarkV("MTC_DN_BB_"+tag, rates[bodyIdx].time, clrRed);
 
+   // NEW (H4->M15 bridge): MTC is a STOP trigger (special-case)
+   if(bodyIdx >= 0 && bodyIdx < n)
+      WB15_PublishStopMTC(InpSymbol, DIR_DOWN, rates[bodyIdx].time);
+
    if(g_race_ref_mtc_down > 0.0)
    {
       const string base_rname = "MTC_DN_REF_" + tag;
@@ -1072,6 +1081,10 @@ inline void Race_DrawMTCOnly_Up(const MqlRates &rates[], const int n, const int 
 
    if(bodyIdx >= 0 && bodyIdx < n && InpDrawMarkers)
       MarkV("MTC_UP_BB_"+tag, rates[bodyIdx].time, clrBlue);
+
+   // NEW (H4->M15 bridge): MTC is a STOP trigger (special-case)
+   if(bodyIdx >= 0 && bodyIdx < n)
+      WB15_PublishStopMTC(InpSymbol, DIR_UP, rates[bodyIdx].time);
 
    if(g_race_ref_mtc_up > 0.0)
    {
@@ -1140,7 +1153,7 @@ inline void Race_SpecialRefBreak_MTC_Down(const MqlRates &rates[], const int n, 
    const bool     __bump = __Race_IsMajorWorld();
 
    if(__prev_mode == DIR_UP)
-      API_Down_RunScanSequential_W2W3_Hunter(WBRT_Symbol(), WBRT_TF(), __from, __to,
+      API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to,
                                             false, 0.0, 0, "", __bump);
 }
 
@@ -1173,7 +1186,7 @@ inline void Race_SpecialRefBreak_MTC_Up(const MqlRates &rates[], const int n, co
    const bool     __bump = __Race_IsMajorWorld();
 
    if(__prev_mode == DIR_DOWN)
-      API_RunScanSequential_W2W3_Hunter(WBRT_Symbol(), WBRT_TF(), __from, __to,
+      API_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to,
                                        false, 0.0, 0, "", __bump);
 }
 

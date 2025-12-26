@@ -265,8 +265,24 @@ inline void FSMS_OnSameDirW2Invalidated_DOWN()
 }
 
 // مارک‌ها
-inline void __FSMS_Mark_UP(const datetime t){ ++g_fsms_u_counter; if(InpDrawMarkers) MarkV("FSMS_U_"+IntegerToString(g_fsms_u_counter), t, clrWhite); }
-inline void __FSMS_Mark_DN(const datetime t){ ++g_fsms_d_counter; if(InpDrawMarkers) MarkV("FSMS_D_"+IntegerToString(g_fsms_d_counter), t, clrWhite); }
+inline void __FSMS_Mark_UP(const datetime t)
+{
+   ++g_fsms_u_counter;
+   if(InpDrawMarkers)
+      MarkV("FSMS_U_"+IntegerToString(g_fsms_u_counter), t, clrWhite);
+
+   // NEW (H4->M15 bridge): FSMS (MAJ-only) is a START trigger (on close)
+   WB15_PublishStartFSMS_MAJONLY(InpSymbol, DIR_UP, t);
+}
+inline void __FSMS_Mark_DN(const datetime t)
+{
+   ++g_fsms_d_counter;
+   if(InpDrawMarkers)
+      MarkV("FSMS_D_"+IntegerToString(g_fsms_d_counter), t, clrWhite);
+
+   // NEW (H4->M15 bridge): FSMS (MAJ-only) is a START trigger (on close)
+   WB15_PublishStartFSMS_MAJONLY(InpSymbol, DIR_DOWN, t);
+}
 
 // --- NEW: Text روی C1 موج۲ و C1 موج۳ هم‌جهتِ منبع FSMS (UP) ---
 inline void __FSMS_DrawSourceTexts_UP(const MqlRates &rates[], const int n,

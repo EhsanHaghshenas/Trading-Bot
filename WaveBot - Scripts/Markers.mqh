@@ -7,11 +7,6 @@ extern int g_scan_id;  // defined in WaveBot.mq5
 // Empty => legacy behavior (no extra namespace).
 static string g_markers_ns = "";
 
-// --- WB15 bridge hooks (implemented in WaveBot.mq5) ---
-void WB15_OnMarkerCreated(const string marker_name, const datetime t);
-void WB15_OnMasterProgress(const datetime cur_time);
-// -------------------------------------------------------
-
 // set/get world namespace (used later by WorldManager)
 inline void   Markers_SetNamespace(const string ns){ g_markers_ns = ns; }
 inline string Markers_GetNamespace(){ return g_markers_ns; }
@@ -26,7 +21,6 @@ inline string __ScanPrefix()
 
 void MarkV(const string name, const datetime t, const color col)
 {
-   WB15_OnMarkerCreated(name, t);
    if(!InpDrawMarkers) return;
    const string full = __ScanPrefix() + name;        // NEW: namespaced
    if(ObjectFind(0,full)!=-1) ObjectDelete(0,full);
@@ -43,7 +37,6 @@ void MarkCandleText(const string name,
                     const string   text,
                     const color    col)
 {
-   WB15_OnMarkerCreated(name, t);
    if(!InpDrawMarkers) return;
 
    const string full = __ScanPrefix() + name;
