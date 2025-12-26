@@ -1470,6 +1470,10 @@ inline void FSMS_SW_CheckMinorOff(const MqlRates &rates[], const int n, const in
             if(InpDrawMarkers)
                MarkCandleText("MinorOff_U_" + tag, r.time, y, "MinorOff", clrRed);
 
+            // NEW (WB15 bridge): if MAJ MinorOff breaks low of C1-W2 Minorzone D, stop MIN-start M15 session
+            if(g_minor_starter_u_LowW2_D > 0.0 && low <= g_minor_starter_u_LowW2_D)
+               WB15_PublishStopMinorOffZone_MAJONLY(InpSymbol, DIR_DOWN, r.time);
+
             // -------- NEW: close session --------
             FSMS_SW_Session_Close(tag, DIR_UP, j, r.time, g_minor_u_seq);
 
@@ -1531,6 +1535,10 @@ inline void FSMS_SW_CheckMinorOff(const MqlRates &rates[], const int n, const in
 
             if(InpDrawMarkers)
                MarkCandleText("MinorOff_D_" + tag, r.time, y, "MinorOff", clrRed);
+
+            // NEW (WB15 bridge): if MAJ MinorOff breaks high of C1-W2 Minorzone U, stop MIN-start M15 session
+            if(g_minor_starter_d_HighW2_U > 0.0 && high >= g_minor_starter_d_HighW2_U)
+               WB15_PublishStopMinorOffZone_MAJONLY(InpSymbol, DIR_UP, r.time);
 
             // -------- NEW: close session --------
             FSMS_SW_Session_Close(tag, DIR_DOWN, j, r.time, g_minor_d_seq);
@@ -1833,5 +1841,6 @@ inline void FSMS_SW_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
       // --- NEW: پایش MinorOff بعد از MinorStarter (مستقل از فعال بودن FSMS–SW)
    FSMS_SW_CheckMinorOff(rates, n, upto_j);
 }
+
 
 #endif // WAVEBOT_FSMS_SW_MQH

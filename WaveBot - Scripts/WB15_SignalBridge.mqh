@@ -26,7 +26,8 @@ enum WB15_KIND
    WB15_KIND_START_GOOZBAGHALI  = 4,
 
    WB15_KIND_STOP_MTC           = 10,
-   WB15_KIND_STOP_MINORSTARTER  = 11
+   WB15_KIND_STOP_MINORSTARTER  = 11,
+   WB15_KIND_STOP_MINOROFF_ZONE = 12
 };
 
 // ---- Internal state (M15) ----
@@ -188,6 +189,13 @@ inline void WB15_PublishStopMinorStarter(const string sym, const Direction dir, 
    WB15_MasterPushEvent(sym, WB15_KIND_STOP_MINORSTARTER, WB15_NS_MAJ, dir, t);
 }
 
+
+inline void WB15_PublishStopMinorOffZone_MAJONLY(const string sym, const Direction dir, const datetime t)
+{
+   // Stop trigger: MAJ MinorOff breaks C1-W2 Minorzone boundary (used to stop MIN-start M15 sessions)
+   if(Markers_GetNamespace() != "MAJ") return;
+   WB15_MasterPushEvent(sym, WB15_KIND_STOP_MINOROFF_ZONE, WB15_NS_MAJ, dir, t);
+}
 // ============================================================================
 // SLAVE (M15): drawing helpers
 // ============================================================================
@@ -304,7 +312,7 @@ inline bool __WB15_IsStartKind(const int kind)
 
 inline bool __WB15_IsStopKind(const int kind)
 {
-   return (kind == WB15_KIND_STOP_MTC || kind == WB15_KIND_STOP_MINORSTARTER);
+   return (kind == WB15_KIND_STOP_MTC || kind == WB15_KIND_STOP_MINORSTARTER || kind == WB15_KIND_STOP_MINOROFF_ZONE);
 }
 
 inline bool __WB15_ShouldStop(const WB15ActiveState &st, const int stop_kind, const int stop_ns, const Direction stop_dir)
@@ -321,7 +329,14 @@ inline bool __WB15_ShouldStop(const WB15ActiveState &st, const int stop_kind, co
       return (stop_kind == WB15_KIND_STOP_MINORSTARTER || stop_kind == WB15_KIND_STOP_MTC);
    }
 
-   // HWX/HWBB/GOOZ sessions are stopped by MTC
+   // HWX/HWBB/GOOZ sessions:
+   //  - stopped by MTC (same-namespace; MIN sessions also allow MAJ cross-stop)
+   //  - additionally, MIN sessions can be stopped by MAJ MinorOff breaking C1-W2 Minorzone boundary
+   if(stop_kind == WB15_KIND_STOP_MINOROFF_ZONE)
+   {
+      return (st.start_ns == WB15_NS_MIN && stop_ns == WB15_NS_MAJ);
+   }
+
    if(stop_kind != WB15_KIND_STOP_MTC) return false;
 
    if(st.start_ns == WB15_NS_MAJ)
@@ -331,7 +346,6 @@ inline bool __WB15_ShouldStop(const WB15ActiveState &st, const int stop_kind, co
 
    return false;
 }
-
 
 inline void WB15_SlaveInit()
 {
@@ -425,5 +439,6 @@ inline void WB15_Slave_OnTimer(const string sym)
 
    GlobalVariableSet(kPrc, (double)seq);
 }
+
 
 #endif // WAVEBOT_WB15_SIGNAL_BRIDGE_MQH
