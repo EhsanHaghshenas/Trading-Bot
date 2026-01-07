@@ -33,13 +33,18 @@ enum WB15_KIND
 // ---- Internal state (M15) ----
 struct WB15ActiveState
 {
-   bool     active;
-   int      start_kind;
-   int      start_ns;
+   bool      active;
+   int       start_kind;
+   int       start_ns;
    Direction start_dir;
-   datetime start_time;
-   int      start_evt_seq;
-   double   run_id;
+   datetime  start_time;
+   int       start_evt_seq;
+   double    run_id;
+
+   // Live M15 candle counting (online / candle-by-candle)
+   datetime  start_bar_time;       // exact M15 bar open time for the ON marker bar
+   datetime  last_count_bar_time;  // exact M15 bar open time of last numbered candle (initially = start_bar_time)
+   int       count;                // numbered candles count (candles strictly after ON and before OFF)
 };
 
 static int             g_wb15_processed_seq = 0;
@@ -267,6 +272,128 @@ inline void __WB15_DrawSignalMarker(const string sym,
    __WB15_DrawTextUnique(tname, t, y, (is_on ? "4H Signal on" : "4H Signal off"), clrBlue, 10);
 }
 
+// ============================================================================
+// SLAVE (M15): live candle-by-candle numbering helpers
+// (Uses the same bar-mapping logic as minor-range starter/ender numbering:
+//  resolve event time -> M15 bar by iBarShift(..., false) then iTime(...))
+// ============================================================================
+
+inline bool __WB15_ResolveM15BarTime(const string sym, const datetime t, datetime &bar_time)
+{
+   int sh = iBarShift(sym, PERIOD_M15, t, false);
+   if(sh < 0) return false;
+   bar_time = iTime(sym, PERIOD_M15, sh);
+   return (bar_time > 0);
+}
+
+inline int __WB15_BarShiftM15Safe(const string sym, const datetime bar_time)
+{
+   int sh = iBarShift(sym, PERIOD_M15, bar_time, true);
+   if(sh < 0) sh = iBarShift(sym, PERIOD_M15, bar_time, false);
+   return sh;
+}
+
+inline void __WB15_DrawCountLabel(const string sym,
+                                 const double run_id,
+                                 const int start_evt_seq,
+                                 const datetime bar_time,
+                                 const int num,
+                                 const Direction dir)
+{
+   double hi=0.0, lo=0.0;
+   if(!__WB15_GetBarHL(sym, bar_time, hi, lo))
+      return;
+
+   double span = hi - lo;
+   if(span <= 0.0) span = 10.0 * _Point;
+   double pad = span * 0.25;
+   if(pad < 3.0 * _Point) pad = 3.0 * _Point;
+
+   double y = (dir == DIR_UP ? hi + pad : lo - pad);
+
+   string name = "WB15_CNT_" + DoubleToString(run_id, 0) + "_" + IntegerToString(start_evt_seq) + "_" + IntegerToString(num);
+   __WB15_DrawTextUnique(name, bar_time, y, IntegerToString(num), clrAqua, 8);
+}
+
+inline void __WB15_DeleteCountLabels(const double run_id,
+                                    const int start_evt_seq,
+                                    const int from_num,
+                                    const int to_num)
+{
+   if(from_num > to_num) return;
+
+   for(int n = from_num; n <= to_num; ++n)
+   {
+      string name = "WB15_CNT_" + DoubleToString(run_id, 0) + "_" + IntegerToString(start_evt_seq) + "_" + IntegerToString(n);
+      if(ObjectFind(0, name) != -1)
+         ObjectDelete(0, name);
+   }
+}
+
+inline int __WB15_CountBarsExclusiveM15(const string sym, const datetime start_bar_time, const datetime stop_bar_time)
+{
+   if(start_bar_time <= 0 || stop_bar_time <= 0) return 0;
+
+   int sh_start = __WB15_BarShiftM15Safe(sym, start_bar_time);
+   int sh_stop  = __WB15_BarShiftM15Safe(sym, stop_bar_time);
+   if(sh_start < 0 || sh_stop < 0) return 0;
+   if(sh_start <= sh_stop) return 0;
+
+   int cnt = sh_start - sh_stop - 1; // exclude both boundary candles
+   if(cnt < 0) cnt = 0;
+   return cnt;
+}
+
+// Advance the live counter forward (no look-ahead).
+// - If until_exclusive_bar_time == 0: count forward up to the last CLOSED M15 candle.
+// - If until_exclusive_bar_time  > 0: count forward, but do NOT count the candle whose open time == until_exclusive_bar_time
+//   (i.e., stop before OFF candle).
+inline void __WB15_LiveCountAdvance(const string sym, const datetime until_exclusive_bar_time)
+{
+   if(!g_wb15_state.active) return;
+   if(g_wb15_state.start_bar_time <= 0) return;
+
+   // Only closed candles are eligible for numbering
+   datetime last_closed_time = iTime(sym, PERIOD_M15, 1);
+   if(last_closed_time <= 0) return;
+
+   datetime cur = g_wb15_state.last_count_bar_time;
+   if(cur <= 0) cur = g_wb15_state.start_bar_time;
+
+   while(true)
+   {
+      int sh = __WB15_BarShiftM15Safe(sym, cur);
+      if(sh < 0) break;
+
+      int next_sh = sh - 1;
+      if(next_sh < 1) break; // do not number current (forming) candle
+
+      datetime next_time = iTime(sym, PERIOD_M15, next_sh);
+      if(next_time <= 0) break;
+
+      // Safety: should never exceed the last closed candle, but keep guard
+      if(next_time > last_closed_time) break;
+
+      // Upper bound (OFF candle open time) if provided
+      if(until_exclusive_bar_time > 0 && next_time >= until_exclusive_bar_time)
+         break;
+
+      g_wb15_state.count++;
+      __WB15_DrawCountLabel(sym,
+                           g_wb15_state.run_id,
+                           g_wb15_state.start_evt_seq,
+                           next_time,
+                           g_wb15_state.count,
+                           g_wb15_state.start_dir);
+
+      g_wb15_state.last_count_bar_time = next_time;
+      cur = next_time;
+   }
+}
+
+// (Optional legacy helper) Draw counts for the whole range at once.
+// This uses the same bar-resolution logic (iBarShift false -> iTime) and
+// numbers candles strictly INSIDE [from_t .. to_t] (excluding both boundary candles).
 inline void __WB15_DrawCountSequence(const string sym,
                                     const double run_id,
                                     const int start_evt_seq,
@@ -274,30 +401,28 @@ inline void __WB15_DrawCountSequence(const string sym,
                                     const datetime to_t,
                                     const Direction dir)
 {
-   if(to_t < from_t) return;
+   if(to_t <= from_t) return;
 
-   MqlRates rr[];
-   ArraySetAsSeries(rr, false);
-   int got = CopyRates(sym, PERIOD_M15, from_t, to_t, rr);
-   if(got <= 0) return;
+   datetime start_bt = 0;
+   datetime stop_bt  = 0;
+   if(!__WB15_ResolveM15BarTime(sym, from_t, start_bt)) return;
+   if(!__WB15_ResolveM15BarTime(sym, to_t,   stop_bt))  return;
+   if(stop_bt <= start_bt) return;
 
-   for(int i = 0; i < got; ++i)
+   int sh_start = __WB15_BarShiftM15Safe(sym, start_bt);
+   int sh_stop  = __WB15_BarShiftM15Safe(sym, stop_bt);
+   if(sh_start < 0 || sh_stop < 0) return;
+   if(sh_start <= sh_stop) return;
+
+   int num = 0;
+   // Candle order: from older (start) towards newer (stop)
+   for(int sh = sh_start - 1; sh >= sh_stop + 1; --sh)
    {
-      const datetime bt = rr[i].time;
-      if(bt < from_t || bt > to_t) continue;
+      datetime bt = iTime(sym, PERIOD_M15, sh);
+      if(bt <= 0) continue;
 
-      double hi = rr[i].high;
-      double lo = rr[i].low;
-      double span = hi - lo;
-      if(span <= 0.0) span = 10.0 * _Point;
-      double pad = span * 0.25;
-      if(pad < 3.0 * _Point) pad = 3.0 * _Point;
-
-      double y = (dir == DIR_UP ? hi + pad : lo - pad);
-      int num = i + 1;
-
-      string name = "WB15_CNT_" + DoubleToString(run_id, 0) + "_" + IntegerToString(start_evt_seq) + "_" + IntegerToString(num);
-      __WB15_DrawTextUnique(name, bt, y, IntegerToString(num), clrAqua, 8);
+      num++;
+      __WB15_DrawCountLabel(sym, run_id, start_evt_seq, bt, num, dir);
    }
 }
 
@@ -351,6 +476,7 @@ inline void WB15_SlaveInit()
 {
    g_wb15_processed_seq = 0;
    g_wb15_run_seen      = 0.0;
+
    g_wb15_state.active  = false;
    g_wb15_state.start_kind = 0;
    g_wb15_state.start_ns   = 0;
@@ -358,6 +484,10 @@ inline void WB15_SlaveInit()
    g_wb15_state.start_time = 0;
    g_wb15_state.start_evt_seq = 0;
    g_wb15_state.run_id = 0.0;
+
+   g_wb15_state.start_bar_time      = 0;
+   g_wb15_state.last_count_bar_time = 0;
+   g_wb15_state.count              = 0;
 }
 
 inline void WB15_Slave_OnTimer(const string sym)
@@ -390,54 +520,84 @@ inline void WB15_Slave_OnTimer(const string sym)
    int processed = 0;
    if(GlobalVariableCheck(kPrc)) processed = (int)GlobalVariableGet(kPrc);
    int seq = (int)GlobalVariableGet(kSeq);
-   if(seq <= processed) return;
 
-   for(int i = processed + 1; i <= seq; ++i)
+   // 1) Process new H4 events (ON/OFF markers)
+   if(seq > processed)
    {
-      const string kt = __WB15_KeyT(sym, i);
-      const string kc = __WB15_KeyC(sym, i);
-      if(!GlobalVariableCheck(kt) || !GlobalVariableCheck(kc))
-         continue;
-
-      const datetime t = (datetime)GlobalVariableGet(kt);
-      const int code = (int)GlobalVariableGet(kc);
-
-      const int kind = code / 100;
-      const int ns   = (code / 10) % 10;
-      const int dc   = code % 10;
-      const Direction dir = __WB15_CodeDir(dc);
-
-      if(__WB15_IsStartKind(kind))
+      for(int i = processed + 1; i <= seq; ++i)
       {
-         if(!g_wb15_state.active)
-         {
-            g_wb15_state.active = true;
-            g_wb15_state.start_kind = kind;
-            g_wb15_state.start_ns   = ns;
-            g_wb15_state.start_dir  = dir;
-            g_wb15_state.start_time = t;
-            g_wb15_state.start_evt_seq = i;
-            g_wb15_state.run_id = run_id;
+         const string kt = __WB15_KeyT(sym, i);
+         const string kc = __WB15_KeyC(sym, i);
+         if(!GlobalVariableCheck(kt) || !GlobalVariableCheck(kc))
+            continue;
 
-            __WB15_DrawSignalMarker(sym, run_id, i, t, true, dir);
+         const datetime t = (datetime)GlobalVariableGet(kt);
+         const int code = (int)GlobalVariableGet(kc);
+
+         const int kind = code / 100;
+         const int ns   = (code / 10) % 10;
+         const int dc   = code % 10;
+         const Direction dir = __WB15_CodeDir(dc);
+
+         if(__WB15_IsStartKind(kind))
+         {
+            if(!g_wb15_state.active)
+            {
+               g_wb15_state.active = true;
+               g_wb15_state.start_kind = kind;
+               g_wb15_state.start_ns   = ns;
+               g_wb15_state.start_dir  = dir;
+               g_wb15_state.start_time = t;
+               g_wb15_state.start_evt_seq = i;
+               g_wb15_state.run_id = run_id;
+
+               // Resolve ON candle open time on M15 (same mapping logic as minor-range numbering)
+               datetime on_bar_time = 0;
+               if(__WB15_ResolveM15BarTime(sym, t, on_bar_time))
+                  g_wb15_state.start_bar_time = on_bar_time;
+               else
+                  g_wb15_state.start_bar_time = t; // fallback (should not happen if history is present)
+
+               // Live numbering starts from the NEXT candle after ON
+               g_wb15_state.last_count_bar_time = g_wb15_state.start_bar_time;
+               g_wb15_state.count = 0;
+
+               __WB15_DrawSignalMarker(sym, run_id, i, t, true, dir);
+            }
+         }
+         else if(__WB15_IsStopKind(kind))
+         {
+            if(__WB15_ShouldStop(g_wb15_state, kind, ns, dir))
+            {
+               // Resolve OFF candle open time on M15
+               datetime off_bar_time = 0;
+               if(__WB15_ResolveM15BarTime(sym, t, off_bar_time))
+               {
+                  // Live numbering: count candles up to (but NOT including) the OFF candle
+                  __WB15_LiveCountAdvance(sym, off_bar_time);
+
+                  // Safety cleanup: if OFF event arrived late, remove any numbers beyond OFF
+                  int correct = __WB15_CountBarsExclusiveM15(sym, g_wb15_state.start_bar_time, off_bar_time);
+                  if(g_wb15_state.count > correct)
+                  {
+                     __WB15_DeleteCountLabels(run_id, g_wb15_state.start_evt_seq, correct + 1, g_wb15_state.count);
+                     g_wb15_state.count = correct;
+                  }
+               }
+
+               __WB15_DrawSignalMarker(sym, run_id, i, t, false, g_wb15_state.start_dir);
+
+               g_wb15_state.active = false;
+            }
          }
       }
-      else if(__WB15_IsStopKind(kind))
-      {
-         if(__WB15_ShouldStop(g_wb15_state, kind, ns, dir))
-         {
-            __WB15_DrawSignalMarker(sym, run_id, i, t, false, g_wb15_state.start_dir);
 
-            // Count & label candles on M15 between start and stop (inclusive)
-            __WB15_DrawCountSequence(sym, run_id, g_wb15_state.start_evt_seq,
-                                    g_wb15_state.start_time, t, g_wb15_state.start_dir);
-
-            g_wb15_state.active = false;
-         }
-      }
+      GlobalVariableSet(kPrc, (double)seq);
    }
 
-   GlobalVariableSet(kPrc, (double)seq);
+   // 2) Live candle-by-candle numbering while session is active (NO look-ahead)
+   if(g_wb15_state.active)
+      __WB15_LiveCountAdvance(sym, 0);
 }
 
 
