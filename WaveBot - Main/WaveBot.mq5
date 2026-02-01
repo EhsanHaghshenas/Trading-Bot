@@ -300,6 +300,8 @@ void OnTimer()
       if(InpDebugPrints)
          Print("[BOOT] No completed pair found in window. Fallback to input direction.");
    }
+   // NEW: در MAJ فقط ExtLQ های روند فعلی معتبر باشند (پاکسازی ExtLQ خلاف روند)
+   SR_AllowOnly(mode_for_run);
 
    // 2) ????? Major scan ??? ?? Mode ????? (?? Fallback)
    if(mode_for_run==DIR_UP)

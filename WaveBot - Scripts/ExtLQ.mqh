@@ -102,6 +102,21 @@ inline void ExtLQ_DeleteLine(const string base)
    const string name = __ScanPrefix() + base;
    if(ObjectFind(0, name) != -1) ObjectDelete(0, name);
 }
+// پاکسازی کامل state این ماژول (برای جلوگیری از باقی‌ماندن ExtLQ قدیمیِ خلافِ روند)
+inline void ExtLQ_ClearAll(const bool delete_lines=true)
+{
+   g_ext_has   = false;
+   g_ext_price = 0.0;
+   g_ext_time  = 0;
+   ArrayFree(g_hist);
+   g_prev_idx  = -1;
+
+   if(delete_lines)
+   {
+      ExtLQ_DeleteLine(EXTLQ_LINE_CURR);
+      ExtLQ_DeleteLine(EXTLQ_LINE_PREV);
+   }
+}
 
 // -------------------- کمکی‌های داخلی ------------------------------
 inline int ExtLQ_FindLatestUntouchedIndex()

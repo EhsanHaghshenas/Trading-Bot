@@ -346,6 +346,8 @@ inline void Race_MarkWin_B(const Direction mode, const datetime t)
 //--------------------------- ???? ?????? ?? HWBB ------------------------------
 inline void Race_Start_UP(const MqlRates &rates[], const int n, const int hwbb_idx)
 {
+   if(__Race_IsMajorWorld() && !SR_ShouldProcess_UP()) return;
+
    if(g_race_locked) return; // ?????
    g_race_locked     = true;
    g_race_mode       = DIR_UP;
@@ -373,8 +375,11 @@ inline void Race_Start_UP(const MqlRates &rates[], const int n, const int hwbb_i
    C1W2_PB_DN_Enable();
 }
 
+
 inline void Race_Start_DOWN(const MqlRates &rates[], const int n, const int hwbb_idx)
 {
+   if(__Race_IsMajorWorld() && !SR_ShouldProcess_DOWN()) return;
+
    if(g_race_locked) return;
    g_race_locked     = true;
    g_race_mode       = DIR_DOWN;
@@ -401,7 +406,6 @@ inline void Race_Start_DOWN(const MqlRates &rates[], const int n, const int hwbb
    // Enable strict C1-W2 gate for Path-B (scanning UP)
    C1W2_PB_UP_Enable();
 }
-
 
 //--------------------------- ????? ???? A (SW ??????) -------------------------
 inline void Race_OnSWConfirmed_UP(const MqlRates &rates[], const int n, const int w3_c1, const int bodyBreakIdx)

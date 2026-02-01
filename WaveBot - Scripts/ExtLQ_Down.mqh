@@ -97,6 +97,21 @@ inline void ExtLQ_Down_DrawLine(const string base, const double price, const col
    ObjectSetInteger(0, name, OBJPROP_STYLE, st);
    ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
 }
+// پاکسازی کامل state این ماژول (برای جلوگیری از باقی‌ماندن ExtLQ_Down قدیمیِ خلافِ روند)
+inline void ExtLQ_Down_ClearAll(const bool delete_lines=true)
+{
+   g_extD_has   = false;
+   g_extD_price = 0.0;
+   g_extD_time  = 0;
+   ArrayFree(g_histD);
+   g_prev_idxD  = -1;
+
+   if(delete_lines)
+   {
+      ExtLQ_Down_DeleteLine(EXTLQ_D_LINE_CURR);
+      ExtLQ_Down_DeleteLine(EXTLQ_D_LINE_PREV);
+   }
+}
 
 inline bool ExtLQ_Down_Has(){ return g_extD_has; }
 inline double ExtLQ_Down_Get(){ return g_extD_price; }
