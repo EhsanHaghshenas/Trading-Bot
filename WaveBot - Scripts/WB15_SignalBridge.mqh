@@ -119,6 +119,35 @@ inline Direction __WB15_Opposite(const Direction d)
 {
    return (d == DIR_UP ? DIR_DOWN : DIR_UP);
 }
+// ============================================================================
+// SLAVE (M15): display helpers (signal type text)
+// ============================================================================
+
+inline string __WB15_NSLabel(const int ns)
+{
+   if(ns == WB15_NS_MAJ) return "Maj";
+   if(ns == WB15_NS_MIN) return "Min";
+   return "NA";
+}
+
+inline string __WB15_StartKindLabel(const int kind)
+{
+   if(kind == WB15_KIND_START_HWX)         return "Hwx";
+   if(kind == WB15_KIND_START_HWBB)        return "Hwbb";
+   if(kind == WB15_KIND_START_FSMS)        return "FSMS";
+   if(kind == WB15_KIND_START_GOOZBAGHALI) return "Goozbaghali";
+   return "Unknown";
+}
+
+inline string __WB15_DirLabel(const Direction dir)
+{
+   return (dir == DIR_UP ? "U" : "D");
+}
+
+inline string __WB15_StartTypeText(const int kind, const int ns, const Direction dir)
+{
+   return (__WB15_NSLabel(ns) + " " + __WB15_StartKindLabel(kind) + " " + __WB15_DirLabel(dir));
+}
 
 // ============================================================================
 // MASTER: lifecycle + push events
@@ -247,7 +276,9 @@ inline void __WB15_DrawSignalMarker(const string sym,
                                    const int evt_seq,
                                    const datetime t,
                                    const bool is_on,
-                                   const Direction dir)
+                                   const Direction dir,
+                                   const int kind,
+                                   const int ns)
 {
    double hi=0.0, lo=0.0;
    if(!__WB15_GetBarHL(sym, t, hi, lo))
@@ -265,11 +296,32 @@ inline void __WB15_DrawSignalMarker(const string sym,
 
    double y = (dir == DIR_UP ? hi + pad : lo - pad);
 
-   string tag = DoubleToString(run_id, 0) + "_" + IntegerToString(evt_seq);
+   string tag   = DoubleToString(run_id, 0) + "_" + IntegerToString(evt_seq);
    string vname = "WB15_SIG_" + tag + (is_on?"_ON":"_OFF");
-   string tname = vname + "_TXT";
+
+   // VLine
    __WB15_DrawVLineUnique(vname, t, clrRed, 3);
-   __WB15_DrawTextUnique(tname, t, y, (is_on ? "4H Signal on" : "4H Signal off"), clrBlue, 10);
+
+   // Texts
+   if(is_on)
+   {
+      string hname = vname + "_TXT_H";
+      string tname = vname + "_TXT_T";
+
+      __WB15_DrawTextUnique(hname, t, y, "4H Signal on", clrBlue, 10);
+
+      // Put type line under the main label (same "under" direction for UP/DN: lower price)
+      double gap = pad * 0.85;
+      if(gap < 6.0 * _Point) gap = 6.0 * _Point;
+
+      double y2 = y - gap;
+      __WB15_DrawTextUnique(tname, t, y2, __WB15_StartTypeText(kind, ns, dir), clrBlue, 9);
+   }
+   else
+   {
+      string tname = vname + "_TXT";
+      __WB15_DrawTextUnique(tname, t, y, "4H Signal off", clrBlue, 10);
+   }
 }
 
 // ============================================================================
@@ -541,29 +593,45 @@ inline void WB15_Slave_OnTimer(const string sym)
 
          if(__WB15_IsStartKind(kind))
          {
-            if(!g_wb15_state.active)
+            // Resolve ON candle open time on M15
+            datetime on_bar_time = 0;
+            if(!__WB15_ResolveM15BarTime(sym, t, on_bar_time))
+               on_bar_time = t;
+
+            // RE-ENTRY while already active:
+            // finalize old count up to this new ON candle, then restart counting from here
+            if(g_wb15_state.active)
             {
-               g_wb15_state.active = true;
-               g_wb15_state.start_kind = kind;
-               g_wb15_state.start_ns   = ns;
-               g_wb15_state.start_dir  = dir;
-               g_wb15_state.start_time = t;
-               g_wb15_state.start_evt_seq = i;
-               g_wb15_state.run_id = run_id;
+               if(g_wb15_state.start_bar_time > 0 && on_bar_time > 0 && on_bar_time >= g_wb15_state.start_bar_time)
+               {
+                  // Count candles up to (but NOT including) the new ON candle
+                  __WB15_LiveCountAdvance(sym, on_bar_time);
 
-               // Resolve ON candle open time on M15 (same mapping logic as minor-range numbering)
-               datetime on_bar_time = 0;
-               if(__WB15_ResolveM15BarTime(sym, t, on_bar_time))
-                  g_wb15_state.start_bar_time = on_bar_time;
-               else
-                  g_wb15_state.start_bar_time = t; // fallback (should not happen if history is present)
-
-               // Live numbering starts from the NEXT candle after ON
-               g_wb15_state.last_count_bar_time = g_wb15_state.start_bar_time;
-               g_wb15_state.count = 0;
-
-               __WB15_DrawSignalMarker(sym, run_id, i, t, true, dir);
+                  // Cleanup any over-numbering beyond boundary
+                  int correct = __WB15_CountBarsExclusiveM15(sym, g_wb15_state.start_bar_time, on_bar_time);
+                  if(g_wb15_state.count > correct)
+                  {
+                     __WB15_DeleteCountLabels(run_id, g_wb15_state.start_evt_seq, correct + 1, g_wb15_state.count);
+                     g_wb15_state.count = correct;
+                  }
+               }
             }
+
+            // Start/restart state (always)
+            g_wb15_state.active        = true;
+            g_wb15_state.start_kind    = kind;
+            g_wb15_state.start_ns      = ns;
+            g_wb15_state.start_dir     = dir;
+            g_wb15_state.start_time    = t;
+            g_wb15_state.start_evt_seq = i;
+            g_wb15_state.run_id        = run_id;
+
+            g_wb15_state.start_bar_time      = on_bar_time;
+            g_wb15_state.last_count_bar_time = on_bar_time;
+            g_wb15_state.count               = 0;
+
+            // Draw ON marker + type line
+            __WB15_DrawSignalMarker(sym, run_id, i, t, true, dir, kind, ns);
          }
          else if(__WB15_IsStopKind(kind))
          {
@@ -573,10 +641,10 @@ inline void WB15_Slave_OnTimer(const string sym)
                datetime off_bar_time = 0;
                if(__WB15_ResolveM15BarTime(sym, t, off_bar_time))
                {
-                  // Live numbering: count candles up to (but NOT including) the OFF candle
+                  // Count candles up to (but NOT including) the OFF candle
                   __WB15_LiveCountAdvance(sym, off_bar_time);
 
-                  // Safety cleanup: if OFF event arrived late, remove any numbers beyond OFF
+                  // Cleanup any over-numbering beyond OFF
                   int correct = __WB15_CountBarsExclusiveM15(sym, g_wb15_state.start_bar_time, off_bar_time);
                   if(g_wb15_state.count > correct)
                   {
@@ -585,7 +653,7 @@ inline void WB15_Slave_OnTimer(const string sym)
                   }
                }
 
-               __WB15_DrawSignalMarker(sym, run_id, i, t, false, g_wb15_state.start_dir);
+               __WB15_DrawSignalMarker(sym, run_id, i, t, false, g_wb15_state.start_dir, 0, 0);
 
                g_wb15_state.active = false;
             }
@@ -599,6 +667,5 @@ inline void WB15_Slave_OnTimer(const string sym)
    if(g_wb15_state.active)
       __WB15_LiveCountAdvance(sym, 0);
 }
-
 
 #endif // WAVEBOT_WB15_SIGNAL_BRIDGE_MQH
