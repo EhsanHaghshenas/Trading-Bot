@@ -196,40 +196,98 @@ inline void WB15_MasterPushEvent(const string sym,
 }
 
 // Convenience wrappers (called from signal detection points)
+
+// --------------------------------------------------------------------------
+// Time-mapping rule (H4 -> M15):
+//  - Default: START/STOP are published ONLY after the H4 candle closes,
+//             and their timestamp is the H4 CLOSE time (open time of next H4 bar).
+//  - Exception: START via HWX and GOOZBAGHALI can be published before H4 close.
+// --------------------------------------------------------------------------
+
+inline datetime __WB15_H4_CloseTime(const datetime h4_open_time)
+{
+   if(h4_open_time <= 0) return 0;
+
+   int sec = PeriodSeconds(PERIOD_H4);
+   if(sec <= 0) sec = 14400; // safety fallback: 4H = 14400 seconds
+
+   return (h4_open_time + (datetime)sec);
+}
+
+inline datetime __WB15_CloseBasedEventTimeOrZero(const datetime h4_open_time)
+{
+   const datetime close_time = __WB15_H4_CloseTime(h4_open_time);
+   if(close_time <= 0) return 0;
+
+   // Wait for candle close (prevents early display on M15)
+   if(TimeCurrent() < close_time) return 0;
+
+   return close_time;
+}
+
+// START (EXCEPTION): HWX is allowed before H4 close
 inline void WB15_PublishStartHWX(const string sym, const Direction dir, const datetime t)
 {
    WB15_MasterPushEvent(sym, WB15_KIND_START_HWX, __WB15_NS_FromMarkers(), dir, t);
 }
+
+// START (ON CLOSE): HWBB must wait for H4 close
 inline void WB15_PublishStartHWBB(const string sym, const Direction dir, const datetime t)
 {
-   WB15_MasterPushEvent(sym, WB15_KIND_START_HWBB, __WB15_NS_FromMarkers(), dir, t);
+   const datetime te = __WB15_CloseBasedEventTimeOrZero(t);
+   if(te <= 0) return;
+
+   WB15_MasterPushEvent(sym, WB15_KIND_START_HWBB, __WB15_NS_FromMarkers(), dir, te);
 }
+
+// START (ON CLOSE, MAJ-only): FSMS must wait for H4 close
 inline void WB15_PublishStartFSMS_MAJONLY(const string sym, const Direction dir, const datetime t)
 {
    // FSMS as a start trigger is MAJ-only by definition
    if(Markers_GetNamespace() != "MAJ") return;
-   WB15_MasterPushEvent(sym, WB15_KIND_START_FSMS, WB15_NS_MAJ, dir, t);
+
+   const datetime te = __WB15_CloseBasedEventTimeOrZero(t);
+   if(te <= 0) return;
+
+   WB15_MasterPushEvent(sym, WB15_KIND_START_FSMS, WB15_NS_MAJ, dir, te);
 }
+
+// START (EXCEPTION): GOOZBAGHALI is allowed before H4 close
 inline void WB15_PublishStartGooz(const string sym, const Direction dir, const datetime t)
 {
    WB15_MasterPushEvent(sym, WB15_KIND_START_GOOZBAGHALI, __WB15_NS_FromMarkers(), dir, t);
 }
+
+// STOP (ON CLOSE): MTC must wait for H4 close
 inline void WB15_PublishStopMTC(const string sym, const Direction dir, const datetime t)
 {
-   WB15_MasterPushEvent(sym, WB15_KIND_STOP_MTC, __WB15_NS_FromMarkers(), dir, t);
+   const datetime te = __WB15_CloseBasedEventTimeOrZero(t);
+   if(te <= 0) return;
+
+   WB15_MasterPushEvent(sym, WB15_KIND_STOP_MTC, __WB15_NS_FromMarkers(), dir, te);
 }
+
+// STOP (ON CLOSE, MAJ-only): MinorStarter must wait for H4 close
 inline void WB15_PublishStopMinorStarter(const string sym, const Direction dir, const datetime t)
 {
-   WB15_MasterPushEvent(sym, WB15_KIND_STOP_MINORSTARTER, WB15_NS_MAJ, dir, t);
+   const datetime te = __WB15_CloseBasedEventTimeOrZero(t);
+   if(te <= 0) return;
+
+   WB15_MasterPushEvent(sym, WB15_KIND_STOP_MINORSTARTER, WB15_NS_MAJ, dir, te);
 }
 
-
+// STOP (ON CLOSE, MAJ-only): MinorOff zone must wait for H4 close
 inline void WB15_PublishStopMinorOffZone_MAJONLY(const string sym, const Direction dir, const datetime t)
 {
    // Stop trigger: MAJ MinorOff breaks C1-W2 Minorzone boundary (used to stop MIN-start M15 sessions)
    if(Markers_GetNamespace() != "MAJ") return;
-   WB15_MasterPushEvent(sym, WB15_KIND_STOP_MINOROFF_ZONE, WB15_NS_MAJ, dir, t);
+
+   const datetime te = __WB15_CloseBasedEventTimeOrZero(t);
+   if(te <= 0) return;
+
+   WB15_MasterPushEvent(sym, WB15_KIND_STOP_MINOROFF_ZONE, WB15_NS_MAJ, dir, te);
 }
+
 // ============================================================================
 // SLAVE (M15): drawing helpers
 // ============================================================================
@@ -291,8 +349,10 @@ inline void __WB15_DrawSignalMarker(const string sym,
 
    double span = hi - lo;
    if(span <= 0.0) span = 10.0 * _Point;
-   double pad = span * 0.25;
-   if(pad < 3.0 * _Point) pad = 3.0 * _Point;
+
+   // BIGGER vertical distance from candles (for clarity on M15)
+   double pad = span * 0.60;
+   if(pad < 8.0 * _Point) pad = 8.0 * _Point;
 
    double y = (dir == DIR_UP ? hi + pad : lo - pad);
 
@@ -310,9 +370,9 @@ inline void __WB15_DrawSignalMarker(const string sym,
 
       __WB15_DrawTextUnique(hname, t, y, "4H Signal on", clrBlue, 10);
 
-      // Put type line under the main label (same "under" direction for UP/DN: lower price)
-      double gap = pad * 0.85;
-      if(gap < 6.0 * _Point) gap = 6.0 * _Point;
+      // Put type line under the main label (lower price), but keep it far from candles
+      double gap = pad * 0.30;
+      if(gap < 10.0 * _Point) gap = 10.0 * _Point;
 
       double y2 = y - gap;
       __WB15_DrawTextUnique(tname, t, y2, __WB15_StartTypeText(kind, ns, dir), clrBlue, 9);
