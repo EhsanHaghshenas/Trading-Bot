@@ -24,7 +24,7 @@ input datetime          InpScanFromDate        = D'2022.06.00 00:00';
 
 // --- ???? ????????? ????? ????? (???? ?????) ---
 input bool              InpRequireCloseBreakAboveW2H1 = true;
-input bool              InpDrawExtLQ  = true;
+input bool              InpDrawExtLQ  = false;
 input color             InpExtLQColor = clrMagenta;
 input bool              InpEnableHunterMarkers = true;
 
@@ -71,6 +71,13 @@ inline ENUM_TIMEFRAMES __WB_EffectiveTF()
    if(g_role == WBROLE_MASTER_H4)  return PERIOD_H4;
    if(g_role == WBROLE_SLAVE_M15) return PERIOD_M15;
    return InpTF; // legacy standalone mode
+}
+
+inline void __WB_ApplyHiddenVisualPolicies()
+{
+   ExtLQ_DeleteAllVisuals_AllScans();
+   ExtLQ_Down_DeleteAllVisuals_AllScans();
+   Race_DeleteRefVisuals_AllScans();
 }
 // ============================================================================
 // Minor session runner (Phase-1: Minor inside Major)
@@ -217,6 +224,7 @@ int OnInit()
    // Ensure WorldManager captures clean baselines before any scan starts
    Markers_SetNamespace("MAJ");
    WBWM_Init();
+   __WB_ApplyHiddenVisualPolicies();
 
    // M15 Slave: start in idle mode and wait for Master signals
    if(g_role == WBROLE_SLAVE_M15)
@@ -225,7 +233,7 @@ int OnInit()
    EventSetTimer(g_role == WBROLE_SLAVE_M15 ? 1 : 2);
    return(INIT_SUCCEEDED);
 }
-void OnDeinit(const int reason){ EventKillTimer(); }
+void OnDeinit(const int reason){ __WB_ApplyHiddenVisualPolicies(); EventKillTimer(); }
 void OnTick(){}
 
 // --- One-shot ShadowBreaker scan (migrated from old OnStart) ---
@@ -258,6 +266,7 @@ void OnTimer()
 
    // Major namespace (default world)
    Markers_SetNamespace("MAJ");
+   __WB_ApplyHiddenVisualPolicies();
 
    // --- optional one-shot ShadowBreaker run (replacement for old OnStart)
    if(InpRunShadowBreakerOnce && !g_sb_ran)
@@ -300,8 +309,6 @@ void OnTimer()
       if(InpDebugPrints)
          Print("[BOOT] No completed pair found in window. Fallback to input direction.");
    }
-   // NEW: در MAJ فقط ExtLQ های روند فعلی معتبر باشند (پاکسازی ExtLQ خلاف روند)
-   SR_AllowOnly(mode_for_run);
 
    // 2) ????? Major scan ??? ?? Mode ????? (?? Fallback)
    if(mode_for_run==DIR_UP)
@@ -311,3 +318,6 @@ void OnTimer()
 
    g_once=true;  // ?????? ???? ???? ??? ?? ??? ???? ????? (??? ???? ????? ???? ???)
 }
+
+
+

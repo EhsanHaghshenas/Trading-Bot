@@ -86,10 +86,34 @@ inline datetime ExtLQ_PrevTime()   { return ExtLQ_PrevHas()? g_hist[g_prev_idx].
 inline bool     ExtLQ_PrevIsBroken(){ return (g_prev_idx>=0 && g_hist[g_prev_idx].broken); }
 
 // -------------------- ترسیم/حذف خطوط ------------------------------
+inline bool ExtLQ_ShouldDrawVisuals()
+{
+   return false;
+}
+
+inline void ExtLQ_DeleteAllVisuals_AllScans()
+{
+   for(int i = ObjectsTotal(0) - 1; i >= 0; --i)
+   {
+      string on = ObjectName(0, i);
+      if(on == "") continue;
+
+      if(StringFind(on, EXTLQ_LINE_CURR) >= 0 ||
+         StringFind(on, EXTLQ_LINE_PREV) >= 0)
+      {
+         ObjectDelete(0, on);
+      }
+   }
+}
+
 inline void ExtLQ_DrawLine(const string base, const double price, const color col, const int style)
 {
    const string name = __ScanPrefix() + base;
    if(ObjectFind(0, name) != -1) ObjectDelete(0, name);
+
+   if(!ExtLQ_ShouldDrawVisuals())
+      return;
+
    ObjectCreate(0, name, OBJ_HLINE, 0, 0, price);
    ObjectSetDouble(0, name, OBJPROP_PRICE, price);
    ObjectSetInteger(0, name, OBJPROP_COLOR, col);
@@ -102,20 +126,26 @@ inline void ExtLQ_DeleteLine(const string base)
    const string name = __ScanPrefix() + base;
    if(ObjectFind(0, name) != -1) ObjectDelete(0, name);
 }
-// پاکسازی کامل state این ماژول (برای جلوگیری از باقی‌ماندن ExtLQ قدیمیِ خلافِ روند)
-inline void ExtLQ_ClearAll(const bool delete_lines=true)
+
+inline void ExtLQ_DeleteVisuals_CurrentScan()
 {
+   ExtLQ_DeleteLine(EXTLQ_LINE_CURR);
+   ExtLQ_DeleteLine(EXTLQ_LINE_PREV);
+}
+
+inline void ExtLQ_ClearAll(const bool delete_visuals = true)
+{
+   if(delete_visuals)
+   {
+      ExtLQ_DeleteVisuals_CurrentScan();
+      ExtLQ_DeleteAllVisuals_AllScans();
+   }
+
    g_ext_has   = false;
    g_ext_price = 0.0;
    g_ext_time  = 0;
    ArrayFree(g_hist);
    g_prev_idx  = -1;
-
-   if(delete_lines)
-   {
-      ExtLQ_DeleteLine(EXTLQ_LINE_CURR);
-      ExtLQ_DeleteLine(EXTLQ_LINE_PREV);
-   }
 }
 
 // -------------------- کمکی‌های داخلی ------------------------------
@@ -236,3 +266,6 @@ inline bool ExtLQ_PromotePrevToCurrent()
 }
 
 #endif // WAVEBOT_EXTLQ_MQH
+
+
+

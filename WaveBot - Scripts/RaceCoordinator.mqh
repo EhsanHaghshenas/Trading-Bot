@@ -65,10 +65,39 @@ inline bool Race_RefDown_IsActive() { return (g_active_ref_down_time > g_active_
 inline double Race_ActiveRef_Up()   { return g_active_ref_up; }
 inline double Race_ActiveRef_Down() { return g_active_ref_down; }
 
+inline bool Race_ShouldDrawRefVisuals()
+{
+   return false;
+}
+
+inline void Race_DeleteRefVisuals_AllScans()
+{
+   for(int i = ObjectsTotal(0) - 1; i >= 0; --i)
+   {
+      string on = ObjectName(0, i);
+      if(on == "") continue;
+
+      bool is_ref =
+         (StringFind(on, "MTC_UP_REF_")   >= 0) ||
+         (StringFind(on, "MTC_DN_REF_")   >= 0) ||
+         (StringFind(on, "REF_UP_HIST_")  >= 0) ||
+         (StringFind(on, "REF_DN_HIST_")  >= 0) ||
+         (StringFind(on, "REF_UP_HIST_T_")>= 0) ||
+         (StringFind(on, "REF_DN_HIST_T_")>= 0);
+
+      if(is_ref)
+         ObjectDelete(0, on);
+   }
+}
+
 // ??? ???? ????????? ???? ???? MTC_UP (???? ?? ??? DOWN ??????)
 inline void Race_DrawRefHistory_Up(const double price, const datetime t)
 {
    if(price <= 0.0) return;
+
+   if(!Race_ShouldDrawRefVisuals())
+      return;
+
    ++g_ref_hist_up_counter;
 
    const string base = "REF_UP_HIST_" + IntegerToString(g_ref_hist_up_counter);
@@ -90,6 +119,10 @@ inline void Race_DrawRefHistory_Up(const double price, const datetime t)
 inline void Race_DrawRefHistory_Down(const double price, const datetime t)
 {
    if(price <= 0.0) return;
+
+   if(!Race_ShouldDrawRefVisuals())
+      return;
+
    ++g_ref_hist_down_counter;
 
    const string base = "REF_DN_HIST_" + IntegerToString(g_ref_hist_down_counter);
@@ -346,8 +379,6 @@ inline void Race_MarkWin_B(const Direction mode, const datetime t)
 //--------------------------- ???? ?????? ?? HWBB ------------------------------
 inline void Race_Start_UP(const MqlRates &rates[], const int n, const int hwbb_idx)
 {
-   if(__Race_IsMajorWorld() && !SR_ShouldProcess_UP()) return;
-
    if(g_race_locked) return; // ?????
    g_race_locked     = true;
    g_race_mode       = DIR_UP;
@@ -375,11 +406,8 @@ inline void Race_Start_UP(const MqlRates &rates[], const int n, const int hwbb_i
    C1W2_PB_DN_Enable();
 }
 
-
 inline void Race_Start_DOWN(const MqlRates &rates[], const int n, const int hwbb_idx)
 {
-   if(__Race_IsMajorWorld() && !SR_ShouldProcess_DOWN()) return;
-
    if(g_race_locked) return;
    g_race_locked     = true;
    g_race_mode       = DIR_DOWN;
@@ -406,6 +434,7 @@ inline void Race_Start_DOWN(const MqlRates &rates[], const int n, const int hwbb
    // Enable strict C1-W2 gate for Path-B (scanning UP)
    C1W2_PB_UP_Enable();
 }
+
 
 //--------------------------- ????? ???? A (SW ??????) -------------------------
 inline void Race_OnSWConfirmed_UP(const MqlRates &rates[], const int n, const int w3_c1, const int bodyBreakIdx)
@@ -920,30 +949,19 @@ inline void Race_DrawW2W3_MTC_Down(const MqlRates &rates[], const int n, const R
    // --- Reference for this MTC_DOWN
    if(g_race_ref_mtc_down > 0.0)
    {
-      const string base_rname = "MTC_DN_REF_" + tag;
-      const string rname      = __ScanPrefix() + base_rname;
+      Race_DeleteRefVisuals_AllScans();
 
-      if(ObjectFind(0, rname) == -1)
-         ObjectCreate(0, rname, OBJ_HLINE, 0, 0, g_race_ref_mtc_down);
-
-      ObjectSetInteger(0, rname, OBJPROP_COLOR, clrWhite);
-      ObjectSetInteger(0, rname, OBJPROP_WIDTH, 1);
-      ObjectSetInteger(0, rname, OBJPROP_STYLE, STYLE_SOLID);
-
-      // keep only the latest MTC ref INSIDE current namespace
-      const string p = __ScanPrefix();
-      const int plen = StringLen(p);
-
-      for(int oi=ObjectsTotal(0)-1; oi>=0; --oi)
+      if(Race_ShouldDrawRefVisuals())
       {
-         string on = ObjectName(0, oi);
-         if(on == "" || on == rname) continue;
-         if(StringLen(on) < plen) continue;
-         if(StringSubstr(on, 0, plen) != p) continue;
+         const string base_rname = "MTC_DN_REF_" + tag;
+         const string rname      = __ScanPrefix() + base_rname;
 
-         string tail = StringSubstr(on, plen);
-         bool isRef = (StringFind(tail, "MTC_UP_REF_") == 0) || (StringFind(tail, "MTC_DN_REF_") == 0);
-         if(isRef) ObjectDelete(0, on);
+         if(ObjectFind(0, rname) == -1)
+            ObjectCreate(0, rname, OBJ_HLINE, 0, 0, g_race_ref_mtc_down);
+
+         ObjectSetInteger(0, rname, OBJPROP_COLOR, clrWhite);
+         ObjectSetInteger(0, rname, OBJPROP_WIDTH, 1);
+         ObjectSetInteger(0, rname, OBJPROP_STYLE, STYLE_SOLID);
       }
 
       datetime tbb = (S.bodyBreakIdx>=0 && S.bodyBreakIdx<n ? rates[S.bodyBreakIdx].time : TimeCurrent());
@@ -989,29 +1007,19 @@ inline void Race_DrawW2W3_MTC_Up(const MqlRates &rates[], const int n, const Rac
    // --- Reference for this MTC_UP
    if(g_race_ref_mtc_up > 0.0)
    {
-      const string base_rname = "MTC_UP_REF_" + tag;
-      const string rname      = __ScanPrefix() + base_rname;
+      Race_DeleteRefVisuals_AllScans();
 
-      if(ObjectFind(0, rname) == -1)
-         ObjectCreate(0, rname, OBJ_HLINE, 0, 0, g_race_ref_mtc_up);
-
-      ObjectSetInteger(0, rname, OBJPROP_COLOR, clrWhite);
-      ObjectSetInteger(0, rname, OBJPROP_WIDTH, 1);
-      ObjectSetInteger(0, rname, OBJPROP_STYLE, STYLE_SOLID);
-
-      const string p = __ScanPrefix();
-      const int plen = StringLen(p);
-
-      for(int oi=ObjectsTotal(0)-1; oi>=0; --oi)
+      if(Race_ShouldDrawRefVisuals())
       {
-         string on = ObjectName(0, oi);
-         if(on == "" || on == rname) continue;
-         if(StringLen(on) < plen) continue;
-         if(StringSubstr(on, 0, plen) != p) continue;
+         const string base_rname = "MTC_UP_REF_" + tag;
+         const string rname      = __ScanPrefix() + base_rname;
 
-         string tail = StringSubstr(on, plen);
-         bool isRef = (StringFind(tail, "MTC_UP_REF_") == 0) || (StringFind(tail, "MTC_DN_REF_") == 0);
-         if(isRef) ObjectDelete(0, on);
+         if(ObjectFind(0, rname) == -1)
+            ObjectCreate(0, rname, OBJ_HLINE, 0, 0, g_race_ref_mtc_up);
+
+         ObjectSetInteger(0, rname, OBJPROP_COLOR, clrWhite);
+         ObjectSetInteger(0, rname, OBJPROP_WIDTH, 1);
+         ObjectSetInteger(0, rname, OBJPROP_STYLE, STYLE_SOLID);
       }
 
       datetime tbb = (S.bodyBreakIdx>=0 && S.bodyBreakIdx<n ? rates[S.bodyBreakIdx].time : TimeCurrent());
@@ -1041,29 +1049,19 @@ inline void Race_DrawMTCOnly_Down(const MqlRates &rates[], const int n, const in
 
    if(g_race_ref_mtc_down > 0.0)
    {
-      const string base_rname = "MTC_DN_REF_" + tag;
-      const string rname      = __ScanPrefix() + base_rname;
+      Race_DeleteRefVisuals_AllScans();
 
-      if(ObjectFind(0, rname) == -1)
-         ObjectCreate(0, rname, OBJ_HLINE, 0, 0, g_race_ref_mtc_down);
-
-      ObjectSetInteger(0, rname, OBJPROP_COLOR, clrWhite);
-      ObjectSetInteger(0, rname, OBJPROP_WIDTH, 1);
-      ObjectSetInteger(0, rname, OBJPROP_STYLE, STYLE_SOLID);
-
-      const string p = __ScanPrefix();
-      const int plen = StringLen(p);
-
-      for(int oi=ObjectsTotal(0)-1; oi>=0; --oi)
+      if(Race_ShouldDrawRefVisuals())
       {
-         string on = ObjectName(0, oi);
-         if(on == "" || on == rname) continue;
-         if(StringLen(on) < plen) continue;
-         if(StringSubstr(on, 0, plen) != p) continue;
+         const string base_rname = "MTC_DN_REF_" + tag;
+         const string rname      = __ScanPrefix() + base_rname;
 
-         string tail = StringSubstr(on, plen);
-         bool isRef = (StringFind(tail, "MTC_UP_REF_") == 0) || (StringFind(tail, "MTC_DN_REF_") == 0);
-         if(isRef) ObjectDelete(0, on);
+         if(ObjectFind(0, rname) == -1)
+            ObjectCreate(0, rname, OBJ_HLINE, 0, 0, g_race_ref_mtc_down);
+
+         ObjectSetInteger(0, rname, OBJPROP_COLOR, clrWhite);
+         ObjectSetInteger(0, rname, OBJPROP_WIDTH, 1);
+         ObjectSetInteger(0, rname, OBJPROP_STYLE, STYLE_SOLID);
       }
 
       Race_ActivateRef_Down(g_race_ref_mtc_down, (bodyIdx>=0 && bodyIdx<n ? rates[bodyIdx].time : TimeCurrent()));
@@ -1092,29 +1090,19 @@ inline void Race_DrawMTCOnly_Up(const MqlRates &rates[], const int n, const int 
 
    if(g_race_ref_mtc_up > 0.0)
    {
-      const string base_rname = "MTC_UP_REF_" + tag;
-      const string rname      = __ScanPrefix() + base_rname;
+      Race_DeleteRefVisuals_AllScans();
 
-      if(ObjectFind(0, rname) == -1)
-         ObjectCreate(0, rname, OBJ_HLINE, 0, 0, g_race_ref_mtc_up);
-
-      ObjectSetInteger(0, rname, OBJPROP_COLOR, clrWhite);
-      ObjectSetInteger(0, rname, OBJPROP_WIDTH, 1);
-      ObjectSetInteger(0, rname, OBJPROP_STYLE, STYLE_SOLID);
-
-      const string p = __ScanPrefix();
-      const int plen = StringLen(p);
-
-      for(int oi=ObjectsTotal(0)-1; oi>=0; --oi)
+      if(Race_ShouldDrawRefVisuals())
       {
-         string on = ObjectName(0, oi);
-         if(on == "" || on == rname) continue;
-         if(StringLen(on) < plen) continue;
-         if(StringSubstr(on, 0, plen) != p) continue;
+         const string base_rname = "MTC_UP_REF_" + tag;
+         const string rname      = __ScanPrefix() + base_rname;
 
-         string tail = StringSubstr(on, plen);
-         bool isRef = (StringFind(tail, "MTC_UP_REF_") == 0) || (StringFind(tail, "MTC_DN_REF_") == 0);
-         if(isRef) ObjectDelete(0, on);
+         if(ObjectFind(0, rname) == -1)
+            ObjectCreate(0, rname, OBJ_HLINE, 0, 0, g_race_ref_mtc_up);
+
+         ObjectSetInteger(0, rname, OBJPROP_COLOR, clrWhite);
+         ObjectSetInteger(0, rname, OBJPROP_WIDTH, 1);
+         ObjectSetInteger(0, rname, OBJPROP_STYLE, STYLE_SOLID);
       }
 
       Race_ActivateRef_Up(g_race_ref_mtc_up, (bodyIdx>=0 && bodyIdx<n ? rates[bodyIdx].time : TimeCurrent()));
@@ -1195,3 +1183,6 @@ inline void Race_SpecialRefBreak_MTC_Up(const MqlRates &rates[], const int n, co
 }
 
 #endif // WAVEBOT_RACECOORDINATOR_MQH
+
+
+

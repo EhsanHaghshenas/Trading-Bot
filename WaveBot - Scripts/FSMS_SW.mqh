@@ -251,6 +251,29 @@ inline int FSMS_SW_Session_FindOpen(const string tag, const Direction dir)
    return -1;
 }
 
+inline int FSMS_SW_Session_FindAny(const string tag, const Direction dir)
+{
+   for(int i=0; i<g_fsms_sw_sessions_count; ++i)
+   {
+      if(!g_fsms_sw_sessions[i].used) continue;
+      if(g_fsms_sw_sessions[i].dir != dir) continue;
+      if(g_fsms_sw_sessions[i].tag != tag) continue;
+      return i;
+   }
+   return -1;
+}
+
+inline bool FSMS_SW_Session_FindByTagDir(const string tag,
+                                         const Direction dir,
+                                         FSMS_SW_MinorSession &out)
+{
+   int si = FSMS_SW_Session_FindAny(tag, dir);
+   if(si < 0) return false;
+
+   out = g_fsms_sw_sessions[si];
+   return true;
+}
+
 // اگر به هر دلیل یک Starter جدید آمد در حالی که session قبلی هنوز open بود،
 // قبلی را فورس-کلوز می‌کنیم تا invariant رعایت شود: حداکثر یک session باز.
 inline void FSMS_SW_Session_ForceCloseOpen(const int end_idx, const datetime end_time)
@@ -1842,5 +1865,7 @@ inline void FSMS_SW_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
    FSMS_SW_CheckMinorOff(rates, n, upto_j);
 }
 
-
 #endif // WAVEBOT_FSMS_SW_MQH
+
+
+

@@ -88,29 +88,60 @@ inline void ExtLQ_Down_DeleteLine(const string base)
    if(ObjectFind(0, name) != -1) ObjectDelete(0, name);
 }
 
+inline bool ExtLQ_Down_ShouldDrawVisuals()
+{
+   return false;
+}
+
+inline void ExtLQ_Down_DeleteAllVisuals_AllScans()
+{
+   for(int i = ObjectsTotal(0) - 1; i >= 0; --i)
+   {
+      string on = ObjectName(0, i);
+      if(on == "") continue;
+
+      if(StringFind(on, EXTLQ_D_LINE_CURR) >= 0 ||
+         StringFind(on, EXTLQ_D_LINE_PREV) >= 0)
+      {
+         ObjectDelete(0, on);
+      }
+   }
+}
+
 inline void ExtLQ_Down_DrawLine(const string base, const double price, const color col, const ENUM_LINE_STYLE st)
 {
    const string name = __ScanPrefix() + base;
-   if(ObjectFind(0, name) == -1) ObjectCreate(0, name, OBJ_HLINE, 0, 0, price);
+   if(ObjectFind(0, name) != -1) ObjectDelete(0, name);
+
+   if(!ExtLQ_Down_ShouldDrawVisuals())
+      return;
+
+   ObjectCreate(0, name, OBJ_HLINE, 0, 0, price);
    ObjectSetDouble(0, name, OBJPROP_PRICE, price);
    ObjectSetInteger(0, name, OBJPROP_COLOR, col);
    ObjectSetInteger(0, name, OBJPROP_STYLE, st);
    ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
 }
-// پاکسازی کامل state این ماژول (برای جلوگیری از باقی‌ماندن ExtLQ_Down قدیمیِ خلافِ روند)
-inline void ExtLQ_Down_ClearAll(const bool delete_lines=true)
+
+inline void ExtLQ_Down_DeleteVisuals_CurrentScan()
 {
+   ExtLQ_Down_DeleteLine(EXTLQ_D_LINE_CURR);
+   ExtLQ_Down_DeleteLine(EXTLQ_D_LINE_PREV);
+}
+
+inline void ExtLQ_Down_ClearAll(const bool delete_visuals = true)
+{
+   if(delete_visuals)
+   {
+      ExtLQ_Down_DeleteVisuals_CurrentScan();
+      ExtLQ_Down_DeleteAllVisuals_AllScans();
+   }
+
    g_extD_has   = false;
    g_extD_price = 0.0;
    g_extD_time  = 0;
    ArrayFree(g_histD);
    g_prev_idxD  = -1;
-
-   if(delete_lines)
-   {
-      ExtLQ_Down_DeleteLine(EXTLQ_D_LINE_CURR);
-      ExtLQ_Down_DeleteLine(EXTLQ_D_LINE_PREV);
-   }
 }
 
 inline bool ExtLQ_Down_Has(){ return g_extD_has; }
@@ -141,7 +172,7 @@ inline void ExtLQ_Down_Set(const double price, const datetime t)
    g_histD[sz].broken = false;
 
    // خط فعلی
-   if(InpDrawExtLQ) ExtLQ_Down_DrawLine(EXTLQ_D_LINE_CURR, price, InpExtLQColor, STYLE_SOLID);
+   if(ExtLQ_Down_ShouldDrawVisuals()) ExtLQ_Down_DrawLine(EXTLQ_D_LINE_CURR, price, InpExtLQColor, STYLE_SOLID);
 
    // رزروی جدید را پیدا و رسم کن
    int idx = ExtLQ_Down_FindLatestUntouchedIndex();
@@ -149,7 +180,7 @@ inline void ExtLQ_Down_Set(const double price, const datetime t)
    {
       if(g_prev_idxD>=0) ExtLQ_Down_DeleteLine(EXTLQ_D_LINE_PREV);
       g_prev_idxD = idx;
-      if(g_prev_idxD>=0 && InpDrawExtLQ)
+      if(g_prev_idxD>=0 && ExtLQ_Down_ShouldDrawVisuals())
          ExtLQ_Down_DrawLine(EXTLQ_D_LINE_PREV, g_histD[g_prev_idxD].price, clrViolet, STYLE_DOT);
    }
 }
@@ -173,7 +204,7 @@ inline void ExtLQ_Down_OnBar(const MqlRates &r)
       {
          if(g_prev_idxD>=0) ExtLQ_Down_DeleteLine(EXTLQ_D_LINE_PREV);
          g_prev_idxD = idx;
-         if(g_prev_idxD>=0 && InpDrawExtLQ)
+         if(g_prev_idxD>=0 && ExtLQ_Down_ShouldDrawVisuals())
             ExtLQ_Down_DrawLine(EXTLQ_D_LINE_PREV, g_histD[g_prev_idxD].price, clrViolet, STYLE_DOT);
       }
    }
@@ -198,7 +229,7 @@ inline bool ExtLQ_Down_PromotePrevToCurrent()
    g_extD_price = g_histD[idx].price;
    g_extD_time  = g_histD[idx].t;
 
-   if(InpDrawExtLQ)
+   if(ExtLQ_Down_ShouldDrawVisuals())
       ExtLQ_Down_DrawLine(EXTLQ_D_LINE_CURR, g_extD_price, InpExtLQColor, STYLE_SOLID);
 
    // prev قدیمی‌ترِ دست‌نخورده
@@ -210,10 +241,13 @@ inline bool ExtLQ_Down_PromotePrevToCurrent()
    {
       if(g_prev_idxD>=0) ExtLQ_Down_DeleteLine(EXTLQ_D_LINE_PREV);
       g_prev_idxD = new_prev;
-      if(g_prev_idxD>=0 && InpDrawExtLQ)
+      if(g_prev_idxD>=0 && ExtLQ_Down_ShouldDrawVisuals())
          ExtLQ_Down_DrawLine(EXTLQ_D_LINE_PREV, g_histD[g_prev_idxD].price, clrViolet, STYLE_DOT);
    }
    return true;
 }
 
 #endif // WAVEBOT_EXTLQ_DOWN_MQH
+
+
+

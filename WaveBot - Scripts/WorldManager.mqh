@@ -319,6 +319,136 @@ inline void __WBWM_ApplyMinorInitialExtLQ_NoDraw(const FSMS_SW_MinorSession &s)
    }
 }
 
+inline bool __WBWM_IsSameMinorSession(const FSMS_SW_MinorSession &a,
+                                       const FSMS_SW_MinorSession &b)
+{
+   if(!a.used || !b.used) return false;
+   if(a.dir != b.dir) return false;
+   if(a.tag != b.tag) return false;
+   if(a.starter_time != b.starter_time) return false;
+   return true;
+}
+
+inline void WBWM_MinorSession_Activate(const FSMS_SW_MinorSession &s)
+{
+   g_wbwm_minor_active     = true;
+   g_wbwm_minor_sess       = s;
+   g_wbwm_minor_scan_id    = (1000000 + (++g_wbwm_minor_scan_seq));
+   g_wbwm_minor_tag_suffix = "_minor_" + s.tag;
+
+   WBWM_MinorStop_Arm(s.starter_time, s.off_level_1, s.off_level_2);
+}
+
+inline void WBWM_MinorSession_Deactivate()
+{
+   g_wbwm_minor_active     = false;
+   g_wbwm_minor_scan_id    = 0;
+   g_wbwm_minor_tag_suffix = "";
+   WBWM_MinorStop_Disarm();
+}
+
+inline void WBWM_DeleteMinorLiveOnlyObjects_CurrentScan()
+{
+   const string p    = __ScanPrefix();
+   const int    plen = StringLen(p);
+
+   const bool race_live = Race_IsLocked();
+   const bool sb_live   = (SB_UP_BinaryPhaseActive() || SB_DN_BinaryPhaseActive());
+
+   for(int i = ObjectsTotal(0) - 1; i >= 0; --i)
+   {
+      string on = ObjectName(0, i);
+      if(on == "" || StringLen(on) < plen) continue;
+      if(StringSubstr(on, 0, plen) != p)   continue;
+
+      string tail = StringSubstr(on, plen);
+      bool kill = false;
+
+      if(StringFind(tail, "SR_") == 0 ||
+         StringFind(tail, "STRONG_RANGE_") == 0 ||
+         StringFind(tail, "StrongRange_") == 0 ||
+         StringFind(tail, "SRANGE_") == 0 ||
+         StringFind(tail, "first_SR_mitigator_") == 0 ||
+         StringFind(tail, "deepest_SR_mitigation_") == 0 ||
+         StringFind(tail, "unmitigated_SR_") == 0)
+      {
+         kill = true;
+      }
+      else if(race_live && StringFind(tail, "RACE_START_HWBB_") == 0)
+      {
+         kill = true;
+      }
+      else if(sb_live &&
+              (StringFind(tail, "SHADOW_BREAK_") == 0 ||
+               StringFind(tail, "temp-c1-sw_") == 0 ||
+               StringFind(tail, "invalidator_") == 0))
+      {
+         kill = true;
+      }
+
+      if(kill)
+         ObjectDelete(0, on);
+   }
+}
+
+inline void WBWM_FinalizeMinorArchive(const FSMS_SW_MinorSession &closed_s,
+                                      const int minor_scan_id,
+                                      const string tag_suffix,
+                                      const int maj_scan_id,
+                                      const datetime major_to_time)
+{
+   if(!closed_s.used) return;
+   if(minor_scan_id <= 0) return;
+   if(closed_s.starter_time <= 0) return;
+
+   datetime final_to_time = closed_s.off_time;
+   if(final_to_time <= 0)
+      final_to_time = major_to_time;
+   if(final_to_time <= 0)
+      final_to_time = closed_s.starter_time;
+   if(final_to_time < closed_s.starter_time)
+      final_to_time = closed_s.starter_time;
+
+   WBWM_ContextExport(g_wbwm_major);
+
+   WBWM_ContextInit(g_wbwm_minor);
+   g_wbwm_minor.markers_ns = "MIN";
+   g_wbwm_minor.scan_id    = minor_scan_id;
+   WBWM_ContextImport(g_wbwm_minor);
+
+   WBWM_DeleteAllObjects_CurrentScan();
+   __WBWM_ApplyMinorInitialExtLQ_NoDraw(closed_s);
+
+   if(closed_s.dir == DIR_UP)
+   {
+      API_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF,
+                                       closed_s.starter_time,
+                                       final_to_time,
+                                       true,
+                                       closed_s.ext_init_price,
+                                       closed_s.ext_init_time,
+                                       tag_suffix,
+                                       false);
+   }
+   else
+   {
+      API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF,
+                                            closed_s.starter_time,
+                                            final_to_time,
+                                            true,
+                                            closed_s.ext_init_price,
+                                            closed_s.ext_init_time,
+                                            tag_suffix,
+                                            false);
+   }
+
+   WBWM_DeleteMinorLiveOnlyObjects_CurrentScan();
+
+   WBWM_ContextImport(g_wbwm_major);
+   Markers_SetNamespace("MAJ");
+   g_scan_id = maj_scan_id;
+}
+
 // ------------------------------------------------------------------
 // MAIN entry: called from MAJ API loops after FSMS_SW_OnBarCtx()
 // Signature must match API calls: (rates,n,upto_j,to_time)
@@ -349,25 +479,67 @@ inline void WBWM_ProcessMinorStarterEvents(const MqlRates &rates[],
    g_wbwm_last_maj_time    = maj_t;
 
    // --- 1) Consume ALL pending starter events (keep the latest) ---
+   bool have_new_starter = false;
+   FSMS_SW_MinorSession latest_start;
    FSMS_SW_MinorSession s;
+
    while(FSMS_SW_PopMinorStartEvent(s))
    {
       if(!s.used) continue;
       if(s.starter_time <= 0) continue;
 
-      g_wbwm_minor_active     = true;
-      g_wbwm_minor_sess       = s;
-      g_wbwm_minor_scan_id    = (1000000 + (++g_wbwm_minor_scan_seq));
-      g_wbwm_minor_tag_suffix = "_minor_" + s.tag;
+      latest_start      = s;
+      have_new_starter  = true;
+   }
+
+   // If a new starter arrived while another MIN session was active,
+   // finalize/archive the previous MIN session BEFORE switching to the new one.
+   if(have_new_starter)
+   {
+      if(g_wbwm_minor_active && !__WBWM_IsSameMinorSession(g_wbwm_minor_sess, latest_start))
+      {
+         FSMS_SW_MinorSession prev_closed = g_wbwm_minor_sess;
+         FSMS_SW_MinorSession prev_saved;
+
+         if(FSMS_SW_Session_FindByTagDir(prev_closed.tag, prev_closed.dir, prev_saved))
+            prev_closed = prev_saved;
+
+         if(prev_closed.off_time <= 0)
+            prev_closed.off_time = latest_start.starter_time;
+         if(prev_closed.off_idx < 0)
+            prev_closed.off_idx = latest_start.starter_idx;
+
+         WBWM_FinalizeMinorArchive(prev_closed,
+                                   g_wbwm_minor_scan_id,
+                                   g_wbwm_minor_tag_suffix,
+                                   maj_scan_id,
+                                   major_to_time);
+
+         WBWM_MinorSession_Deactivate();
+      }
+
+      WBWM_MinorSession_Activate(latest_start);
    }
 
    // --- 2) If MIN is active: STOP immediately when MAJ session is closed (MinorOff) ---
    if(g_wbwm_minor_active)
    {
-      // if the MAJ session is no longer open => MIN must be OFF from THIS candle onward
+      // if the MAJ session is no longer open => finalize archive now and kill MIN logic
       if(FSMS_SW_Session_FindOpen(g_wbwm_minor_sess.tag, g_wbwm_minor_sess.dir) < 0)
       {
-         g_wbwm_minor_active = false;
+         FSMS_SW_MinorSession closed_s = g_wbwm_minor_sess;
+         FSMS_SW_MinorSession saved_s;
+
+         if(FSMS_SW_Session_FindByTagDir(closed_s.tag, closed_s.dir, saved_s))
+            closed_s = saved_s;
+
+         WBWM_FinalizeMinorArchive(closed_s,
+                                   g_wbwm_minor_scan_id,
+                                   g_wbwm_minor_tag_suffix,
+                                   maj_scan_id,
+                                   major_to_time);
+
+         WBWM_MinorSession_Deactivate();
 
          // hard safety: MAJ must remain MAJ
          Markers_SetNamespace("MAJ");
@@ -432,3 +604,6 @@ inline void WBWM_ProcessMinorStarterEvents(const MqlRates &rates[],
 }
 
 #endif // WAVEBOT_WORLDMANAGER_MQH
+
+
+
