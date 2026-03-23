@@ -4,6 +4,7 @@
 
 #include <WaveBot/Types.mqh>
 #include <WaveBot/Markers.mqh>   // __ScanPrefix()
+#include <WaveBot/FSMS_SW.mqh>   // Minor session binding / expiry helpers
 
 /*
   نقش این ماژول:
@@ -45,6 +46,11 @@ static int      g_srm_up_unmit_deep_idx    = -1;     // اندیس deepest SR mi
 static double   g_srm_up_unmit_deep_price  = 0.0;    // Low deepest SR mitigation
 static bool     g_srm_up_unmit_drawn       = false;  // آیا مستطیل unmit کشیده شده؟
 
+// lineage ownership (برای جلوگیری از اثرگذاری state مینور بعد از MinorOff)
+static bool     g_srm_up_origin_minor        = false;
+static int      g_srm_up_origin_minor_dir    = -1;   // 0=UP, 1=DOWN
+static datetime g_srm_up_origin_minor_start  = 0;
+
 // -------------------- State (DOWN) --------------------
 static bool     g_srm_dn_active          = false;
 static double   g_srm_dn_top             = 0.0;      // = High(C1-SW یا C1-FSMS-SW)
@@ -75,6 +81,11 @@ static datetime g_srm_dn_unmit_break_time  = 0;
 static int      g_srm_dn_unmit_deep_idx    = -1;     // اندیس deepest SR mitigation (بیشترین High)
 static double   g_srm_dn_unmit_deep_price  = 0.0;    // High deepest SR mitigation
 static bool     g_srm_dn_unmit_drawn       = false;
+
+// lineage ownership (برای جلوگیری از اثرگذاری state مینور بعد از MinorOff)
+static bool     g_srm_dn_origin_minor        = false;
+static int      g_srm_dn_origin_minor_dir    = -1;   // 0=UP, 1=DOWN
+static datetime g_srm_dn_origin_minor_start  = 0;
 // ------------------------------
 // Context snapshot for SR_Mitigator (UP + DOWN)
 // ------------------------------
@@ -108,6 +119,10 @@ struct SRMITContext
    double   up_unmit_deep_price;
    bool     up_unmit_drawn;
 
+   bool     up_origin_minor;
+   int      up_origin_minor_dir;
+   datetime up_origin_minor_start;
+
    // ===== DOWN state =====
    bool     dn_active;
    double   dn_top;
@@ -135,6 +150,10 @@ struct SRMITContext
    int      dn_unmit_deep_idx;
    double   dn_unmit_deep_price;
    bool     dn_unmit_drawn;
+
+   bool     dn_origin_minor;
+   int      dn_origin_minor_dir;
+   datetime dn_origin_minor_start;
 };
 
 // مقداردهی اولیهٔ یک کانتکست خالی (برای ساخت world جدید: ماژور/مینور)
@@ -168,6 +187,10 @@ inline void SRMIT_ContextInit(SRMITContext &ctx)
    ctx.up_unmit_deep_price  = 0.0;
    ctx.up_unmit_drawn       = false;
 
+   ctx.up_origin_minor      = false;
+   ctx.up_origin_minor_dir  = -1;
+   ctx.up_origin_minor_start= 0;
+
    // DOWN
    ctx.dn_active          = false;
    ctx.dn_top             = 0.0;
@@ -195,6 +218,10 @@ inline void SRMIT_ContextInit(SRMITContext &ctx)
    ctx.dn_unmit_deep_idx    = -1;
    ctx.dn_unmit_deep_price  = 0.0;
    ctx.dn_unmit_drawn       = false;
+
+   ctx.dn_origin_minor      = false;
+   ctx.dn_origin_minor_dir  = -1;
+   ctx.dn_origin_minor_start= 0;
 }
 
 // Export: کپی وضعیت فعلی globalها به داخل کانتکست
@@ -228,6 +255,10 @@ inline void SRMIT_ContextExport(SRMITContext &ctx)
    ctx.up_unmit_deep_price  = g_srm_up_unmit_deep_price;
    ctx.up_unmit_drawn       = g_srm_up_unmit_drawn;
 
+   ctx.up_origin_minor      = g_srm_up_origin_minor;
+   ctx.up_origin_minor_dir  = g_srm_up_origin_minor_dir;
+   ctx.up_origin_minor_start= g_srm_up_origin_minor_start;
+
    // DOWN
    ctx.dn_active          = g_srm_dn_active;
    ctx.dn_top             = g_srm_dn_top;
@@ -255,6 +286,10 @@ inline void SRMIT_ContextExport(SRMITContext &ctx)
    ctx.dn_unmit_deep_idx    = g_srm_dn_unmit_deep_idx;
    ctx.dn_unmit_deep_price  = g_srm_dn_unmit_deep_price;
    ctx.dn_unmit_drawn       = g_srm_dn_unmit_drawn;
+
+   ctx.dn_origin_minor      = g_srm_dn_origin_minor;
+   ctx.dn_origin_minor_dir  = g_srm_dn_origin_minor_dir;
+   ctx.dn_origin_minor_start= g_srm_dn_origin_minor_start;
 }
 
 // Import: برگرداندن وضعیت ذخیره‌شدهٔ کانتکست به متغیرهای global
@@ -288,6 +323,10 @@ inline void SRMIT_ContextImport(const SRMITContext &ctx)
    g_srm_up_unmit_deep_price  = ctx.up_unmit_deep_price;
    g_srm_up_unmit_drawn       = ctx.up_unmit_drawn;
 
+   g_srm_up_origin_minor      = ctx.up_origin_minor;
+   g_srm_up_origin_minor_dir  = ctx.up_origin_minor_dir;
+   g_srm_up_origin_minor_start= ctx.up_origin_minor_start;
+
    // DOWN
    g_srm_dn_active          = ctx.dn_active;
    g_srm_dn_top             = ctx.dn_top;
@@ -315,6 +354,10 @@ inline void SRMIT_ContextImport(const SRMITContext &ctx)
    g_srm_dn_unmit_deep_idx    = ctx.dn_unmit_deep_idx;
    g_srm_dn_unmit_deep_price  = ctx.dn_unmit_deep_price;
    g_srm_dn_unmit_drawn       = ctx.dn_unmit_drawn;
+
+   g_srm_dn_origin_minor      = ctx.dn_origin_minor;
+   g_srm_dn_origin_minor_dir  = ctx.dn_origin_minor_dir;
+   g_srm_dn_origin_minor_start= ctx.dn_origin_minor_start;
 }
 
 // -------------------- Helpers --------------------
@@ -484,6 +527,10 @@ inline void SRMIT_Reset_UP()
    g_srm_up_unmit_deep_idx    = -1;
    g_srm_up_unmit_deep_price  = 0.0;
    g_srm_up_unmit_drawn       = false;
+
+   g_srm_up_origin_minor      = false;
+   g_srm_up_origin_minor_dir  = -1;
+   g_srm_up_origin_minor_start= 0;
 }
 
 // ریست کامل DOWN
@@ -515,12 +562,60 @@ inline void SRMIT_Reset_DN()
    g_srm_dn_unmit_deep_idx    = -1;
    g_srm_dn_unmit_deep_price  = 0.0;
    g_srm_dn_unmit_drawn       = false;
+
+   g_srm_dn_origin_minor      = false;
+   g_srm_dn_origin_minor_dir  = -1;
+   g_srm_dn_origin_minor_start= 0;
 }
 // ریست کامل کل state ماژول SR_Mitigator در world فعلی
 inline void SRMIT_ResetGlobals()
 {
    SRMIT_Reset_UP();
    SRMIT_Reset_DN();
+}
+
+inline bool SRMIT_UP_IsMinorOrigin()            { return g_srm_up_origin_minor; }
+inline int  SRMIT_UP_MinorDirCode()             { return g_srm_up_origin_minor_dir; }
+inline datetime SRMIT_UP_MinorStarterTime()     { return g_srm_up_origin_minor_start; }
+
+inline bool SRMIT_DN_IsMinorOrigin()            { return g_srm_dn_origin_minor; }
+inline int  SRMIT_DN_MinorDirCode()             { return g_srm_dn_origin_minor_dir; }
+inline datetime SRMIT_DN_MinorStarterTime()     { return g_srm_dn_origin_minor_start; }
+
+inline bool __SRMIT_MinorExpired_UP(const datetime asof_time)
+{
+   if(!g_srm_up_origin_minor) return false;
+   return FSMS_SW_IsMinorLineageExpired(g_srm_up_origin_minor_dir,
+                                        g_srm_up_origin_minor_start,
+                                        asof_time);
+}
+
+inline bool __SRMIT_MinorExpired_DN(const datetime asof_time)
+{
+   if(!g_srm_dn_origin_minor) return false;
+   return FSMS_SW_IsMinorLineageExpired(g_srm_dn_origin_minor_dir,
+                                        g_srm_dn_origin_minor_start,
+                                        asof_time);
+}
+
+inline void SRMIT_ExpireMinorLineages(const int dir_code,
+                                      const datetime starter_time)
+{
+   if(starter_time <= 0) return;
+
+   if(g_srm_up_origin_minor &&
+      g_srm_up_origin_minor_dir == dir_code &&
+      g_srm_up_origin_minor_start == starter_time)
+   {
+      SRMIT_Reset_UP();
+   }
+
+   if(g_srm_dn_origin_minor &&
+      g_srm_dn_origin_minor_dir == dir_code &&
+      g_srm_dn_origin_minor_start == starter_time)
+   {
+      SRMIT_Reset_DN();
+   }
 }
 
 // -------------------- On New SR (UP/DOWN) --------------------
@@ -557,6 +652,10 @@ inline void SRMIT_OnNewSR_UP(const int id,
    g_srm_up_unmit_deep_idx    = -1;
    g_srm_up_unmit_deep_price  = 0.0;
    g_srm_up_unmit_drawn       = false;
+
+   FSMS_SW_CaptureCurrentMinorBinding(g_srm_up_origin_minor,
+                                      g_srm_up_origin_minor_dir,
+                                      g_srm_up_origin_minor_start);
 
    // اگر با شدو ساخته شده ⇒ همان کندل first mitigator است (ولی رسم خط ۱۰ کندلی را
    // بعداً در OnBar و پس از resolve اندیس، انجام می‌دهیم)
@@ -601,6 +700,10 @@ inline void SRMIT_OnNewSR_DN(const int id,
    g_srm_dn_unmit_deep_idx    = -1;
    g_srm_dn_unmit_deep_price  = 0.0;
    g_srm_dn_unmit_drawn       = false;
+
+   FSMS_SW_CaptureCurrentMinorBinding(g_srm_dn_origin_minor,
+                                      g_srm_dn_origin_minor_dir,
+                                      g_srm_dn_origin_minor_start);
 
    if(!created_by_body)
    {
@@ -760,6 +863,12 @@ inline void SR_Mitigator_OnBar_UP(const MqlRates &rates[], const int n, const in
    if(!g_srm_up_active) return;
    if(j < 0 || j >= n)  return;
 
+   if(__SRMIT_MinorExpired_UP(rates[j].time))
+   {
+      SRMIT_Reset_UP();
+      return;
+   }
+
    // resolve creation index lazily
    if(g_srm_up_created_idx < 0 && g_srm_up_created_at > 0)
       g_srm_up_created_idx = __SRMIT_FindIndexByTime(rates, n, g_srm_up_created_at);
@@ -906,6 +1015,12 @@ inline void SR_Mitigator_OnBar_DOWN(const MqlRates &rates[], const int n, const 
    if(!g_srm_dn_active) return;
    if(j < 0 || j >= n)  return;
 
+   if(__SRMIT_MinorExpired_DN(rates[j].time))
+   {
+      SRMIT_Reset_DN();
+      return;
+   }
+
    if(g_srm_dn_created_idx < 0 && g_srm_dn_created_at > 0)
       g_srm_dn_created_idx = __SRMIT_FindIndexByTime(rates, n, g_srm_dn_created_at);
 
@@ -1044,3 +1159,8 @@ inline void SR_Mitigator_OnBar_DOWN(const MqlRates &rates[], const int n, const 
 }
 
 #endif // WAVEBOT_SR_MITIGATOR_MQH
+
+
+
+
+

@@ -4,6 +4,7 @@
 
 #include <WaveBot/Types.mqh>
 #include <WaveBot/SR_Mitigator.mqh>     // وضعیت unmitigated SR (از SR_Mitigator)
+#include <WaveBot/FSMS_SW.mqh>          // Minor session expiry helpers
 #include <WaveBot/RaceCoordinator.mqh>  // زمان‌های MTC UP/DN BB
 #include <WaveBot/Markers.mqh>          // MarkCandleText و ...
 
@@ -20,6 +21,11 @@ struct SRGB_UnmitZone
    double   price_bottom;  // کف ناحیه unmit
    double   price_top;     // سقف ناحیه unmit
    datetime break_time;    // زمان GGBU / GGBD (اولین شکست deepest SR)
+
+   // lineage ownership
+   bool     origin_minor;
+   int      origin_minor_dir;      // 0=UP, 1=DOWN
+   datetime origin_minor_start;    // starter_time همان session مینور
 };
 
 // لیست نواحی unmit برای UP و DOWN
@@ -37,6 +43,9 @@ static int      g_srgb_up_sr_id         = -1;
 static double   g_srgb_up_price_top     = 0.0;
 static double   g_srgb_up_price_bottom  = 0.0;
 static datetime g_srgb_up_break_time    = 0;       // زمان GGBU (deepest SR break)
+static bool     g_srgb_up_origin_minor = false;
+static int      g_srgb_up_origin_minor_dir = -1;
+static datetime g_srgb_up_origin_minor_start = 0;
 
 // شمارنده‌ی یکتاساز نام کندل‌های GBU
 static int      g_srgb_up_counter       = 0;
@@ -57,6 +66,9 @@ static int      g_srgb_dn_sr_id         = -1;
 static double   g_srgb_dn_price_top     = 0.0;
 static double   g_srgb_dn_price_bottom  = 0.0;
 static datetime g_srgb_dn_break_time    = 0;       // زمان GGBD
+static bool     g_srgb_dn_origin_minor = false;
+static int      g_srgb_dn_origin_minor_dir = -1;
+static datetime g_srgb_dn_origin_minor_start = 0;
 
 // شمارنده‌ی یکتاساز نام کندل‌های GBD
 static int      g_srgb_dn_counter       = 0;
@@ -86,6 +98,9 @@ struct SRGBContext
    double   up_price_top;
    double   up_price_bottom;
    datetime up_break_time;      // زمان GGBU (deepest SR break)
+   bool     up_origin_minor;
+   int      up_origin_minor_dir;
+   datetime up_origin_minor_start;
 
    // شمارنده‌ی یکتاساز نام کندل‌های GBU
    int      up_counter;
@@ -106,6 +121,9 @@ struct SRGBContext
    double   dn_price_top;
    double   dn_price_bottom;
    datetime dn_break_time;      // زمان GGBD
+   bool     dn_origin_minor;
+   int      dn_origin_minor_dir;
+   datetime dn_origin_minor_start;
 
    // شمارنده‌ی یکتاساز نام کندل‌های GBD
    int      dn_counter;
@@ -134,6 +152,9 @@ inline void SRGB_ContextInit(SRGBContext &ctx)
    ctx.up_price_top     = 0.0;
    ctx.up_price_bottom  = 0.0;
    ctx.up_break_time    = 0;
+   ctx.up_origin_minor      = false;
+   ctx.up_origin_minor_dir  = -1;
+   ctx.up_origin_minor_start= 0;
 
    ctx.up_counter       = 0;
 
@@ -151,6 +172,9 @@ inline void SRGB_ContextInit(SRGBContext &ctx)
    ctx.dn_price_top     = 0.0;
    ctx.dn_price_bottom  = 0.0;
    ctx.dn_break_time    = 0;
+   ctx.dn_origin_minor      = false;
+   ctx.dn_origin_minor_dir  = -1;
+   ctx.dn_origin_minor_start= 0;
 
    ctx.dn_counter       = 0;
 
@@ -176,6 +200,9 @@ inline void SRGB_ContextExport(SRGBContext &ctx)
    ctx.up_price_top     = g_srgb_up_price_top;
    ctx.up_price_bottom  = g_srgb_up_price_bottom;
    ctx.up_break_time    = g_srgb_up_break_time;
+   ctx.up_origin_minor      = g_srgb_up_origin_minor;
+   ctx.up_origin_minor_dir  = g_srgb_up_origin_minor_dir;
+   ctx.up_origin_minor_start= g_srgb_up_origin_minor_start;
 
    ctx.up_counter       = g_srgb_up_counter;
 
@@ -193,6 +220,9 @@ inline void SRGB_ContextExport(SRGBContext &ctx)
    ctx.dn_price_top     = g_srgb_dn_price_top;
    ctx.dn_price_bottom  = g_srgb_dn_price_bottom;
    ctx.dn_break_time    = g_srgb_dn_break_time;
+   ctx.dn_origin_minor      = g_srgb_dn_origin_minor;
+   ctx.dn_origin_minor_dir  = g_srgb_dn_origin_minor_dir;
+   ctx.dn_origin_minor_start= g_srgb_dn_origin_minor_start;
 
    ctx.dn_counter       = g_srgb_dn_counter;
 
@@ -218,6 +248,9 @@ inline void SRGB_ContextImport(const SRGBContext &ctx)
    g_srgb_up_price_top     = ctx.up_price_top;
    g_srgb_up_price_bottom  = ctx.up_price_bottom;
    g_srgb_up_break_time    = ctx.up_break_time;
+   g_srgb_up_origin_minor      = ctx.up_origin_minor;
+   g_srgb_up_origin_minor_dir  = ctx.up_origin_minor_dir;
+   g_srgb_up_origin_minor_start= ctx.up_origin_minor_start;
 
    g_srgb_up_counter       = ctx.up_counter;
 
@@ -235,6 +268,9 @@ inline void SRGB_ContextImport(const SRGBContext &ctx)
    g_srgb_dn_price_top     = ctx.dn_price_top;
    g_srgb_dn_price_bottom  = ctx.dn_price_bottom;
    g_srgb_dn_break_time    = ctx.dn_break_time;
+   g_srgb_dn_origin_minor      = ctx.dn_origin_minor;
+   g_srgb_dn_origin_minor_dir  = ctx.dn_origin_minor_dir;
+   g_srgb_dn_origin_minor_start= ctx.dn_origin_minor_start;
 
    g_srgb_dn_counter       = ctx.dn_counter;
 
@@ -265,6 +301,9 @@ inline void SRGB_Reset_UP()
    g_srgb_up_price_top     = 0.0;
    g_srgb_up_price_bottom  = 0.0;
    g_srgb_up_break_time    = 0;
+   g_srgb_up_origin_minor      = false;
+   g_srgb_up_origin_minor_dir  = -1;
+   g_srgb_up_origin_minor_start= 0;
 
    g_srgb_up_last_index    = -1;
 
@@ -281,6 +320,9 @@ inline void SRGB_Reset_DN()
    g_srgb_dn_price_top     = 0.0;
    g_srgb_dn_price_bottom  = 0.0;
    g_srgb_dn_break_time    = 0;
+   g_srgb_dn_origin_minor      = false;
+   g_srgb_dn_origin_minor_dir  = -1;
+   g_srgb_dn_origin_minor_start= 0;
 
    g_srgb_dn_last_index    = -1;
 
@@ -359,7 +401,10 @@ inline int SRGB_FindZoneIndex_UP(const int sr_id,
 inline void SRGB_RegisterUnmit_UP(const int       sr_id,
                                   const double    price_bottom,
                                   const double    price_top,
-                                  const datetime  brk_time)
+                                  const datetime  brk_time,
+                                  const bool      origin_minor,
+                                  const int       origin_minor_dir,
+                                  const datetime  origin_minor_start)
 {
    int idx = SRGB_FindZoneIndex_UP(sr_id, brk_time);
    if(idx < 0)
@@ -369,12 +414,15 @@ inline void SRGB_RegisterUnmit_UP(const int       sr_id,
       idx = count;
    }
 
-   g_srgb_up_zones[idx].used         = true;
-   g_srgb_up_zones[idx].gbu_marked   = false;
-   g_srgb_up_zones[idx].sr_id        = sr_id;
-   g_srgb_up_zones[idx].price_bottom = price_bottom;
-   g_srgb_up_zones[idx].price_top    = price_top;
-   g_srgb_up_zones[idx].break_time   = brk_time;
+   g_srgb_up_zones[idx].used               = true;
+   g_srgb_up_zones[idx].gbu_marked         = false;
+   g_srgb_up_zones[idx].sr_id              = sr_id;
+   g_srgb_up_zones[idx].price_bottom       = price_bottom;
+   g_srgb_up_zones[idx].price_top          = price_top;
+   g_srgb_up_zones[idx].break_time         = brk_time;
+   g_srgb_up_zones[idx].origin_minor       = origin_minor;
+   g_srgb_up_zones[idx].origin_minor_dir   = origin_minor_dir;
+   g_srgb_up_zones[idx].origin_minor_start = origin_minor_start;
 }
 
 inline int SRGB_FindZoneIndex_DN(const int sr_id,
@@ -394,7 +442,10 @@ inline int SRGB_FindZoneIndex_DN(const int sr_id,
 inline void SRGB_RegisterUnmit_DN(const int       sr_id,
                                   const double    price_bottom,
                                   const double    price_top,
-                                  const datetime  brk_time)
+                                  const datetime  brk_time,
+                                  const bool      origin_minor,
+                                  const int       origin_minor_dir,
+                                  const datetime  origin_minor_start)
 {
    int idx = SRGB_FindZoneIndex_DN(sr_id, brk_time);
    if(idx < 0)
@@ -404,12 +455,64 @@ inline void SRGB_RegisterUnmit_DN(const int       sr_id,
       idx = count;
    }
 
-   g_srgb_dn_zones[idx].used         = true;
-   g_srgb_dn_zones[idx].gbu_marked   = false;
-   g_srgb_dn_zones[idx].sr_id        = sr_id;
-   g_srgb_dn_zones[idx].price_bottom = price_bottom;
-   g_srgb_dn_zones[idx].price_top    = price_top;
-   g_srgb_dn_zones[idx].break_time   = brk_time;
+   g_srgb_dn_zones[idx].used               = true;
+   g_srgb_dn_zones[idx].gbu_marked         = false;
+   g_srgb_dn_zones[idx].sr_id              = sr_id;
+   g_srgb_dn_zones[idx].price_bottom       = price_bottom;
+   g_srgb_dn_zones[idx].price_top          = price_top;
+   g_srgb_dn_zones[idx].break_time         = brk_time;
+   g_srgb_dn_zones[idx].origin_minor       = origin_minor;
+   g_srgb_dn_zones[idx].origin_minor_dir   = origin_minor_dir;
+   g_srgb_dn_zones[idx].origin_minor_start = origin_minor_start;
+}
+
+inline bool __SRGB_ZoneMinorExpired(const SRGB_UnmitZone &z,
+                                    const datetime asof_time)
+{
+   if(!z.origin_minor) return false;
+   return FSMS_SW_IsMinorLineageExpired(z.origin_minor_dir,
+                                        z.origin_minor_start,
+                                        asof_time);
+}
+
+inline void SRGB_ExpireMinorLineages(const int dir_code,
+                                     const datetime starter_time)
+{
+   if(starter_time <= 0) return;
+
+   int up_count = ArraySize(g_srgb_up_zones);
+   for(int i=0; i<up_count; ++i)
+   {
+      if(!g_srgb_up_zones[i].used) continue;
+      if(!g_srgb_up_zones[i].origin_minor) continue;
+      if(g_srgb_up_zones[i].origin_minor_dir != dir_code) continue;
+      if(g_srgb_up_zones[i].origin_minor_start != starter_time) continue;
+      g_srgb_up_zones[i].used = false;
+   }
+
+   int dn_count = ArraySize(g_srgb_dn_zones);
+   for(int j=0; j<dn_count; ++j)
+   {
+      if(!g_srgb_dn_zones[j].used) continue;
+      if(!g_srgb_dn_zones[j].origin_minor) continue;
+      if(g_srgb_dn_zones[j].origin_minor_dir != dir_code) continue;
+      if(g_srgb_dn_zones[j].origin_minor_start != starter_time) continue;
+      g_srgb_dn_zones[j].used = false;
+   }
+
+   if(g_srgb_up_origin_minor &&
+      g_srgb_up_origin_minor_dir == dir_code &&
+      g_srgb_up_origin_minor_start == starter_time)
+   {
+      SRGB_Reset_UP();
+   }
+
+   if(g_srgb_dn_origin_minor &&
+      g_srgb_dn_origin_minor_dir == dir_code &&
+      g_srgb_dn_origin_minor_start == starter_time)
+   {
+      SRGB_Reset_DN();
+   }
 }
 
 
@@ -444,6 +547,9 @@ inline void __SRGB_SyncFromMitigator_UP()
          }
 
          g_srgb_up_break_time = g_srm_up_unmit_break_time;
+         g_srgb_up_origin_minor = SRMIT_UP_IsMinorOrigin();
+         g_srgb_up_origin_minor_dir = SRMIT_UP_MinorDirCode();
+         g_srgb_up_origin_minor_start = SRMIT_UP_MinorStarterTime();
 
          // ریست اسکن و دیباگ برای این unmit جدید
          g_srgb_up_last_index     = -1;
@@ -455,7 +561,10 @@ inline void __SRGB_SyncFromMitigator_UP()
          SRGB_RegisterUnmit_UP(g_srgb_up_sr_id,
                                g_srgb_up_price_bottom,
                                g_srgb_up_price_top,
-                               g_srgb_up_break_time);
+                               g_srgb_up_break_time,
+                               g_srgb_up_origin_minor,
+                               g_srgb_up_origin_minor_dir,
+                               g_srgb_up_origin_minor_start);
       }
    }
    else
@@ -491,6 +600,9 @@ inline void __SRGB_SyncFromMitigator_DN()
          }
 
          g_srgb_dn_break_time = g_srm_dn_unmit_break_time;
+         g_srgb_dn_origin_minor = SRMIT_DN_IsMinorOrigin();
+         g_srgb_dn_origin_minor_dir = SRMIT_DN_MinorDirCode();
+         g_srgb_dn_origin_minor_start = SRMIT_DN_MinorStarterTime();
 
          g_srgb_dn_last_index     = -1;
          g_srgb_dn_dbg_active     = false;
@@ -501,7 +613,10 @@ inline void __SRGB_SyncFromMitigator_DN()
          SRGB_RegisterUnmit_DN(g_srgb_dn_sr_id,
                                g_srgb_dn_price_bottom,
                                g_srgb_dn_price_top,
-                               g_srgb_dn_break_time);
+                               g_srgb_dn_break_time,
+                               g_srgb_dn_origin_minor,
+                               g_srgb_dn_origin_minor_dir,
+                               g_srgb_dn_origin_minor_start);
       }
    }
    else
@@ -658,6 +773,20 @@ inline void SR_GoozBaghali_OnBar_UP(const MqlRates &rates[],
          // کپی لوکال از ناحیه (بعد از تغییر، دوباره داخل آرایه می‌نویسیم)
          SRGB_UnmitZone z = g_srgb_up_zones[zi];
 
+         if(__SRGB_ZoneMinorExpired(z, r.time))
+         {
+            z.used = false;
+            g_srgb_up_zones[zi] = z;
+
+            if(g_srgb_up_active &&
+               z.sr_id == g_srgb_up_sr_id &&
+               z.break_time == g_srgb_up_break_time)
+            {
+               SRGB_Reset_UP();
+            }
+            continue;
+         }
+
          // فقط کندل‌های بعد از GGBU مخصوص این ناحیه
          if(r.time <= z.break_time)
             continue;
@@ -768,6 +897,20 @@ inline void SR_GoozBaghali_OnBar_DOWN(const MqlRates &rates[],
 
          SRGB_UnmitZone z = g_srgb_dn_zones[zi];
 
+         if(__SRGB_ZoneMinorExpired(z, r.time))
+         {
+            z.used = false;
+            g_srgb_dn_zones[zi] = z;
+
+            if(g_srgb_dn_active &&
+               z.sr_id == g_srgb_dn_sr_id &&
+               z.break_time == g_srgb_dn_break_time)
+            {
+               SRGB_Reset_DN();
+            }
+            continue;
+         }
+
          // فقط کندل‌های بعد از GGBD مخصوص این ناحیه
          if(r.time <= z.break_time)
             continue;
@@ -831,3 +974,8 @@ inline void SR_GoozBaghali_OnBar_DOWN(const MqlRates &rates[],
 }
 
 #endif // WAVEBOT_SR_GOOZBAGHALI_MQH
+
+
+
+
+

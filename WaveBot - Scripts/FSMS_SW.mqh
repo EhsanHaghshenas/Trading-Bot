@@ -206,6 +206,72 @@ struct FSMS_SW_MinorSession
 static FSMS_SW_MinorSession g_fsms_sw_sessions[];
 static int g_fsms_sw_sessions_count = 0;
 
+// -------- Runtime binding of the currently executing MIN world --------
+// این state جزو snapshot منطقی world نیست؛ فقط توسط WorldManager
+// قبل/بعد از اجرای MIN ست/پاک می‌شود تا ماژول‌های downstream بتوانند
+// lineage های ساخته‌شده در MIN را به همان session bind کنند.
+static bool                  g_fsms_sw_runtime_minor_active = false;
+static FSMS_SW_MinorSession  g_fsms_sw_runtime_minor_sess;
+
+inline void FSMS_SW_RuntimeMinor_Clear()
+{
+   g_fsms_sw_runtime_minor_active      = false;
+   g_fsms_sw_runtime_minor_sess.used   = false;
+   g_fsms_sw_runtime_minor_sess.open   = false;
+   g_fsms_sw_runtime_minor_sess.dir    = DIR_UP;
+   g_fsms_sw_runtime_minor_sess.tag    = "";
+   g_fsms_sw_runtime_minor_sess.starter_idx  = -1;
+   g_fsms_sw_runtime_minor_sess.starter_time = 0;
+   g_fsms_sw_runtime_minor_sess.off_idx      = -1;
+   g_fsms_sw_runtime_minor_sess.off_time     = 0;
+   g_fsms_sw_runtime_minor_sess.off_level_1  = 0.0;
+   g_fsms_sw_runtime_minor_sess.off_level_2  = 0.0;
+   g_fsms_sw_runtime_minor_sess.c1_w3_idx    = -1;
+   g_fsms_sw_runtime_minor_sess.c1_w3_time   = 0;
+   g_fsms_sw_runtime_minor_sess.ext_init_price = 0.0;
+   g_fsms_sw_runtime_minor_sess.ext_init_time  = 0;
+   g_fsms_sw_runtime_minor_sess.w2_minor_c1_idx     = -1;
+   g_fsms_sw_runtime_minor_sess.w2_minor_start_time = 0;
+   g_fsms_sw_runtime_minor_sess.bars_between = 0;
+}
+
+inline void FSMS_SW_RuntimeMinor_Set(const FSMS_SW_MinorSession &s)
+{
+   g_fsms_sw_runtime_minor_active = true;
+   g_fsms_sw_runtime_minor_sess   = s;
+}
+
+inline bool FSMS_SW_RuntimeMinor_Get(FSMS_SW_MinorSession &out)
+{
+   if(!g_fsms_sw_runtime_minor_active) return false;
+   if(!g_fsms_sw_runtime_minor_sess.used) return false;
+   out = g_fsms_sw_runtime_minor_sess;
+   return true;
+}
+
+inline void FSMS_SW_CaptureCurrentMinorBinding(bool &is_minor,
+                                               int  &dir_code,
+                                               datetime &starter_time)
+{
+   is_minor     = false;
+   dir_code     = -1;
+   starter_time = 0;
+
+   if(Markers_GetNamespace() != "MIN")
+      return;
+
+   if(!g_fsms_sw_runtime_minor_active)
+      return;
+
+   if(!g_fsms_sw_runtime_minor_sess.used)
+      return;
+
+   is_minor     = true;
+   dir_code     = (g_fsms_sw_runtime_minor_sess.dir == DIR_UP ? 0 : 1);
+   starter_time = g_fsms_sw_runtime_minor_sess.starter_time;
+}
+
+
 // ============================================================================
 // MinorStarter Event (MAJ → WorldManager trigger)
 // ============================================================================
@@ -271,6 +337,76 @@ inline bool FSMS_SW_Session_FindByTagDir(const string tag,
    if(si < 0) return false;
 
    out = g_fsms_sw_sessions[si];
+   return true;
+}
+
+inline int FSMS_SW_Session_FindByStarterTime(const Direction dir,
+                                             const datetime starter_time)
+{
+   if(starter_time <= 0) return -1;
+
+   for(int i=0; i<g_fsms_sw_sessions_count; ++i)
+   {
+      if(!g_fsms_sw_sessions[i].used) continue;
+      if(g_fsms_sw_sessions[i].dir != dir) continue;
+      if(g_fsms_sw_sessions[i].starter_time != starter_time) continue;
+      return i;
+   }
+   return -1;
+}
+
+inline bool FSMS_SW_Session_GetByStarterTime(const Direction dir,
+                                             const datetime starter_time,
+                                             FSMS_SW_MinorSession &out)
+{
+   int si = FSMS_SW_Session_FindByStarterTime(dir, starter_time);
+   if(si < 0) return false;
+
+   out = g_fsms_sw_sessions[si];
+   return true;
+}
+
+inline Direction __FSMS_SW_DirFromCode(const int dir_code)
+{
+   return (dir_code == 0 ? DIR_UP : DIR_DOWN);
+}
+
+// آیا lineage مینور bind‌شده به این session، در زمان asof_time منقضی شده است؟
+inline bool FSMS_SW_IsMinorLineageExpired(const int dir_code,
+                                          const datetime starter_time,
+                                          const datetime asof_time)
+{
+   if(starter_time <= 0)
+      return true;
+
+   const Direction dir = __FSMS_SW_DirFromCode(dir_code);
+
+   FSMS_SW_MinorSession s;
+   if(FSMS_SW_Session_GetByStarterTime(dir, starter_time, s))
+   {
+      if(s.open)
+         return false;
+
+      if(s.off_time <= 0)
+         return true;
+
+      if(asof_time <= 0)
+         return true;
+
+      return (asof_time >= s.off_time);
+   }
+
+   if(Markers_GetNamespace() == "MIN" &&
+      g_fsms_sw_runtime_minor_active &&
+      g_fsms_sw_runtime_minor_sess.used &&
+      g_fsms_sw_runtime_minor_sess.dir == dir &&
+      g_fsms_sw_runtime_minor_sess.starter_time == starter_time)
+   {
+      return false;
+   }
+
+   // اگر session دیگر در registry فعلی پیدا نشود، برای جلوگیری از نشت state
+   // آن lineage را منقضی فرض می‌کنیم.
    return true;
 }
 
@@ -1866,6 +2002,8 @@ inline void FSMS_SW_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
 }
 
 #endif // WAVEBOT_FSMS_SW_MQH
+
+
 
 
 

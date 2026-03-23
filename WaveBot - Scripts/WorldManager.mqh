@@ -231,6 +231,9 @@ inline void WBWM_Init()
    g_wbwm_last_maj_scan_id   = -1;
    g_wbwm_last_maj_time      = 0;
 
+   FSMS_SW_RuntimeMinor_Clear();
+   WBWM_MinorStop_Disarm();
+
    g_wbwm_inited = true;
 }
 
@@ -345,6 +348,22 @@ inline void WBWM_MinorSession_Deactivate()
    g_wbwm_minor_scan_id    = 0;
    g_wbwm_minor_tag_suffix = "";
    WBWM_MinorStop_Disarm();
+   FSMS_SW_RuntimeMinor_Clear();
+
+   WBWM_ContextInit(g_wbwm_minor);
+   g_wbwm_minor.markers_ns = "MIN";
+   g_wbwm_minor.scan_id    = 0;
+}
+
+inline void WBWM_ExpireMinorLineageInCurrentWorld(const FSMS_SW_MinorSession &s)
+{
+   if(!s.used) return;
+   if(s.starter_time <= 0) return;
+
+   const int dir_code = (s.dir == DIR_UP ? 0 : 1);
+
+   SRMIT_ExpireMinorLineages(dir_code, s.starter_time);
+   SRGB_ExpireMinorLineages(dir_code, s.starter_time);
 }
 
 inline void WBWM_DeleteMinorLiveOnlyObjects_CurrentScan()
@@ -402,6 +421,9 @@ inline void WBWM_FinalizeMinorArchive(const FSMS_SW_MinorSession &closed_s,
    if(closed_s.starter_time <= 0) return;
 
    datetime final_to_time = closed_s.off_time;
+   if(final_to_time > closed_s.starter_time)
+      final_to_time -= 1;   // candle MinorOff خودش دیگر جزو منطق MIN نیست
+
    if(final_to_time <= 0)
       final_to_time = major_to_time;
    if(final_to_time <= 0)
@@ -418,6 +440,7 @@ inline void WBWM_FinalizeMinorArchive(const FSMS_SW_MinorSession &closed_s,
 
    WBWM_DeleteAllObjects_CurrentScan();
    __WBWM_ApplyMinorInitialExtLQ_NoDraw(closed_s);
+   FSMS_SW_RuntimeMinor_Set(closed_s);
 
    if(closed_s.dir == DIR_UP)
    {
@@ -442,6 +465,7 @@ inline void WBWM_FinalizeMinorArchive(const FSMS_SW_MinorSession &closed_s,
                                             false);
    }
 
+   FSMS_SW_RuntimeMinor_Clear();
    WBWM_DeleteMinorLiveOnlyObjects_CurrentScan();
 
    WBWM_ContextImport(g_wbwm_major);
@@ -515,6 +539,7 @@ inline void WBWM_ProcessMinorStarterEvents(const MqlRates &rates[],
                                    maj_scan_id,
                                    major_to_time);
 
+         WBWM_ExpireMinorLineageInCurrentWorld(prev_closed);
          WBWM_MinorSession_Deactivate();
       }
 
@@ -539,6 +564,7 @@ inline void WBWM_ProcessMinorStarterEvents(const MqlRates &rates[],
                                    maj_scan_id,
                                    major_to_time);
 
+         WBWM_ExpireMinorLineageInCurrentWorld(closed_s);
          WBWM_MinorSession_Deactivate();
 
          // hard safety: MAJ must remain MAJ
@@ -569,6 +595,7 @@ inline void WBWM_ProcessMinorStarterEvents(const MqlRates &rates[],
 
       // Apply initial extLQ anchor for MIN logic (no draw)
       __WBWM_ApplyMinorInitialExtLQ_NoDraw(g_wbwm_minor_sess);
+      FSMS_SW_RuntimeMinor_Set(g_wbwm_minor_sess);
 
       // Run MIN scan up to current candle (NO bump scan id)
       if(g_wbwm_minor_sess.dir == DIR_UP)
@@ -594,6 +621,8 @@ inline void WBWM_ProcessMinorStarterEvents(const MqlRates &rates[],
                                                false);
       }
 
+      FSMS_SW_RuntimeMinor_Clear();
+
       // Restore MAJ snapshot
       WBWM_ContextImport(g_wbwm_major);
 
@@ -604,6 +633,8 @@ inline void WBWM_ProcessMinorStarterEvents(const MqlRates &rates[],
 }
 
 #endif // WAVEBOT_WORLDMANAGER_MQH
+
+
 
 
 
