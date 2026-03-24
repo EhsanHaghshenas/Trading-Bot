@@ -1,3 +1,4 @@
+// WaveBot/ShadowBreaker.mqh
 
 // WaveBot/ShadowBreaker.mqh
 #ifndef WAVEBOT_SHADOWBREAKER_MQH

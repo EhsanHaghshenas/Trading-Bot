@@ -1,4 +1,3 @@
-
 #ifndef WAVEBOT_C1W2GATE_MQH
 #define WAVEBOT_C1W2GATE_MQH
 

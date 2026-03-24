@@ -1,4 +1,3 @@
-
 #ifndef WAVEBOT_WB15_SIGNAL_BRIDGE_MQH
 #define WAVEBOT_WB15_SIGNAL_BRIDGE_MQH
 
@@ -210,9 +209,14 @@ inline void WB15_MasterPushEvent(const string sym,
 
 // --------------------------------------------------------------------------
 // Time-mapping rule (H4 -> M15):
-//  - Default: START/STOP are published ONLY after the H4 candle closes,
-//             and their timestamp is the H4 CLOSE time (open time of next H4 bar).
-//  - Exception: START via HWX and GOOZBAGHALI can be published before H4 close.
+//  - HWX / HWBB / GOOZBAGHALI:
+//      publish on the FIRST M15 candle inside the H4 bar where the event
+//      really forms. The published timestamp is a stable point INSIDE that
+//      M15 candle (bar_open + 1 second), so the slave resolves the same
+//      live candle deterministically.
+//  - FSMS / MTC / MinorStarter / MinorOff-zone:
+//      publish ONLY after the H4 candle closes,
+//      and their timestamp is the H4 CLOSE time (open time of next H4 bar).
 // --------------------------------------------------------------------------
 
 inline datetime __WB15_H4_CloseTime(const datetime h4_open_time)
@@ -236,13 +240,248 @@ inline datetime __WB15_CloseBasedEventTimeOrZero(const datetime h4_open_time)
    return close_time;
 }
 
-// START (EXCEPTION): HWX is allowed before H4 close
+inline datetime __WB15_StableM15IntrabarTime(const datetime m15_bar_open_time)
+{
+   if(m15_bar_open_time <= 0) return 0;
+
+   int sec = PeriodSeconds(PERIOD_M15);
+   if(sec <= 0) sec = 900; // safety fallback: 15M = 900 seconds
+
+   datetime t = m15_bar_open_time + 1;
+   if(t >= (m15_bar_open_time + (datetime)sec))
+      t = m15_bar_open_time;
+
+   return t;
+}
+
+inline bool __WB15_BuildIntrabarSearchWindow(const datetime h4_open_time,
+                                             datetime &from_time,
+                                             datetime &to_time)
+{
+   from_time = 0;
+   to_time   = 0;
+
+   if(h4_open_time <= 0) return false;
+
+   const datetime close_time = __WB15_H4_CloseTime(h4_open_time);
+   if(close_time <= h4_open_time) return false;
+
+   from_time = h4_open_time;
+   to_time   = close_time - 1;
+
+   const datetime now = TimeCurrent();
+   if(now < to_time)
+      to_time = now;
+
+   if(to_time < from_time)
+      to_time = from_time;
+
+   return true;
+}
+
+inline int __WB15_LoadIntrabarM15(const string sym,
+                                  const datetime from_time,
+                                  const datetime to_time,
+                                  MqlRates &bars[])
+{
+   ArrayFree(bars);
+
+   if(from_time <= 0) return 0;
+   if(to_time < from_time) return 0;
+
+   int copied = CopyRates(sym, PERIOD_M15, from_time, to_time, bars);
+   if(copied <= 0) return 0;
+
+   ArraySetAsSeries(bars, false);
+   return copied;
+}
+
+inline bool __WB15_FindFirstHWXIntrabarTime(const string sym,
+                                            const Direction dir,
+                                            const datetime h4_open_time,
+                                            const double level,
+                                            datetime &event_time)
+{
+   event_time = 0;
+   if(level <= 0.0) return false;
+
+   datetime from_time = 0;
+   datetime to_time   = 0;
+   if(!__WB15_BuildIntrabarSearchWindow(h4_open_time, from_time, to_time))
+      return false;
+
+   MqlRates bars[];
+   int n = __WB15_LoadIntrabarM15(sym, from_time, to_time, bars);
+   if(n <= 0) return false;
+
+   for(int i = 0; i < n; ++i)
+   {
+      bool crossed = false;
+
+      if(dir == DIR_UP)
+         crossed = (bars[i].low <= level || bars[i].close < level);
+      else
+         crossed = (bars[i].high >= level || bars[i].close > level);
+
+      if(crossed)
+      {
+         event_time = __WB15_StableM15IntrabarTime(bars[i].time);
+         return (event_time > 0);
+      }
+   }
+
+   return false;
+}
+
+inline bool __WB15_FindFirstHWBBIntrabarTime(const string sym,
+                                             const Direction dir,
+                                             const datetime h4_open_time,
+                                             const double start_level,
+                                             const datetime seed_h4_open_time,
+                                             datetime &event_time)
+{
+   event_time = 0;
+   if(start_level <= 0.0) return false;
+
+   datetime min_event_time = h4_open_time;
+
+   // If HWBB happens inside the very same H4 bar as the seed Hunter,
+   // do not allow a time earlier than the real HWX formation moment.
+   if(seed_h4_open_time > 0 && seed_h4_open_time == h4_open_time)
+   {
+      datetime hwx_time = 0;
+      if(__WB15_FindFirstHWXIntrabarTime(sym, dir, seed_h4_open_time, start_level, hwx_time))
+      {
+         if(hwx_time > min_event_time)
+            min_event_time = hwx_time;
+      }
+   }
+
+   datetime from_time = 0;
+   datetime to_time   = 0;
+   if(!__WB15_BuildIntrabarSearchWindow(h4_open_time, from_time, to_time))
+      return false;
+
+   MqlRates bars[];
+   int n = __WB15_LoadIntrabarM15(sym, from_time, to_time, bars);
+   if(n <= 0) return false;
+
+   double level = start_level;
+
+   for(int i = 0; i < n; ++i)
+   {
+      const datetime bar_event_time = __WB15_StableM15IntrabarTime(bars[i].time);
+      if(bar_event_time <= 0) continue;
+      if(bar_event_time < min_event_time) continue;
+
+      if(dir == DIR_UP)
+      {
+         if(bars[i].close < level)
+         {
+            event_time = bar_event_time;
+            return true;
+         }
+
+         if(bars[i].low < level)
+            level = bars[i].low;
+      }
+      else
+      {
+         if(bars[i].close > level)
+         {
+            event_time = bar_event_time;
+            return true;
+         }
+
+         if(bars[i].high > level)
+            level = bars[i].high;
+      }
+   }
+
+   return false;
+}
+
+inline bool __WB15_FindFirstRangeTouchIntrabarTime(const string sym,
+                                                   const datetime h4_open_time,
+                                                   const double price_a,
+                                                   const double price_b,
+                                                   datetime &event_time)
+{
+   event_time = 0;
+
+   double bottom = price_a;
+   double top    = price_b;
+
+   if(bottom > top)
+   {
+      double tmp = bottom;
+      bottom     = top;
+      top        = tmp;
+   }
+
+   if(top <= 0.0) return false;
+
+   datetime from_time = 0;
+   datetime to_time   = 0;
+   if(!__WB15_BuildIntrabarSearchWindow(h4_open_time, from_time, to_time))
+      return false;
+
+   MqlRates bars[];
+   int n = __WB15_LoadIntrabarM15(sym, from_time, to_time, bars);
+   if(n <= 0) return false;
+
+   const double eps = (2.0 * _Point);
+
+   for(int i = 0; i < n; ++i)
+   {
+      if(bars[i].low <= (top + eps) && bars[i].high >= (bottom - eps))
+      {
+         event_time = __WB15_StableM15IntrabarTime(bars[i].time);
+         return (event_time > 0);
+      }
+   }
+
+   return false;
+}
+
+// START (EXACT FORMATION MOMENT): HWX
+inline void WB15_PublishStartHWX(const string sym,
+                                 const Direction dir,
+                                 const datetime h4_open_time,
+                                 const double level)
+{
+   datetime te = 0;
+   if(!__WB15_FindFirstHWXIntrabarTime(sym, dir, h4_open_time, level, te))
+      te = __WB15_StableM15IntrabarTime(h4_open_time);
+
+   if(te <= 0) return;
+
+   WB15_MasterPushEvent(sym, WB15_KIND_START_HWX, __WB15_NS_FromMarkers(), dir, te);
+}
+
+// Legacy fallback overload (kept for compatibility)
 inline void WB15_PublishStartHWX(const string sym, const Direction dir, const datetime t)
 {
    WB15_MasterPushEvent(sym, WB15_KIND_START_HWX, __WB15_NS_FromMarkers(), dir, t);
 }
 
-// START (ON CLOSE): HWBB must wait for H4 close
+// START (EXACT FORMATION MOMENT): HWBB
+inline void WB15_PublishStartHWBB(const string sym,
+                                  const Direction dir,
+                                  const datetime h4_open_time,
+                                  const double start_level,
+                                  const datetime seed_h4_open_time)
+{
+   datetime te = 0;
+   if(!__WB15_FindFirstHWBBIntrabarTime(sym, dir, h4_open_time, start_level, seed_h4_open_time, te))
+      te = __WB15_StableM15IntrabarTime(h4_open_time);
+
+   if(te <= 0) return;
+
+   WB15_MasterPushEvent(sym, WB15_KIND_START_HWBB, __WB15_NS_FromMarkers(), dir, te);
+}
+
+// Legacy fallback overload (kept for compatibility)
 inline void WB15_PublishStartHWBB(const string sym, const Direction dir, const datetime t)
 {
    const datetime te = __WB15_CloseBasedEventTimeOrZero(t);
@@ -251,19 +490,37 @@ inline void WB15_PublishStartHWBB(const string sym, const Direction dir, const d
    WB15_MasterPushEvent(sym, WB15_KIND_START_HWBB, __WB15_NS_FromMarkers(), dir, te);
 }
 
-// START (ON CLOSE, MAJ-only): FSMS must wait for H4 close
+// START (ON H4 CLOSE): FSMS
+// NOTE: legacy function name is kept to avoid touching the wider codebase.
+// It now publishes in BOTH MAJ and MIN namespaces, based on the active world.
 inline void WB15_PublishStartFSMS_MAJONLY(const string sym, const Direction dir, const datetime t)
 {
-   // FSMS as a start trigger is MAJ-only by definition
-   if(Markers_GetNamespace() != "MAJ") return;
+   const int ns = __WB15_NS_FromMarkers();
+   if(ns == WB15_NS_NONE) return;
 
    const datetime te = __WB15_CloseBasedEventTimeOrZero(t);
    if(te <= 0) return;
 
-   WB15_MasterPushEvent(sym, WB15_KIND_START_FSMS, WB15_NS_MAJ, dir, te);
+   WB15_MasterPushEvent(sym, WB15_KIND_START_FSMS, ns, dir, te);
 }
 
-// START (EXCEPTION): GOOZBAGHALI is allowed before H4 close
+// START (EXACT FORMATION MOMENT): GOOZBAGHALI
+inline void WB15_PublishStartGooz(const string sym,
+                                  const Direction dir,
+                                  const datetime h4_open_time,
+                                  const double price_a,
+                                  const double price_b)
+{
+   datetime te = 0;
+   if(!__WB15_FindFirstRangeTouchIntrabarTime(sym, h4_open_time, price_a, price_b, te))
+      te = __WB15_StableM15IntrabarTime(h4_open_time);
+
+   if(te <= 0) return;
+
+   WB15_MasterPushEvent(sym, WB15_KIND_START_GOOZBAGHALI, __WB15_NS_FromMarkers(), dir, te);
+}
+
+// Legacy fallback overload (kept for compatibility)
 inline void WB15_PublishStartGooz(const string sym, const Direction dir, const datetime t)
 {
    WB15_MasterPushEvent(sym, WB15_KIND_START_GOOZBAGHALI, __WB15_NS_FromMarkers(), dir, t);
@@ -298,6 +555,7 @@ inline void WB15_PublishStopMinorOffZone_MAJONLY(const string sym, const Directi
 
    WB15_MasterPushEvent(sym, WB15_KIND_STOP_MINOROFF_ZONE, WB15_NS_MAJ, dir, te);
 }
+
 
 // ============================================================================
 // SLAVE (M15): drawing helpers
@@ -568,13 +826,24 @@ inline bool __WB15_ShouldStop(const WB15ActiveState &st, const int stop_kind, co
    if(!st.active) return false;
    if(stop_dir != __WB15_Opposite(st.start_dir)) return false;
 
-   // FSMS sessions are stopped by MAJ MinorStarter OR MAJ MTC (both in opposite direction)
+   // FSMS sessions:
+   //  - MAJ FSMS is stopped by MAJ MinorStarter OR MAJ MTC
+   //  - MIN FSMS is stopped by MTC (MIN or MAJ cross-stop)
    if(st.start_kind == WB15_KIND_START_FSMS)
    {
-      // FSMS is a MAJ-only start trigger; stop must also be MAJ
-      if(stop_ns != WB15_NS_MAJ) return false;
+      if(st.start_ns == WB15_NS_MAJ)
+      {
+         if(stop_ns != WB15_NS_MAJ) return false;
+         return (stop_kind == WB15_KIND_STOP_MINORSTARTER || stop_kind == WB15_KIND_STOP_MTC);
+      }
 
-      return (stop_kind == WB15_KIND_STOP_MINORSTARTER || stop_kind == WB15_KIND_STOP_MTC);
+      if(st.start_ns == WB15_NS_MIN)
+      {
+         if(stop_kind != WB15_KIND_STOP_MTC) return false;
+         return (stop_ns == WB15_NS_MIN || stop_ns == WB15_NS_MAJ);
+      }
+
+      return false;
    }
 
    // HWX/HWBB/GOOZ sessions:

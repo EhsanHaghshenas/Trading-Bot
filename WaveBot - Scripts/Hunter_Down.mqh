@@ -1,4 +1,3 @@
-
 #ifndef WAVEBOT_HUNTER_DOWN_MQH
 #define WAVEBOT_HUNTER_DOWN_MQH
 
@@ -175,7 +174,7 @@ inline void Hunter_Down_TryMarkIfValid(const MqlRates &rates[], const int n,
    g_marked_for_lq_d = true;
 
    // NEW (H4->M15 bridge): HWX is a START trigger (intrabar)
-   WB15_PublishStartHWX(InpSymbol, DIR_DOWN, rates[cross_idx].time);
+   WB15_PublishStartHWX(InpSymbol, DIR_DOWN, rates[cross_idx].time, ExtLQ_Down_Get());
 
    // بذر SW نزولی را فعال کن (Lowِ C1 هانتر)
    SW_DOWN_ActivateSeed(rates, n, c1_index, cross_idx);

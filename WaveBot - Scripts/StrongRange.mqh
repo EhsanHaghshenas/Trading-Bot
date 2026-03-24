@@ -1,3 +1,4 @@
+// WaveBot/StrongRange.mqh
 
 // WaveBot/StrongRange.mqh
 #ifndef WAVEBOT_STRONGRANGE_MQH

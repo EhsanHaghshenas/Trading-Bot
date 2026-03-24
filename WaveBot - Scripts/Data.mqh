@@ -1,4 +1,3 @@
-
 #ifndef WAVEBOT_DATA_MQH
 #define WAVEBOT_DATA_MQH
 

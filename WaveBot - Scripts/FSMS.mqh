@@ -1,4 +1,3 @@
-
 // WaveBot/FSMS.mqh
 #ifndef WAVEBOT_FSMS_MQH
 #define WAVEBOT_FSMS_MQH

@@ -1,4 +1,3 @@
-
 #ifndef WAVEBOT_EXTLQ_MQH
 #define WAVEBOT_EXTLQ_MQH
 #include <WaveBot/Markers.mqh>

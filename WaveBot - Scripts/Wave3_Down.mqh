@@ -1,4 +1,3 @@
-
 #ifndef WAVEBOT_WAVE3_DOWN_MQH
 #define WAVEBOT_WAVE3_DOWN_MQH
 

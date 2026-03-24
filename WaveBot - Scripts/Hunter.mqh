@@ -1,4 +1,3 @@
-
 #ifndef WAVEBOT_HUNTER_MQH
 #define WAVEBOT_HUNTER_MQH
 
@@ -177,7 +176,7 @@ inline void Hunter_TryMarkIfValid(const MqlRates &rates[], const int n,
    g_marked_for_lq_u = true;
 
    // NEW (H4->M15 bridge): HWX is a START trigger (intrabar)
-   WB15_PublishStartHWX(InpSymbol, DIR_UP, rates[cross_idx].time);
+   WB15_PublishStartHWX(InpSymbol, DIR_UP, rates[cross_idx].time, ExtLQ_Get());
 
    // --- بذر SW را فعال کن (Highِ C1 هانتر)
    SW_UP_ActivateSeed(rates, n, c1_index, cross_idx);

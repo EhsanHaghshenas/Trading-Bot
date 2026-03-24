@@ -1,4 +1,3 @@
-
 // WaveBot/SWGate.mqh
 #ifndef WAVEBOT_SWGATE_MQH
 #define WAVEBOT_SWGATE_MQH
