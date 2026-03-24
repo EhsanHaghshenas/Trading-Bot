@@ -328,6 +328,111 @@ inline bool     Race_WorldHWBBSeen()  { return (g_world_hwbb_time > 0); }
 inline datetime Race_WorldHWBBTime()  { return g_world_hwbb_time; }
 // FSMS is an early (pre-HWBB) detector; in MIN world we stop it after the first HWBB is seen
 inline bool Race_ShouldAllowFSMS(){ return !(StringCompare(Markers_GetNamespace(),"MIN")==0 && Race_WorldHWBBSeen()); }
+// --------------------[ API execution / abort handoff ]--------------------
+// این state فقط runtime است و جزو snapshot world نیست.
+// هدف: وقتی MTC در میانه‌ی یک API scan رخ می‌دهد و همان‌جا nested-scan جدید
+// برای روند جدید launch می‌شود، invocation فعلیِ API باید بعد از بازگشت
+// فوراً terminate شود تا دیگر منطق روند قبلی ادامه پیدا نکند.
+#define RACE_API_EXEC_MAX 64
+
+static int g_race_api_exec_stack[RACE_API_EXEC_MAX];
+static int g_race_api_exec_size   = 0;
+static int g_race_api_exec_seq    = 0;
+
+static int g_race_api_abort_tokens[RACE_API_EXEC_MAX];
+static int g_race_api_abort_count = 0;
+
+inline int __Race_CurrentAPIToken()
+{
+   if(g_race_api_exec_size <= 0) return 0;
+   return g_race_api_exec_stack[g_race_api_exec_size - 1];
+}
+
+inline void __Race_RemoveAbortToken(const int token)
+{
+   if(token <= 0) return;
+
+   for(int i=0; i<g_race_api_abort_count; ++i)
+   {
+      if(g_race_api_abort_tokens[i] != token) continue;
+
+      for(int j=i+1; j<g_race_api_abort_count; ++j)
+         g_race_api_abort_tokens[j-1] = g_race_api_abort_tokens[j];
+
+      --g_race_api_abort_count;
+      break;
+   }
+}
+
+inline void __Race_RemoveExecToken(const int token)
+{
+   if(token <= 0) return;
+   if(g_race_api_exec_size <= 0) return;
+
+   for(int i=g_race_api_exec_size-1; i>=0; --i)
+   {
+      if(g_race_api_exec_stack[i] != token) continue;
+
+      for(int j=i+1; j<g_race_api_exec_size; ++j)
+         g_race_api_exec_stack[j-1] = g_race_api_exec_stack[j];
+
+      --g_race_api_exec_size;
+      break;
+   }
+}
+
+inline int Race_EnterAPIScan()
+{
+   ++g_race_api_exec_seq;
+   const int token = g_race_api_exec_seq;
+
+   if(g_race_api_exec_size < RACE_API_EXEC_MAX)
+      g_race_api_exec_stack[g_race_api_exec_size++] = token;
+
+   return token;
+}
+
+inline void Race_LeaveAPIScan(const int token)
+{
+   __Race_RemoveAbortToken(token);
+   __Race_RemoveExecToken(token);
+}
+
+inline void Race_RequestAbortCurrentAPIScan()
+{
+   const int token = __Race_CurrentAPIToken();
+   if(token <= 0) return;
+
+   for(int i=0; i<g_race_api_abort_count; ++i)
+      if(g_race_api_abort_tokens[i] == token)
+         return;
+
+   if(g_race_api_abort_count >= RACE_API_EXEC_MAX)
+      return;
+
+   g_race_api_abort_tokens[g_race_api_abort_count++] = token;
+}
+
+inline bool Race_ShouldAbortAPIScan(const int token)
+{
+   if(token <= 0) return false;
+
+   for(int i=0; i<g_race_api_abort_count; ++i)
+      if(g_race_api_abort_tokens[i] == token)
+         return true;
+
+   return false;
+}
+
+inline bool Race_ConsumeAbortAPIScan(const int token)
+{
+   if(!Race_ShouldAbortAPIScan(token))
+      return false;
+
+   __Race_RemoveAbortToken(token);
+   return true;
+}
+
 // --------------------[ Nested Scan Helpers (World-Aware) ]--------------------
 // ??? helper?? ???? ??????? ???????? ?? ?? ?? (?? ?? ???? RaceCoordinator ???????? ???????)
 // ?? ????? MIN? namespace/scan_id ?? ?? MAJ ????? ????? ? ?????? ?? ??????? ???? ????
@@ -666,6 +771,9 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
                   const bool __bump = __Race_IsMajorWorld();
                   Direction __prev_mode = g_race_mode;
 
+                  // current API invocation must stop after this regime handoff
+                  Race_RequestAbortCurrentAPIScan();
+
                   // IMPORTANT: nested scan must run with race unlocked
                   Race_InternalClearAll();
 
@@ -889,6 +997,9 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
                   datetime __to   = __Race_ScanToTime(rates, n);
                   const bool __bump = __Race_IsMajorWorld();
                   Direction __prev_mode = g_race_mode;
+
+                  // current API invocation must stop after this regime handoff
+                  Race_RequestAbortCurrentAPIScan();
 
                   Race_InternalClearAll();
 
@@ -1134,6 +1245,7 @@ inline void Race_SpecialRefBreak_MTC_Down(const MqlRates &rates[], const int n, 
 
    // 2) ??? ?? ???? ????? ??? ?????? ?? ???? ??
    Direction __prev_mode = g_race_mode;
+   Race_RequestAbortCurrentAPIScan();
    Race_InternalClearAll();
    SR_AllowOnly(DIR_DOWN);
    SW_UP_ClearSeed();
@@ -1167,6 +1279,7 @@ inline void Race_SpecialRefBreak_MTC_Up(const MqlRates &rates[], const int n, co
 
    // 2) ???????? ???
    Direction __prev_mode = g_race_mode;
+   Race_RequestAbortCurrentAPIScan();
    Race_InternalClearAll();
    SR_AllowOnly(DIR_UP);
    SW_DOWN_ClearSeed();

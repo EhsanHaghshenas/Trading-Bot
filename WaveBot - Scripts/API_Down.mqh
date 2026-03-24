@@ -138,6 +138,8 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
       __maj_scan_id = g_scan_id;
    }
 
+   const int __api_token = Race_EnterAPIScan();
+
    __API_InitExtLQ_ForScan_DN(init_ext, init_ext_price, init_ext_time);
 
    const int tfsec = PeriodSeconds(tf);
@@ -147,7 +149,12 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
    datetime from_adj = from_time - tfsec*10;
 
    MqlRates rates[]; int n = LoadRatesRange(sym, tf, from_adj, to_time, rates);
-   if(n<=0){ if(InpDebugPrints) Print("LoadRatesRange failed"); return 0; }
+   if(n<=0)
+   {
+      if(InpDebugPrints) Print("LoadRatesRange failed");
+      Race_LeaveAPIScan(__api_token);
+      return 0;
+   }
 
    double bodyLowEff[], bodyHighEff[]; BuildEffectiveBodies(rates, n, bodyLowEff, bodyHighEff);
    bool insideHL[];                   BuildInsideClusterFlagsHL(rates, n, insideHL);
@@ -202,8 +209,18 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
             FSMS_SW_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);   // NEW: parallel guard for FSMS–SW^
             WBWM_ProcessMinorStarterEvents(rates, n, i, to_time);
             HW_BB_DOWN_OnBar(rates[i], rates, n, i);
+            if(Race_ConsumeAbortAPIScan(__api_token))
+            {
+               Race_LeaveAPIScan(__api_token);
+               return pairs;
+            }
             
             Race_OnBar_DOWN(rates, insideHL, bodyLowEff, bodyHighEff, n, i);
+            if(Race_ConsumeAbortAPIScan(__api_token))
+            {
+               Race_LeaveAPIScan(__api_token);
+               return pairs;
+            }
             SR_Mitigator_OnBar_DOWN(rates, n, i);   // NEW
             SR_GoozBaghali_OnBar_DOWN(rates, n, i);
             if(insideHL[i]) continue;
@@ -217,6 +234,11 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
                FSMS_SW_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);   // NEW
                WBWM_ProcessMinorStarterEvents(rates, n, i, to_time);
                HW_BB_DOWN_OnBar(rates[i], rates, n, i);
+               if(Race_ConsumeAbortAPIScan(__api_token))
+               {
+                  Race_LeaveAPIScan(__api_token);
+                  return pairs;
+               }
                continue;
             }
             // C1W2 ??? ??? ??? ?? ??? ???? ???? FSMS ?? ?? C1Pre ??? ???????.
@@ -288,7 +310,17 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
             FSMS_SW_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, j);   // NEW: parallel guard for FSMS–SW
             WBWM_ProcessMinorStarterEvents(rates, n, j, to_time);
             Race_OnBar_DOWN(rates, insideHL, bodyLowEff, bodyHighEff, n, j);
+            if(Race_ConsumeAbortAPIScan(__api_token))
+            {
+               Race_LeaveAPIScan(__api_token);
+               return pairs;
+            }
             HW_BB_DOWN_OnBar(rates[j],rates, n, j);
+            if(Race_ConsumeAbortAPIScan(__api_token))
+            {
+               Race_LeaveAPIScan(__api_token);
+               return pairs;
+            }
             SR_Mitigator_OnBar_DOWN(rates, n, j);   // NEW
 
             SB_DN_OnBarCtx(rates, insideHL, n, cend, j);   // ShadowBreaker + temp-c1-sw
@@ -526,6 +558,7 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
    // NEW: ?? ?????? ????? ???? ???? ???? w2_minor ?? ?? ??? ??
    FSMS_SW_MinorLog_Dump();
 
+   Race_LeaveAPIScan(__api_token);
    return pairs;
 }
 
