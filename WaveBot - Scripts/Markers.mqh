@@ -7,9 +7,23 @@ extern int g_scan_id;  // defined in WaveBot.mq5
 // Empty => legacy behavior (no extra namespace).
 static string g_markers_ns = "";
 
+// Preview mode is used by WorldManager while a MIN session is still open.
+// In preview mode, logic is allowed to run, but chart objects and bridge side-effects
+// must stay silent until the session becomes stable/final.
+static bool   g_markers_preview_mode = false;
+
 // set/get world namespace (used later by WorldManager)
 inline void   Markers_SetNamespace(const string ns){ g_markers_ns = ns; }
 inline string Markers_GetNamespace(){ return g_markers_ns; }
+
+inline void Markers_SetPreviewMode(const bool enabled){ g_markers_preview_mode = enabled; }
+inline bool Markers_IsPreviewMode(){ return g_markers_preview_mode; }
+inline bool Markers_ShouldRender()
+{
+   if(!InpDrawMarkers) return false;
+   if(g_markers_preview_mode) return false;
+   return true;
+}
 
 // Scan prefix (unique per scan) + optional world namespace
 inline string __ScanPrefix()
@@ -21,8 +35,8 @@ inline string __ScanPrefix()
 
 void MarkV(const string name, const datetime t, const color col)
 {
-   if(!InpDrawMarkers) return;
-   const string full = __ScanPrefix() + name;        // NEW: namespaced
+   if(!Markers_ShouldRender()) return;
+   const string full = __ScanPrefix() + name;
    if(ObjectFind(0,full)!=-1) ObjectDelete(0,full);
    ObjectCreate(0,full,OBJ_VLINE,0,t,0);
    ObjectSetInteger(0,full,OBJPROP_COLOR,col);
@@ -37,11 +51,10 @@ void MarkCandleText(const string name,
                     const string   text,
                     const color    col)
 {
-   if(!InpDrawMarkers) return;
+   if(!Markers_ShouldRender()) return;
 
    const string full = __ScanPrefix() + name;
 
-   // فقط اگر همین نام قبلاً بوده، همان را حذف و دوباره رسم می‌کنیم
    if(ObjectFind(0, full) != -1)
       ObjectDelete(0, full);
 
@@ -61,7 +74,7 @@ void MarkCandleText(const string name,
 
 void ClearIfExists(const string name)
 {
-   const string full = __ScanPrefix() + name;        // NEW: namespaced
+   const string full = __ScanPrefix() + name;
    if(ObjectFind(0, full) != -1) ObjectDelete(0, full);
 }
 

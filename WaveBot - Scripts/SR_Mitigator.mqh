@@ -1,3 +1,4 @@
+
 // WaveBot/SR_Mitigator.mqh
 #ifndef WAVEBOT_SR_MITIGATOR_MQH
 #define WAVEBOT_SR_MITIGATOR_MQH
@@ -363,7 +364,7 @@ inline void SRMIT_ContextImport(const SRMITContext &ctx)
 // -------------------- Helpers --------------------
 inline void __SRMIT_DrawV(const string base, const datetime t)
 {
-   if(!InpDrawMarkers) return;
+   if(!Markers_ShouldRender()) return;
    const string nm = __ScanPrefix() + base;
    if(ObjectFind(0, nm) != -1) ObjectDelete(0, nm);
    ObjectCreate(0, nm, OBJ_VLINE, 0, t, 0.0);
@@ -375,7 +376,7 @@ inline void __SRMIT_DrawV(const string base, const datetime t)
 // خط افقی «بازه‌دار» (نه بی‌نهایت) از t1 تا t2 روی price
 inline void __SRMIT_DrawHSeg(const string base, const datetime t1, const double price, const datetime t2)
 {
-   if(!InpDrawMarkers) return;
+   if(!Markers_ShouldRender()) return;
    const string nm = __ScanPrefix() + base;
    if(ObjectFind(0, nm) != -1) ObjectDelete(0, nm);
    ObjectCreate(0, nm, OBJ_TREND, 0, t1, price, t2, price);
@@ -390,7 +391,7 @@ inline void __SRMIT_DrawUnmitRect(const string base,
                                   const datetime t1, const double p_top,
                                   const datetime t2, const double p_bottom)
 {
-   if(!InpDrawMarkers) return;
+   if(!Markers_ShouldRender()) return;
 
    datetime a = t1;
    datetime b = t2;
@@ -1159,8 +1160,3 @@ inline void SR_Mitigator_OnBar_DOWN(const MqlRates &rates[], const int n, const 
 }
 
 #endif // WAVEBOT_SR_MITIGATOR_MQH
-
-
-
-
-

@@ -1,3 +1,4 @@
+
 #ifndef WAVEBOT_FSMS_SW_MQH
 #define WAVEBOT_FSMS_SW_MQH
 
@@ -422,6 +423,8 @@ inline void FSMS_SW_Session_ForceCloseOpen(const int end_idx, const datetime end
       g_fsms_sw_sessions[i].open     = false;
       g_fsms_sw_sessions[i].off_idx  = end_idx;
       g_fsms_sw_sessions[i].off_time = end_time;
+      if(end_idx > g_fsms_sw_sessions[i].starter_idx)
+         g_fsms_sw_sessions[i].bars_between = (end_idx - g_fsms_sw_sessions[i].starter_idx);
 
       if(InpDebugPrints)
          Print("[FSMS–SESSION] Force-close open session #", g_fsms_sw_sessions[i].tag,
@@ -1563,6 +1566,38 @@ inline void __SW_Scan_UP_After_FSMS_D(const MqlRates &rates[], const bool &insid
 //  MinorOff detection: اولین عبور از سطوح زون مخالف بعد از MinorStarter
 //  + NEW: شمارش و شماره‌گذاری کندل‌ها بین MinorStarter_U/D و MinorOff_U/D
 // ============================================================================
+inline void FSMS_SW_DrawMinorSequenceArchive(const MqlRates &rates[],
+                                             const int n,
+                                             const Direction dir,
+                                             const string tag,
+                                             const int starter_idx,
+                                             const int off_idx)
+{
+   if(!InpDrawMarkers) return;
+   if(starter_idx < 0 || starter_idx >= n) return;
+   if(off_idx <= starter_idx) return;
+
+   int last = off_idx;
+   if(last >= n) last = n - 1;
+
+   int seq = 0;
+   for(int i = starter_idx + 1; i <= last; ++i)
+   {
+      const MqlRates r = rates[i];
+      double span = r.high - r.low;
+      if(span <= 0.0) span = 10.0 * _Point;
+      double pad = span * 0.25;
+      if(pad < 3.0 * _Point) pad = 3.0 * _Point;
+
+      double y = (dir == DIR_UP ? (r.high + pad) : (r.low - pad));
+      ++seq;
+
+      string base = (dir == DIR_UP ? "MinorSeq_U_" : "MinorSeq_D_");
+      string name = base + tag + "_" + IntegerToString(seq);
+      MarkCandleText(name, r.time, y, IntegerToString(seq), clrWhite);
+   }
+}
+
 inline void FSMS_SW_CheckMinorOff(const MqlRates &rates[], const int n, const int upto_j)
 {
    if(!g_minor_starter_u_active && !g_minor_starter_d_active)
@@ -1587,21 +1622,6 @@ inline void FSMS_SW_CheckMinorOff(const MqlRates &rates[], const int n, const in
       {
          ++g_minor_u_seq;
 
-         if(InpDrawMarkers)
-         {
-            double spanN = high - low;
-            if(spanN <= 0.0) spanN = 10.0 * _Point;
-            double padN = spanN * 0.25;
-            if(padN < 3.0 * _Point) padN = 3.0 * _Point;
-            double yN = high + padN;
-
-            string tagNum  = (g_minor_starter_u_tag == "" ? "0" : g_minor_starter_u_tag);
-            string nameNum = "MinorSeq_U_" + tagNum + "_" + IntegerToString(g_minor_u_seq);
-            string txtNum  = IntegerToString(g_minor_u_seq);
-
-            MarkCandleText(nameNum, r.time, yN, txtNum, clrWhite);
-         }
-
          bool crossed = false;
 
          if(g_minor_starter_u_LowW2_D > 0.0)
@@ -1625,6 +1645,8 @@ inline void FSMS_SW_CheckMinorOff(const MqlRates &rates[], const int n, const in
             double y = high + pad;
 
             string tag = (g_minor_starter_u_tag == "" ? "0" : g_minor_starter_u_tag);
+
+            FSMS_SW_DrawMinorSequenceArchive(rates, n, DIR_UP, tag, g_minor_starter_u_idx, j);
 
             if(InpDrawMarkers)
                MarkCandleText("MinorOff_U_" + tag, r.time, y, "MinorOff", clrRed);
@@ -1653,21 +1675,6 @@ inline void FSMS_SW_CheckMinorOff(const MqlRates &rates[], const int n, const in
       {
          ++g_minor_d_seq;
 
-         if(InpDrawMarkers)
-         {
-            double spanN = high - low;
-            if(spanN <= 0.0) spanN = 10.0 * _Point;
-            double padN = spanN * 0.25;
-            if(padN < 3.0 * _Point) padN = 3.0 * _Point;
-            double yN = r.low - padN;
-
-            string tagNum  = (g_minor_starter_d_tag == "" ? "0" : g_minor_starter_d_tag);
-            string nameNum = "MinorSeq_D_" + tagNum + "_" + IntegerToString(g_minor_d_seq);
-            string txtNum  = IntegerToString(g_minor_d_seq);
-
-            MarkCandleText(nameNum, r.time, yN, txtNum, clrWhite);
-         }
-
          bool crossed = false;
 
          if(g_minor_starter_d_HighW2_U > 0.0)
@@ -1691,6 +1698,8 @@ inline void FSMS_SW_CheckMinorOff(const MqlRates &rates[], const int n, const in
             double y = r.low - pad;
 
             string tag = (g_minor_starter_d_tag == "" ? "0" : g_minor_starter_d_tag);
+
+            FSMS_SW_DrawMinorSequenceArchive(rates, n, DIR_DOWN, tag, g_minor_starter_d_idx, j);
 
             if(InpDrawMarkers)
                MarkCandleText("MinorOff_D_" + tag, r.time, y, "MinorOff", clrRed);
@@ -2002,8 +2011,3 @@ inline void FSMS_SW_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
 }
 
 #endif // WAVEBOT_FSMS_SW_MQH
-
-
-
-
-

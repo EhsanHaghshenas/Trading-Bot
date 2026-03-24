@@ -1,3 +1,4 @@
+
 #ifndef WAVEBOT_WORLDMANAGER_MQH
 #define WAVEBOT_WORLDMANAGER_MQH
 
@@ -233,6 +234,7 @@ inline void WBWM_Init()
 
    FSMS_SW_RuntimeMinor_Clear();
    WBWM_MinorStop_Disarm();
+   Markers_SetPreviewMode(false);
 
    g_wbwm_inited = true;
 }
@@ -349,6 +351,7 @@ inline void WBWM_MinorSession_Deactivate()
    g_wbwm_minor_tag_suffix = "";
    WBWM_MinorStop_Disarm();
    FSMS_SW_RuntimeMinor_Clear();
+   Markers_SetPreviewMode(false);
 
    WBWM_ContextInit(g_wbwm_minor);
    g_wbwm_minor.markers_ns = "MIN";
@@ -371,9 +374,6 @@ inline void WBWM_DeleteMinorLiveOnlyObjects_CurrentScan()
    const string p    = __ScanPrefix();
    const int    plen = StringLen(p);
 
-   const bool race_live = Race_IsLocked();
-   const bool sb_live   = (SB_UP_BinaryPhaseActive() || SB_DN_BinaryPhaseActive());
-
    for(int i = ObjectsTotal(0) - 1; i >= 0; --i)
    {
       string on = ObjectName(0, i);
@@ -389,18 +389,11 @@ inline void WBWM_DeleteMinorLiveOnlyObjects_CurrentScan()
          StringFind(tail, "SRANGE_") == 0 ||
          StringFind(tail, "first_SR_mitigator_") == 0 ||
          StringFind(tail, "deepest_SR_mitigation_") == 0 ||
-         StringFind(tail, "unmitigated_SR_") == 0)
-      {
-         kill = true;
-      }
-      else if(race_live && StringFind(tail, "RACE_START_HWBB_") == 0)
-      {
-         kill = true;
-      }
-      else if(sb_live &&
-              (StringFind(tail, "SHADOW_BREAK_") == 0 ||
-               StringFind(tail, "temp-c1-sw_") == 0 ||
-               StringFind(tail, "invalidator_") == 0))
+         StringFind(tail, "unmitigated_SR_") == 0 ||
+         StringFind(tail, "RACE_START_HWBB_") == 0 ||
+         StringFind(tail, "SHADOW_BREAK_") == 0 ||
+         StringFind(tail, "temp-c1-sw_") == 0 ||
+         StringFind(tail, "invalidator_") == 0)
       {
          kill = true;
       }
@@ -437,6 +430,7 @@ inline void WBWM_FinalizeMinorArchive(const FSMS_SW_MinorSession &closed_s,
    g_wbwm_minor.markers_ns = "MIN";
    g_wbwm_minor.scan_id    = minor_scan_id;
    WBWM_ContextImport(g_wbwm_minor);
+   Markers_SetPreviewMode(false);
 
    WBWM_DeleteAllObjects_CurrentScan();
    __WBWM_ApplyMinorInitialExtLQ_NoDraw(closed_s);
@@ -467,6 +461,7 @@ inline void WBWM_FinalizeMinorArchive(const FSMS_SW_MinorSession &closed_s,
 
    FSMS_SW_RuntimeMinor_Clear();
    WBWM_DeleteMinorLiveOnlyObjects_CurrentScan();
+   Markers_SetPreviewMode(false);
 
    WBWM_ContextImport(g_wbwm_major);
    Markers_SetNamespace("MAJ");
@@ -596,6 +591,7 @@ inline void WBWM_ProcessMinorStarterEvents(const MqlRates &rates[],
       // Apply initial extLQ anchor for MIN logic (no draw)
       __WBWM_ApplyMinorInitialExtLQ_NoDraw(g_wbwm_minor_sess);
       FSMS_SW_RuntimeMinor_Set(g_wbwm_minor_sess);
+      Markers_SetPreviewMode(true);
 
       // Run MIN scan up to current candle (NO bump scan id)
       if(g_wbwm_minor_sess.dir == DIR_UP)
@@ -622,6 +618,8 @@ inline void WBWM_ProcessMinorStarterEvents(const MqlRates &rates[],
       }
 
       FSMS_SW_RuntimeMinor_Clear();
+      WBWM_DeleteAllObjects_CurrentScan();
+      Markers_SetPreviewMode(false);
 
       // Restore MAJ snapshot
       WBWM_ContextImport(g_wbwm_major);
@@ -633,8 +631,3 @@ inline void WBWM_ProcessMinorStarterEvents(const MqlRates &rates[],
 }
 
 #endif // WAVEBOT_WORLDMANAGER_MQH
-
-
-
-
-

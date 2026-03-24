@@ -1,3 +1,4 @@
+
 #ifndef WAVEBOT_RACECOORDINATOR_MQH
 #define WAVEBOT_RACECOORDINATOR_MQH
 
@@ -1183,6 +1184,3 @@ inline void Race_SpecialRefBreak_MTC_Up(const MqlRates &rates[], const int n, co
 }
 
 #endif // WAVEBOT_RACECOORDINATOR_MQH
-
-
-

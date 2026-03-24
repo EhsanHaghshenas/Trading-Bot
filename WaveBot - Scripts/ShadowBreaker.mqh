@@ -1,3 +1,4 @@
+
 // WaveBot/ShadowBreaker.mqh
 #ifndef WAVEBOT_SHADOWBREAKER_MQH
 #define WAVEBOT_SHADOWBREAKER_MQH
@@ -10,6 +11,7 @@
 // ---------- drawing helpers ----------
 inline void __SB_DrawV(const string base, const datetime t, const color col)
 {
+   if(!Markers_ShouldRender()) return;
    const string name = __ScanPrefix() + base;
    if(ObjectFind(0, name) != -1) ObjectDelete(0, name);
    ObjectCreate(0, name, OBJ_VLINE, 0, t, 0);
@@ -19,6 +21,7 @@ inline void __SB_DrawV(const string base, const datetime t, const color col)
 }
 inline void __SB_DrawTempC1(const string base, const datetime t)
 {
+   if(!Markers_ShouldRender()) return;
    const string name = __ScanPrefix() + base;
    if(ObjectFind(0, name) != -1) ObjectDelete(0, name);
    ObjectCreate(0, name, OBJ_VLINE, 0, t, 0);
@@ -28,6 +31,7 @@ inline void __SB_DrawTempC1(const string base, const datetime t)
 }
 inline void __SB_DrawInvalidator(const string base, const datetime t)
 {
+   if(!Markers_ShouldRender()) return;
    const string name = __ScanPrefix() + base;
    if(ObjectFind(0, name) != -1) ObjectDelete(0, name);
    ObjectCreate(0, name, OBJ_VLINE, 0, t, 0);

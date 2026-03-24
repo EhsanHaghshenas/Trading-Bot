@@ -1,3 +1,4 @@
+
 #ifndef WAVEBOT_API_MQH
 #define WAVEBOT_API_MQH
 
@@ -93,6 +94,30 @@ inline void __API_InitExtLQ_ForScan_UP(const bool enable, const double price, co
       ExtLQ_Set(price, t);
       Hunter_OnExtLQUpdated();
    }
+}
+
+inline void __API_DrawConfirmedPair_UP(const string tag,
+                                       const MqlRates &rates[],
+                                       const int c1, const int c2, const int c3, const int c4,
+                                       const int w3_c1, const int k2, const int k3, const int k4)
+{
+   if(!InpDrawMarkers) return;
+
+   W2_ClearTag(tag);
+   ClearIfExists("W3_" + tag + "_C1");
+   ClearIfExists("W3_" + tag + "_C2");
+   ClearIfExists("W3_" + tag + "_C3");
+   ClearIfExists("W3_" + tag + "_C4");
+
+   MarkV("W2_" + tag + "_C1", rates[c1].time, clrDeepSkyBlue);
+   MarkV("W2_" + tag + "_C2", rates[c2].time, clrDodgerBlue);
+   MarkV("W2_" + tag + "_C3", rates[c3].time, clrRoyalBlue);
+   if(c4 >= 0) MarkV("W2_" + tag + "_C4", rates[c4].time, clrBlue);
+
+   MarkV("W3_" + tag + "_C1", rates[w3_c1].time,  clrLime);
+   MarkV("W3_" + tag + "_C2", rates[k2].time,     clrSpringGreen);
+   MarkV("W3_" + tag + "_C3", rates[k3].time,     clrGreen);
+   if(k4 >= 0) MarkV("W3_" + tag + "_C4", rates[k4].time, clrDarkGreen);
 }
 
 // ???? ???? (UP): W2 -> WAIT_CONFIRM(W3) + Hunter + ExtLQ
@@ -221,17 +246,6 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
 
             string tag_num = IntegerToString(pairs+1);
             string tag = (tag_suffix=="" ? tag_num : (tag_num + tag_suffix));
-
-            if(InpDrawMarkers)
-            {
-               // NEW: clear old markers for this attempt (prevents orphan C4)
-               W2_ClearTag(tag);
-            
-               MarkV("W2_"+tag+"_C1", rates[c1].time, clrDeepSkyBlue);
-               MarkV("W2_"+tag+"_C2", rates[c2].time, clrDodgerBlue);
-               MarkV("W2_"+tag+"_C3", rates[c3].time, clrRoyalBlue);
-               if(c4 >= 0) MarkV("W2_"+tag+"_C4", rates[c4].time, clrBlue);
-            }
 
             if(InpDebugPrints) Print("#",tag," W2(UP) found @ ",T(rates[c1].time));
 
@@ -477,14 +491,8 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
 
             if(have_w3 && breakAchieved)
             {
-               if(InpDrawMarkers)
-               {
-                  MarkV("W3_"+tag+"_C1", rates[w3_c1].time,  clrLime);
-                  MarkV("W3_"+tag+"_C2", rates[k2].time,     clrSpringGreen);
-                  MarkV("W3_"+tag+"_C3", rates[k3].time,     clrGreen);
-                  if(k4>=0) MarkV("W3_"+tag+"_C4", rates[k4].time, clrDarkGreen);
-               }
-            
+               __API_DrawConfirmedPair_UP(tag, rates, c1, c2, c3, c4, w3_c1, k2, k3, k4);
+
                // ext lq ???? (UP)
                ExtLQ_Set(rates[w3_c1].low, rates[w3_c1].time);
                Hunter_OnExtLQUpdated();

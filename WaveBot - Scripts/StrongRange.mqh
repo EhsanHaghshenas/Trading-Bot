@@ -1,3 +1,4 @@
+
 // WaveBot/StrongRange.mqh
 #ifndef WAVEBOT_STRONGRANGE_MQH
 #define WAVEBOT_STRONGRANGE_MQH
@@ -77,7 +78,7 @@ inline void SR_ResetGlobals()
 inline void __SR_DrawRect(const string base, const datetime t1, const double p_top,
                           const datetime t2, const double p_bottom)
 {
-   if(!InpDrawMarkers) return;
+   if(!Markers_ShouldRender()) return;
 
    datetime a=t1, b=t2;
    if(b<a){ datetime tmp=a; a=b; b=tmp; }

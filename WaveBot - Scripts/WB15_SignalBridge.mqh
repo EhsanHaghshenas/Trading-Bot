@@ -1,3 +1,4 @@
+
 #ifndef WAVEBOT_WB15_SIGNAL_BRIDGE_MQH
 #define WAVEBOT_WB15_SIGNAL_BRIDGE_MQH
 
@@ -182,6 +183,16 @@ inline void WB15_MasterPushEvent(const string sym,
 {
    if(!__WB15_IsMaster()) return;
    if(t <= 0) return;
+   if(Markers_IsPreviewMode()) return;
+
+   const string kDed = __WB15_Key(sym, "DED_"
+                                       + IntegerToString(kind) + "_"
+                                       + IntegerToString(ns) + "_"
+                                       + IntegerToString(__WB15_DirCode(dir)) + "_"
+                                       + IntegerToString((int)t));
+   if(GlobalVariableCheck(kDed))
+      return;
+   GlobalVariableSet(kDed, 1.0);
 
    const string kSeq = __WB15_Key(sym, "SEQ");
    int seq = 0;
