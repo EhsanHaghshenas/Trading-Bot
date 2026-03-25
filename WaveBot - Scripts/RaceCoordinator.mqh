@@ -18,6 +18,18 @@
 #include <WaveBot/Hunter.mqh>      // for SW_UP_ClearSeed()
 #include <WaveBot/Hunter_Down.mqh> // for SW_DOWN_ClearSeed()
 
+inline ENUM_TIMEFRAMES __Race_RuntimeTF()
+{
+   ENUM_TIMEFRAMES tf = InpTF;
+   ENUM_TIMEFRAMES chart_tf = (ENUM_TIMEFRAMES)Period();
+
+   if(chart_tf == PERIOD_H4)      tf = PERIOD_H4;
+   else if(chart_tf == PERIOD_M15) tf = PERIOD_M15;
+
+   return tf;
+}
+
+
 //------------------------------ ????? ??? ?????? ------------------------------
 static bool      g_race_locked       = false;
 static Direction g_race_mode         = DIR_UP;   // Mode ????? ???? ??????
@@ -766,7 +778,8 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
 
                   // Compute scan window before clearing race state
                   const int __c1=(S.c1>=0?S.c1:g_race_hwbb_idx);
-                  datetime __from = rates[__c1].time - (PeriodSeconds(InpTF)*5);
+                  const ENUM_TIMEFRAMES runtime_tf = __Race_RuntimeTF();
+                  datetime __from = rates[__c1].time - (PeriodSeconds(runtime_tf)*5);
                   datetime __to   = __Race_ScanToTime(rates, n);
                   const bool __bump = __Race_IsMajorWorld();
                   Direction __prev_mode = g_race_mode;
@@ -783,7 +796,7 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
                   SWGate_ResetGlobals();
 
                   if(__prev_mode==DIR_UP)
-                     API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to,
+                     API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, runtime_tf, __from, __to,
                                                            false, 0.0, 0, "", __bump);
                }
                else
@@ -993,7 +1006,8 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
                   Race_DrawW2W3_MTC_Up(rates, n, S);
 
                   const int __c1=(S.c1>=0?S.c1:g_race_hwbb_idx);
-                  datetime __from = rates[__c1].time - (PeriodSeconds(InpTF)*5);
+                  const ENUM_TIMEFRAMES runtime_tf = __Race_RuntimeTF();
+                  datetime __from = rates[__c1].time - (PeriodSeconds(runtime_tf)*5);
                   datetime __to   = __Race_ScanToTime(rates, n);
                   const bool __bump = __Race_IsMajorWorld();
                   Direction __prev_mode = g_race_mode;
@@ -1008,7 +1022,7 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
                   SWGate_ResetGlobals();
 
                   if(__prev_mode==DIR_DOWN)
-                     API_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to,
+                     API_RunScanSequential_W2W3_Hunter(InpSymbol, runtime_tf, __from, __to,
                                                       false, 0.0, 0, "", __bump);
                }
                else
@@ -1255,9 +1269,10 @@ inline void Race_SpecialRefBreak_MTC_Down(const MqlRates &rates[], const int n, 
    const datetime __from = bt;
    const datetime __to   = __Race_ScanToTime(rates, n);
    const bool     __bump = __Race_IsMajorWorld();
+   const ENUM_TIMEFRAMES runtime_tf = __Race_RuntimeTF();
 
    if(__prev_mode == DIR_UP)
-      API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to,
+      API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, runtime_tf, __from, __to,
                                             false, 0.0, 0, "", __bump);
 }
 
@@ -1289,9 +1304,10 @@ inline void Race_SpecialRefBreak_MTC_Up(const MqlRates &rates[], const int n, co
    const datetime __from = bt;
    const datetime __to   = __Race_ScanToTime(rates, n);
    const bool     __bump = __Race_IsMajorWorld();
+   const ENUM_TIMEFRAMES runtime_tf = __Race_RuntimeTF();
 
    if(__prev_mode == DIR_DOWN)
-      API_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, __from, __to,
+      API_RunScanSequential_W2W3_Hunter(InpSymbol, runtime_tf, __from, __to,
                                        false, 0.0, 0, "", __bump);
 }
 

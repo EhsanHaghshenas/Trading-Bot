@@ -4,7 +4,7 @@
 // ============================================================================
 // WB15_SignalBridge.mqh
 // Simple live bridge H4 -> M15 using Terminal Global Variables.
-// H4 publishes START/STOP signals; M15 draws ON/OFF markers and counts candles.
+// H4 publishes START/STOP signals; M15 draws ON/OFF markers as an overlay.
 // ============================================================================
 
 // NOTE: This module is intentionally standalone (no extra includes).
@@ -41,10 +41,11 @@ struct WB15ActiveState
    int       start_evt_seq;
    double    run_id;
 
-   // Live M15 candle counting (online / candle-by-candle)
-   datetime  start_bar_time;       // exact M15 bar open time for the ON marker bar
-   datetime  last_count_bar_time;  // exact M15 bar open time of last numbered candle (initially = start_bar_time)
-   int       count;                // numbered candles count (candles strictly after ON and before OFF)
+   // Legacy counting fields are kept only for compatibility.
+   // Candle numbering is intentionally disabled on the M15 chart.
+   datetime  start_bar_time;
+   datetime  last_count_bar_time;
+   int       count;
 };
 
 static int             g_wb15_processed_seq = 0;
@@ -674,6 +675,22 @@ inline int __WB15_BarShiftM15Safe(const string sym, const datetime bar_time)
    return sh;
 }
 
+inline bool __WB15_CountsEnabled()
+{
+   return false;
+}
+
+inline void __WB15_DeleteAllCountLabels()
+{
+   for(int i = ObjectsTotal(0) - 1; i >= 0; --i)
+   {
+      string on = ObjectName(0, i);
+      if(on == "") continue;
+      if(StringFind(on, "WB15_CNT_") == 0)
+         ObjectDelete(0, on);
+   }
+}
+
 inline void __WB15_DrawCountLabel(const string sym,
                                  const double run_id,
                                  const int start_evt_seq,
@@ -681,6 +698,8 @@ inline void __WB15_DrawCountLabel(const string sym,
                                  const int num,
                                  const Direction dir)
 {
+   if(!__WB15_CountsEnabled()) return;
+
    double hi=0.0, lo=0.0;
    if(!__WB15_GetBarHL(sym, bar_time, hi, lo))
       return;
@@ -701,6 +720,7 @@ inline void __WB15_DeleteCountLabels(const double run_id,
                                     const int from_num,
                                     const int to_num)
 {
+   if(!__WB15_CountsEnabled()) return;
    if(from_num > to_num) return;
 
    for(int n = from_num; n <= to_num; ++n)
@@ -713,6 +733,7 @@ inline void __WB15_DeleteCountLabels(const double run_id,
 
 inline int __WB15_CountBarsExclusiveM15(const string sym, const datetime start_bar_time, const datetime stop_bar_time)
 {
+   if(!__WB15_CountsEnabled()) return 0;
    if(start_bar_time <= 0 || stop_bar_time <= 0) return 0;
 
    int sh_start = __WB15_BarShiftM15Safe(sym, start_bar_time);
@@ -731,6 +752,7 @@ inline int __WB15_CountBarsExclusiveM15(const string sym, const datetime start_b
 //   (i.e., stop before OFF candle).
 inline void __WB15_LiveCountAdvance(const string sym, const datetime until_exclusive_bar_time)
 {
+   if(!__WB15_CountsEnabled()) return;
    if(!g_wb15_state.active) return;
    if(g_wb15_state.start_bar_time <= 0) return;
 
@@ -782,6 +804,7 @@ inline void __WB15_DrawCountSequence(const string sym,
                                     const datetime to_t,
                                     const Direction dir)
 {
+   if(!__WB15_CountsEnabled()) return;
    if(to_t <= from_t) return;
 
    datetime start_bt = 0;
@@ -866,6 +889,8 @@ inline bool __WB15_ShouldStop(const WB15ActiveState &st, const int stop_kind, co
 
 inline void WB15_SlaveInit()
 {
+   __WB15_DeleteAllCountLabels();
+
    g_wb15_processed_seq = 0;
    g_wb15_run_seen      = 0.0;
 
@@ -940,7 +965,7 @@ inline void WB15_Slave_OnTimer(const string sym)
 
             // RE-ENTRY while already active:
             // finalize old count up to this new ON candle, then restart counting from here
-            if(g_wb15_state.active)
+            if(__WB15_CountsEnabled() && g_wb15_state.active)
             {
                if(g_wb15_state.start_bar_time > 0 && on_bar_time > 0 && on_bar_time >= g_wb15_state.start_bar_time)
                {
@@ -977,19 +1002,22 @@ inline void WB15_Slave_OnTimer(const string sym)
          {
             if(__WB15_ShouldStop(g_wb15_state, kind, ns, dir))
             {
-               // Resolve OFF candle open time on M15
-               datetime off_bar_time = 0;
-               if(__WB15_ResolveM15BarTime(sym, t, off_bar_time))
+               if(__WB15_CountsEnabled())
                {
-                  // Count candles up to (but NOT including) the OFF candle
-                  __WB15_LiveCountAdvance(sym, off_bar_time);
-
-                  // Cleanup any over-numbering beyond OFF
-                  int correct = __WB15_CountBarsExclusiveM15(sym, g_wb15_state.start_bar_time, off_bar_time);
-                  if(g_wb15_state.count > correct)
+                  // Resolve OFF candle open time on M15
+                  datetime off_bar_time = 0;
+                  if(__WB15_ResolveM15BarTime(sym, t, off_bar_time))
                   {
-                     __WB15_DeleteCountLabels(run_id, g_wb15_state.start_evt_seq, correct + 1, g_wb15_state.count);
-                     g_wb15_state.count = correct;
+                     // Count candles up to (but NOT including) the OFF candle
+                     __WB15_LiveCountAdvance(sym, off_bar_time);
+
+                     // Cleanup any over-numbering beyond OFF
+                     int correct = __WB15_CountBarsExclusiveM15(sym, g_wb15_state.start_bar_time, off_bar_time);
+                     if(g_wb15_state.count > correct)
+                     {
+                        __WB15_DeleteCountLabels(run_id, g_wb15_state.start_evt_seq, correct + 1, g_wb15_state.count);
+                        g_wb15_state.count = correct;
+                     }
                   }
                }
 
@@ -1003,8 +1031,8 @@ inline void WB15_Slave_OnTimer(const string sym)
       GlobalVariableSet(kPrc, (double)seq);
    }
 
-   // 2) Live candle-by-candle numbering while session is active (NO look-ahead)
-   if(g_wb15_state.active)
+   // 2) Candle numbering is intentionally disabled on M15.
+   if(__WB15_CountsEnabled() && g_wb15_state.active)
       __WB15_LiveCountAdvance(sym, 0);
 }
 

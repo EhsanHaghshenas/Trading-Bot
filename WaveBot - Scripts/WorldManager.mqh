@@ -21,6 +21,18 @@
 #include <WaveBot/SR_Mitigator.mqh>
 #include <WaveBot/SR_GoozBaghali.mqh>
 
+inline ENUM_TIMEFRAMES __WBWM_RuntimeTF()
+{
+   ENUM_TIMEFRAMES tf = InpTF;
+   ENUM_TIMEFRAMES chart_tf = (ENUM_TIMEFRAMES)Period();
+
+   if(chart_tf == PERIOD_H4)      tf = PERIOD_H4;
+   else if(chart_tf == PERIOD_M15) tf = PERIOD_M15;
+
+   return tf;
+}
+
+
 // ------------------------------------------------------------------
 // World snapshot (MAJ / MIN)
 // ------------------------------------------------------------------
@@ -435,9 +447,11 @@ inline void WBWM_FinalizeMinorArchive(const FSMS_SW_MinorSession &closed_s,
    __WBWM_ApplyMinorInitialExtLQ_NoDraw(closed_s);
    FSMS_SW_RuntimeMinor_Set(closed_s);
 
+   const ENUM_TIMEFRAMES runtime_tf = __WBWM_RuntimeTF();
+
    if(closed_s.dir == DIR_UP)
    {
-      API_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF,
+      API_RunScanSequential_W2W3_Hunter(InpSymbol, runtime_tf,
                                        closed_s.starter_time,
                                        final_to_time,
                                        true,
@@ -448,7 +462,7 @@ inline void WBWM_FinalizeMinorArchive(const FSMS_SW_MinorSession &closed_s,
    }
    else
    {
-      API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF,
+      API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, runtime_tf,
                                             closed_s.starter_time,
                                             final_to_time,
                                             true,
@@ -593,9 +607,11 @@ inline void WBWM_ProcessMinorStarterEvents(const MqlRates &rates[],
       Markers_SetPreviewMode(true);
 
       // Run MIN scan up to current candle (NO bump scan id)
+      const ENUM_TIMEFRAMES runtime_tf = __WBWM_RuntimeTF();
+
       if(g_wbwm_minor_sess.dir == DIR_UP)
       {
-         API_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF,
+         API_RunScanSequential_W2W3_Hunter(InpSymbol, runtime_tf,
                                           g_wbwm_minor_sess.starter_time,
                                           step_to_time,
                                           true,
@@ -606,7 +622,7 @@ inline void WBWM_ProcessMinorStarterEvents(const MqlRates &rates[],
       }
       else
       {
-         API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF,
+         API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, runtime_tf,
                                                g_wbwm_minor_sess.starter_time,
                                                step_to_time,
                                                true,

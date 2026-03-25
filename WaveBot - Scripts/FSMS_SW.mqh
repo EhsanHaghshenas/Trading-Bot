@@ -1572,6 +1572,9 @@ inline void FSMS_SW_DrawMinorSequenceArchive(const MqlRates &rates[],
                                              const int starter_idx,
                                              const int off_idx)
 {
+   // On the M15 chart no candle numbering should be shown anymore.
+   if((ENUM_TIMEFRAMES)Period() == PERIOD_M15) return;
+
    if(!InpDrawMarkers) return;
    if(starter_idx < 0 || starter_idx >= n) return;
    if(off_idx <= starter_idx) return;

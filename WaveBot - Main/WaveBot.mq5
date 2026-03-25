@@ -79,6 +79,31 @@ inline void __WB_ApplyHiddenVisualPolicies()
    ExtLQ_Down_DeleteAllVisuals_AllScans();
    Race_DeleteRefVisuals_AllScans();
 }
+
+inline void __WB_DeleteAllM15NumberingObjects()
+{
+   if((ENUM_TIMEFRAMES)Period() != PERIOD_M15) return;
+
+   for(int i = ObjectsTotal(0) - 1; i >= 0; --i)
+   {
+      string on = ObjectName(0, i);
+      if(on == "") continue;
+
+      bool kill = false;
+
+      if(StringFind(on, "WB15_CNT_") == 0)
+         kill = true;
+
+      if(!kill && StringFind(on, "MinorSeq_U_") >= 0)
+         kill = true;
+
+      if(!kill && StringFind(on, "MinorSeq_D_") >= 0)
+         kill = true;
+
+      if(kill)
+         ObjectDelete(0, on);
+   }
+}
 // ============================================================================
 // Minor session runner (Phase-1: Minor inside Major)
 // ============================================================================
@@ -201,11 +226,13 @@ inline void __WB_RunOneMinorSession(const FSMS_SW_MinorSession &s)
 
    // Run scan only in the default direction of the session
    // + init-extLQ from session + tagSuffix "_minor"
+   const ENUM_TIMEFRAMES tf = __WB_EffectiveTF();
+
    if(s.dir == DIR_UP)
-      API_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, from_time, to_time,
+      API_RunScanSequential_W2W3_Hunter(InpSymbol, tf, from_time, to_time,
                                         true, s.ext_init_price, s.ext_init_time, "_minor");
    else
-      API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, from_time, to_time,
+      API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, tf, from_time, to_time,
                                              true, s.ext_init_price, s.ext_init_time, "_minor");
 }
 
@@ -225,6 +252,7 @@ int OnInit()
    Markers_SetNamespace("MAJ");
    WBWM_Init();
    __WB_ApplyHiddenVisualPolicies();
+   __WB_DeleteAllM15NumberingObjects();
 
    // M15 Slave: start in idle mode and wait for Master signals
    if(g_role == WBROLE_SLAVE_M15)
@@ -233,7 +261,7 @@ int OnInit()
    EventSetTimer(g_role == WBROLE_SLAVE_M15 ? 1 : 2);
    return(INIT_SUCCEEDED);
 }
-void OnDeinit(const int reason){ __WB_ApplyHiddenVisualPolicies(); EventKillTimer(); }
+void OnDeinit(const int reason){ __WB_ApplyHiddenVisualPolicies(); __WB_DeleteAllM15NumberingObjects(); EventKillTimer(); }
 void OnTick(){}
 
 // --- One-shot ShadowBreaker scan (migrated from old OnStart) ---
@@ -245,9 +273,11 @@ void SB_RunOneShot()
    datetime start=0, stop=0;
    ResolveWindow(start, stop);  // ???? ???? ?? ??? ?? WaveBot.mq5 ???. :contentReference[oaicite:1]{index=1}
 
+   const ENUM_TIMEFRAMES tf = __WB_EffectiveTF();
+
    // ????? ???? ?? ?? ?? ???? Shadow Breaker ???? API ?? ????? ??????
-   int upPairs   = API_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, start, stop);
-   int downPairs = API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, InpTF, start, stop);
+   int upPairs   = API_RunScanSequential_W2W3_Hunter(InpSymbol, tf, start, stop);
+   int downPairs = API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, tf, start, stop);
 
    if(InpDebugPrints)
       Print("[SB] Scan done. Pairs UP=", upPairs, " | Pairs DOWN=", downPairs,
@@ -257,12 +287,10 @@ void SB_RunOneShot()
 // --- OnTimer: ??????? ????? + ????? ??? ?? Mode ????? + ????? Minor sessions ---
 void OnTimer()
 {
-   // SLAVE (M15): only run the simple bridge (no bootstrap / no wave scan)
+   // M15 keeps listening to the H4 bridge on every timer tick,
+   // but it also runs its own independent engine once on the M15 world.
    if(g_role == WBROLE_SLAVE_M15)
-   {
       WB15_Slave_OnTimer(InpSymbol);
-      return;
-   }
 
    // Major namespace (default world)
    Markers_SetNamespace("MAJ");
