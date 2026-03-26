@@ -1,4 +1,3 @@
-// WaveBot/FSMS.mqh
 #ifndef WAVEBOT_FSMS_MQH
 #define WAVEBOT_FSMS_MQH
 
@@ -12,51 +11,51 @@
 #include <WaveBot/FSMS_Lifecycle.mqh>
 #include <WaveBot/FSMS_SW.mqh>   // NEW: FSMS–SW
 
-// وضعیت داخلی: اسکن DOWN پس از W3-UP و برعکس
+// ????? ?????: ???? DOWN ?? ?? W3-UP ? ?????
 enum FSMSState { FSMS_SEARCH_W2=0, FSMS_WAIT_CONFIRM=1 };
 
 struct FSMSCtx
 {
-   // چارچوب کلی
-   bool     w3_seen;          // W3 قبلاً تایید شده؟
-   bool     c1_active;        // C1 هم‌جهت جاری فعال است؟
-   bool     fired;            // FSMS برای این W3 ثبت شده؟
-   datetime c1_time;          // زمان C1 هم‌جهت (از همین‌جا پایش شروع می‌شود)
-   int      c1_index;         // اندیس C1 هم‌جهت
-   int      idx;              // اندیس پیشروی حلقهٔ داخلی
+   // ?????? ???
+   bool     w3_seen;          // W3 ????? ????? ????
+   bool     c1_active;        // C1 ?????? ???? ???? ????
+   bool     fired;            // FSMS ???? ??? W3 ??? ????
+   datetime c1_time;          // ???? C1 ?????? (?? ??????? ???? ???? ??????)
+   int      c1_index;         // ????? C1 ??????
+   int      idx;              // ????? ?????? ????? ?????
    int      state;            // FSMS_SEARCH_W2 | FSMS_WAIT_CONFIRM
 
-   // موج۲ مخالف که دنبال آنیم
+   // ???? ????? ?? ????? ????
    int      c1,c2,c3,c4,cend;
 
-   // موج۳ مخالف
+   // ???? ?????
    bool     have_w3;
    int      w3_c1, k2,k3,k4, w3_end;
    int      w3_cand;
    double   w3_cand_low, w3_cand_high;
 
-   // مدیریت body-break (مسیر مخالف)
+   // ?????? body-break (???? ?????)
    bool     wickActive;
    int      firstWickIdx, wickBreakIdx;
    double   bodyBreakLevel;
    bool     breakAchieved;
    int      bodyBreakIdx;
 
-   // نگهبان پس از body-break تا تکمیل W3
+   // ?????? ?? ?? body-break ?? ????? W3
    bool     postBreak_c1_lock;
    int      postBreak_c1_ref;
 
-   // وفاداری به C1 موج۲ مخالف در پنجره‌ی FSMS (کاملاً مشابه C1Pre_* نرمال)
+   // ??????? ?? C1 ???? ????? ?? ??????? FSMS (?????? ????? C1Pre_* ?????)
    bool   prelock_active;
    int    prelock_idx;
-   double prelock_level;  // برای DOWN: L1(C1) | برای UP: H1(C1)
+   double prelock_level;  // ???? DOWN: L1(C1) | ???? UP: H1(C1)
    
-      // موج‌های هم‌جهت که FSMS بر اساس آن‌ها شکل گرفته
-   int      same_w3_c1_index;   // اندیس C1 موج۳ هم‌جهت (W3 اصلی)
-   datetime same_w3_c1_time;    // زمان C1 موج۳ هم‌جهت
+      // ??????? ?????? ?? FSMS ?? ???? ????? ??? ?????
+   int      same_w3_c1_index;   // ????? C1 ???? ?????? (W3 ????)
+   datetime same_w3_c1_time;    // ???? C1 ???? ??????
 };
 
-// دو زمینه: پس از W3-UP، اسکن DOWN ⇒ FSMS_U؛ پس از W3-DOWN، اسکن UP ⇒ FSMS_D
+// ?? ?????: ?? ?? W3-UP? ???? DOWN ? FSMS_U? ?? ?? W3-DOWN? ???? UP ? FSMS_D
 static FSMSCtx g_fsms_from_up;
 static FSMSCtx g_fsms_from_dn;
 
@@ -66,13 +65,16 @@ static int g_fsms_u_counter=0, g_fsms_d_counter=0;
 // ------------------------------
 struct FSMSContext
 {
-   // پس از W3-UP: اسکن موج‌های مخالف در جهت DOWN
+   // ?? ?? W3-UP: ???? ??????? ????? ?? ??? DOWN
    FSMSCtx from_up;
 
-   // پس از W3-DOWN: اسکن موج‌های مخالف در جهت UP
+   // ?? ?? W3-DOWN: ???? ??????? ????? ?? ??? UP
    FSMSCtx from_dn;
 
-   // شمارنده‌های مارکر برای دیباگ
+   // lifecycle ???? FSMS (???? ??? world?? snapshot ???)
+   FSMSLifecycleContext lc;
+
+   // ??????????? ????? ???? ?????
    int     u_counter;   // FSMS_U_*
    int     d_counter;   // FSMS_D_*
 };
@@ -96,7 +98,7 @@ inline void __FSMS_Reset(FSMSCtx &S)
    S.prelock_idx    = -1;
    S.prelock_level  = 0.0;
 
-   // NEW: ریست اطلاعات موج۳ هم‌جهت
+   // NEW: ???? ??????? ???? ??????
    S.same_w3_c1_index = -1;
    S.same_w3_c1_time  = 0;
 }
@@ -125,19 +127,9 @@ inline void __FSMS_ApplyLifecycleTransition()
    FSMSLC_PeekTerminal(owner, term_kind, term_time);
 
    if(owner == FSMSLC_OWNER_UP)
-   {
-      if(term_kind == FSMSLC_TERM_HWBB)
-         __FSMS_Reset(g_fsms_from_up);
-      else
-         __FSMS_ResetKeepW3(g_fsms_from_up);
-   }
+      __FSMS_Reset(g_fsms_from_up);
    else if(owner == FSMSLC_OWNER_DN)
-   {
-      if(term_kind == FSMSLC_TERM_HWBB)
-         __FSMS_Reset(g_fsms_from_dn);
-      else
-         __FSMS_ResetKeepW3(g_fsms_from_dn);
-   }
+      __FSMS_Reset(g_fsms_from_dn);
    else
    {
       __FSMS_Reset(g_fsms_from_up);
@@ -153,34 +145,37 @@ inline bool __FSMS_CanOpenAt(const datetime t)
    return FSMSLC_CanOpenAt(t);
 }
 
-// مقداردهی اولیهٔ یک کانتکست خالی (برای ساخت world جدید: ماژور/مینور)
+// ???????? ?????? ?? ??????? ???? (???? ???? world ????: ?????/?????)
 inline void FSMS_ContextInit(FSMSContext &ctx)
 {
    __FSMS_Reset(ctx.from_up);
    __FSMS_Reset(ctx.from_dn);
+   FSMSLC_ContextInit(ctx.lc);
    ctx.u_counter = 0;
    ctx.d_counter = 0;
 }
 
-// Export: کپی وضعیت فعلی globalها به داخل کانتکست
+// Export: ??? ????? ???? global?? ?? ???? ???????
 inline void FSMS_ContextExport(FSMSContext &ctx)
 {
    ctx.from_up   = g_fsms_from_up;
    ctx.from_dn   = g_fsms_from_dn;
+   FSMSLC_ContextExport(ctx.lc);
    ctx.u_counter = g_fsms_u_counter;
    ctx.d_counter = g_fsms_d_counter;
 }
 
-// Import: برگرداندن کانتکست ذخیره‌شده به متغیرهای global
+// Import: ????????? ??????? ????????? ?? ???????? global
 inline void FSMS_ContextImport(const FSMSContext &ctx)
 {
    g_fsms_from_up   = ctx.from_up;
    g_fsms_from_dn   = ctx.from_dn;
+   FSMSLC_ContextImport(ctx.lc);
    g_fsms_u_counter = ctx.u_counter;
    g_fsms_d_counter = ctx.d_counter;
 }
 
-// ریست کامل وضعیت FSMS در world فعلی
+// ???? ???? ????? FSMS ?? world ????
 inline void FSMS_ResetGlobals()
 {
    __FSMS_Reset(g_fsms_from_up);
@@ -197,7 +192,7 @@ inline void FSMS_DisarmAll()
    FSMSLC_ResetGlobals();
 }
 
-// --- مرحله 1: ثبت W3 (هنوز پایش FSMS شروع نمی‌شود)
+// --- ????? 1: ??? W3 (???? ???? FSMS ???? ???????)
 inline void FSMS_OnW3Confirmed_UP(const MqlRates &rates[], const int n, const int w3_c1_index)
 {
    datetime evt_t = TimeCurrent();
@@ -208,6 +203,8 @@ inline void FSMS_OnW3Confirmed_UP(const MqlRates &rates[], const int n, const in
       return;
 
    FSMS_DisarmAll();
+   FSMSLC_OnOpportunityOpen(DIR_UP, evt_t);
+
    g_fsms_from_up.w3_seen = true;
 
    if(w3_c1_index >= 0 && w3_c1_index < n)
@@ -232,6 +229,8 @@ inline void FSMS_OnW3Confirmed_DOWN(const MqlRates &rates[], const int n, const 
       return;
 
    FSMS_DisarmAll();
+   FSMSLC_OnOpportunityOpen(DIR_DOWN, evt_t);
+
    g_fsms_from_dn.w3_seen = true;
 
    if(w3_c1_index >= 0 && w3_c1_index < n)
@@ -246,7 +245,7 @@ inline void FSMS_OnW3Confirmed_DOWN(const MqlRates &rates[], const int n, const 
    }
 }
 
-// --- مرحله 2: اولین C1 موج۲ هم‌جهت ظاهر شد ⇒ آغـاز پنجرهٔ FSMS از همین کندل
+// --- ????? 2: ????? C1 ???? ?????? ???? ?? ? ????? ?????? FSMS ?? ???? ????
 inline void FSMS_OnSameDirC1_First_UP(const MqlRates &rates[], const int n, const int idx)
 {
    const int safe_idx = (idx>=0 && idx<n ? idx : 0);
@@ -255,7 +254,10 @@ inline void FSMS_OnSameDirC1_First_UP(const MqlRates &rates[], const int n, cons
    if(!__FSMS_CanOpenAt(evt_t))
       return;
 
-   // شروع تازه از C1 جدید؛ وضعیت W3 هم‌جهت را نگه می‌داریم
+   if(!FSMSLC_CanOwnerRearmAt(FSMSLC_OWNER_UP, evt_t))
+      return;
+
+   // ???? ???? ?? C1 ????? ????? W3 ?????? ?? ??? ????????
    const bool     was_w3        = g_fsms_from_up.w3_seen;
    const int      was_w3_c1_idx = g_fsms_from_up.same_w3_c1_index;
    const datetime was_w3_c1_t   = g_fsms_from_up.same_w3_c1_time;
@@ -285,6 +287,9 @@ inline void FSMS_OnSameDirC1_First_DOWN(const MqlRates &rates[], const int n, co
    if(!__FSMS_CanOpenAt(evt_t))
       return;
 
+   if(!FSMSLC_CanOwnerRearmAt(FSMSLC_OWNER_DN, evt_t))
+      return;
+
    const bool     was_w3        = g_fsms_from_dn.w3_seen;
    const int      was_w3_c1_idx = g_fsms_from_dn.same_w3_c1_index;
    const datetime was_w3_c1_t   = g_fsms_from_dn.same_w3_c1_time;
@@ -306,7 +311,7 @@ inline void FSMS_OnSameDirC1_First_DOWN(const MqlRates &rates[], const int n, co
    g_fsms_from_dn.prelock_level  = 0.0;
 }
 
-// --- مرحله 3: ابطال C1 هم‌جهت (re-anchor) ⇒ ریست و شروع از C1 جدید
+// --- ????? 3: ????? C1 ?????? (re-anchor) ? ???? ? ???? ?? C1 ????
 inline void FSMS_OnSameDirC1_Reanchor_UP(const MqlRates &rates[], const int n, const int i)
 {
    FSMS_OnSameDirC1_First_UP(rates,n,i);
@@ -317,13 +322,14 @@ inline void FSMS_OnSameDirC1_Reanchor_DOWN(const MqlRates &rates[], const int n,
    FSMS_OnSameDirC1_First_DOWN(rates,n,i);
 }
 
-// --- مرحله 3.5: ابطال W2/C1 هم‌جهت ⇒ پنجرهٔ FSMS از نو (در همان W3)
-// نکته: اگر FSMS برای همین W3 قبلاً فایر شده، «فایر بودن» حفظ می‌شود و re-arm نمی‌شویم.
+// --- ????? 3.5: ????? W2/C1 ?????? ? ?????? FSMS ?? ?? (?? ???? W3)
+// ????: ??? FSMS ???? ???? W3 ????? ???? ???? «???? ????» ??? ?????? ? re-arm ????????.
 
 inline void FSMS_OnSameDirW2Invalidated_UP()
 {
    __FSMS_ApplyLifecycleTransition();
    if(FSMSLC_HasPending()) return;
+   if(!FSMSLC_IsOwnerOpen(FSMSLC_OWNER_UP)) return;
 
    bool     fired_prev      = g_fsms_from_up.fired;
    bool     w3_prev         = g_fsms_from_up.w3_seen;
@@ -342,6 +348,7 @@ inline void FSMS_OnSameDirW2Invalidated_DOWN()
 {
    __FSMS_ApplyLifecycleTransition();
    if(FSMSLC_HasPending()) return;
+   if(!FSMSLC_IsOwnerOpen(FSMSLC_OWNER_DN)) return;
 
    bool     fired_prev      = g_fsms_from_dn.fired;
    bool     w3_prev         = g_fsms_from_dn.w3_seen;
@@ -356,7 +363,7 @@ inline void FSMS_OnSameDirW2Invalidated_DOWN()
    g_fsms_from_dn.same_w3_c1_time  = w3_c1_prev_time;
 }
 
-// مارک‌ها
+// ???????
 inline void __FSMS_Mark_UP(const datetime t)
 {
    ++g_fsms_u_counter;
@@ -380,13 +387,13 @@ inline void __FSMS_Mark_DN(const datetime t)
    WB15_PublishStartFSMS_MAJONLY(InpSymbol, DIR_DOWN, t);
 }
 
-// --- NEW: Text روی C1 موج۲ و C1 موج۳ هم‌جهتِ منبع FSMS (UP) ---
+// --- NEW: Text ??? C1 ???? ? C1 ???? ??????? ???? FSMS (UP) ---
 inline void __FSMS_DrawSourceTexts_UP(const MqlRates &rates[], const int n,
                                       const FSMSCtx &S, const int fsms_id)
 {
    if(!InpDrawMarkers) return;
 
-   // C1 موج۲ هم‌جهت (W2 اصلی که بعداً FSMS را فعال می‌کند)
+   // C1 ???? ?????? (W2 ???? ?? ????? FSMS ?? ???? ??????)
    if(S.c1_index >= 0 && S.c1_index < n)
    {
       const MqlRates r = rates[S.c1_index];
@@ -400,7 +407,7 @@ inline void __FSMS_DrawSourceTexts_UP(const MqlRates &rates[], const int n,
       MarkCandleText(name, r.time, y, "FSMS_W2", clrYellow);
    }
 
-   // C1 موج۳ هم‌جهت (W3 اصلیِ قبل از FSMS)
+   // C1 ???? ?????? (W3 ????? ??? ?? FSMS)
    if(S.same_w3_c1_index >= 0 && S.same_w3_c1_index < n)
    {
       const MqlRates r2 = rates[S.same_w3_c1_index];
@@ -415,13 +422,13 @@ inline void __FSMS_DrawSourceTexts_UP(const MqlRates &rates[], const int n,
    }
 }
 
-// --- NEW: Text روی C1 موج۲ و موج۳ هم‌جهتِ منبع FSMS (DOWN) ---
+// --- NEW: Text ??? C1 ???? ? ???? ??????? ???? FSMS (DOWN) ---
 inline void __FSMS_DrawSourceTexts_DN(const MqlRates &rates[], const int n,
                                       const FSMSCtx &S, const int fsms_id)
 {
    if(!InpDrawMarkers) return;
 
-   // C1 موج۲ هم‌جهت (جفت نزولی)
+   // C1 ???? ?????? (??? ?????)
    if(S.c1_index >= 0 && S.c1_index < n)
    {
       const MqlRates r = rates[S.c1_index];
@@ -435,7 +442,7 @@ inline void __FSMS_DrawSourceTexts_DN(const MqlRates &rates[], const int n,
       MarkCandleText(name, r.time, y, "FSMS_W2", clrYellow);
    }
 
-   // C1 موج۳ هم‌جهت (W3 نزولی منبع FSMS_D)
+   // C1 ???? ?????? (W3 ????? ???? FSMS_D)
    if(S.same_w3_c1_index >= 0 && S.same_w3_c1_index < n)
    {
       const MqlRates r2 = rates[S.same_w3_c1_index];
@@ -450,7 +457,7 @@ inline void __FSMS_DrawSourceTexts_DN(const MqlRates &rates[], const int n,
    }
 }
 
-// کمک‌کارهای اکسترمای موضعی (با اسکیپ inside)
+// ?????????? ???????? ????? (?? ????? inside)
 inline int __LeftmostMaxHigh_ExInside(const MqlRates &rates[], const bool &insideHL[], const int from, const int to){
    if(from>to) return -1; double mx=-DBL_MAX; int idx=-1;
    for(int i=from;i<=to;++i){ if(insideHL[i]) continue; if(rates[i].high>mx){mx=rates[i].high; idx=i;} }
@@ -462,7 +469,7 @@ inline int __LeftmostMinLow_ExInside(const MqlRates &rates[], const bool &inside
    if(idx<0) idx=from; return idx;
 }
 
-// --- حلقهٔ اصلی پایش: حتماً قبل از HWBB صدا بزنید ---
+// --- ????? ???? ????: ????? ??? ?? HWBB ??? ????? ---
 inline void FSMS_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
                           const double &bodyLowEff[], const double &bodyHighEff[],
                           const int n, const int upto_j)
@@ -470,10 +477,11 @@ inline void FSMS_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
    if(n <= 0 || upto_j < 0 || upto_j >= n) return;
 
    __FSMS_ApplyLifecycleTransition();
-   if(!FSMSLC_CanOpenAt(rates[upto_j].time)) return;
+   if(!FSMSLC_HasOpenOpportunity()) return;
 
-   // ===== پس از W3-UP: دنبال DOWN (FSMS_U) وقتی C1-UP فعال است =====
-   if(g_fsms_from_up.w3_seen && g_fsms_from_up.c1_active && !g_fsms_from_up.fired)
+   // ===== ?? ?? W3-UP: ????? DOWN (FSMS_U) ???? C1-UP ???? ??? =====
+   if(FSMSLC_CanOwnerScanAt(FSMSLC_OWNER_UP, rates[upto_j].time) &&
+      g_fsms_from_up.w3_seen && g_fsms_from_up.c1_active && !g_fsms_from_up.fired)
    {
       FSMSCtx S=g_fsms_from_up;
       if(upto_j>=0 && upto_j<n && rates[upto_j].time >= S.c1_time)
@@ -489,7 +497,7 @@ inline void FSMS_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
                   if(insideHL[i]) continue;
                   int i2=-1,i3=-1,i4=-1;
          
-                  // --- FSMS pre-lock for C1 (DOWN) — عینا مثل C1Pre_DN -------------------
+                  // --- FSMS pre-lock for C1 (DOWN) — ???? ??? C1Pre_DN -------------------
                   if(!S.prelock_active)
                   {
                      S.prelock_active = true;
@@ -500,11 +508,11 @@ inline void FSMS_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
                   {
                      if(i == S.prelock_idx)
                      {
-                        // همان C1 قبلی؛ مجاز به بررسی هستیم
+                        // ???? C1 ????? ???? ?? ????? ?????
                      }
                      else if(i > S.prelock_idx)
                      {
-                        // فقط اگر Low جدید، L1 قبلی را بشکند ⇒ C1 جدید
+                        // ??? ??? Low ????? L1 ???? ?? ????? ? C1 ????
                         if(rates[i].low < S.prelock_level)
                         {
                            S.prelock_idx   = i;
@@ -512,14 +520,14 @@ inline void FSMS_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
                         }
                         else
                         {
-                           // وفاداری به C1 قبلی ⇒ این i اصلا کاندید C1 نیست
+                           // ??????? ?? C1 ???? ? ??? i ???? ?????? C1 ????
                            continue;
                         }
                      }
                      else
                      {
-                        // i < prelock_idx در عمل نباید رخ دهد (حلقه رو به جلو)؛
-                        // برای ایمنی، ردش می‌کنیم
+                        // i < prelock_idx ?? ??? ????? ?? ??? (???? ?? ?? ???)?
+                        // ???? ?????? ??? ???????
                         continue;
                      }
                   }
@@ -529,18 +537,18 @@ inline void FSMS_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
 
                   S.c1=i; S.c2=i2; S.c3=i3; S.c4=i4; S.cend=(S.c4>=0?S.c4:S.c3);
 
-                  // ریست وضعیت W3 (DOWN)
+                  // ???? ????? W3 (DOWN)
                   S.have_w3=false; S.w3_c1=-1; S.k2=S.k3=S.k4=-1; S.w3_end=-1;
                   S.w3_cand=-1;   S.w3_cand_high=-DBL_MAX;
 
-                  // مدیریت بریک با بدنه (DOWN)
+                  // ?????? ???? ?? ???? (DOWN)
                   S.wickActive=false; S.firstWickIdx=-1; S.wickBreakIdx=-1;
                   S.bodyBreakLevel=rates[S.c1].low; S.breakAchieved=false; S.bodyBreakIdx=-1;
 
                   S.postBreak_c1_lock=false; S.postBreak_c1_ref=-1;
 
                   S.idx=S.cend; S.state=FSMS_WAIT_CONFIRM;
-                  S.prelock_active = false;  // NEW: قفل FSMS تا تکلیف این W2 مشخص شود
+                  S.prelock_active = false;  // NEW: ??? FSMS ?? ????? ??? W2 ???? ???
                   found=true; break;
                }
                if(!found){ S.idx=limit+1; break; }
@@ -583,7 +591,7 @@ inline void FSMS_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
                           S.idx  = __rew; 
                           S.state= FSMS_SEARCH_W2; 
                      
-                          // --- NEW: ریست کامل prelock برای پنجره‌ی بعدی FSMS ---
+                          // --- NEW: ???? ???? prelock ???? ??????? ???? FSMS ---
                           S.prelock_active = false;
                           S.prelock_idx    = -1;
                           S.prelock_level  = 0.0;
@@ -602,14 +610,14 @@ inline void FSMS_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
                      { S.have_w3=false; S.w3_end=-1; S.k2=S.k3=S.k4=-1; S.w3_c1=-1; S.w3_cand=j; S.w3_cand_high=rates[j].high; continue; }
                   }
 
-                  // direct-path anchor: بزرگ‌ترین High پس از cend
+                  // direct-path anchor: ????????? High ?? ?? cend
                   if(!S.wickActive)
                   {
                      if(j>=S.cend && (S.w3_cand<0 || rates[j].high > S.w3_cand_high))
                      { S.w3_cand=j; S.w3_cand_high=rates[j].high; S.have_w3=false; }
                   }
 
-                  // شمارش W3 (DOWN)
+                  // ????? W3 (DOWN)
                   int startIdx=-1;
                   if(S.w3_c1>=0) startIdx=S.w3_c1; else if(S.w3_cand>=0) startIdx=S.w3_cand;
                   if(!S.have_w3 && startIdx>=0 && !insideHL[startIdx])
@@ -619,7 +627,7 @@ inline void FSMS_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
                      { S.have_w3=true; if(S.w3_c1<0) S.w3_c1=startIdx; S.k2=a2; S.k3=a3; S.k4=a4; S.w3_end=w3e; }
                   }
 
-                  // نگهبان: تغییر C1_W3 بعد از body-break ⇒ ابطال W2
+                  // ??????: ????? C1_W3 ??? ?? body-break ? ????? W2
                   if(S.breakAchieved && !S.have_w3)
                   {
                      int c1n=(S.w3_c1>=0?S.w3_c1:S.w3_cand);
@@ -629,7 +637,7 @@ inline void FSMS_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
                         S.idx   = (S.bodyBreakIdx>=0 ? S.bodyBreakIdx : j); 
                         S.state = FSMS_SEARCH_W2;
                   
-                        // --- NEW: ریست کامل prelock این پنجره ---
+                        // --- NEW: ???? ???? prelock ??? ????? ---
                         S.prelock_active = false;
                         S.prelock_idx    = -1;
                         S.prelock_level  = 0.0;
@@ -641,7 +649,7 @@ inline void FSMS_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
 
                   }
 
-                  // پس از body-break تا قبل از پایان W3: H > H(C1_W3) ⇒ ابطال W2
+                  // ?? ?? body-break ?? ??? ?? ????? W3: H > H(C1_W3) ? ????? W2
                   if(S.breakAchieved && !S.have_w3)
                   {
                      int c1e=(S.w3_c1>=0?S.w3_c1:S.w3_cand);
@@ -653,23 +661,23 @@ inline void FSMS_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
                      progressed=true; break; }
                   }
 
-                  // نهایی: اولین جفتِ DOWN با body-break ⇒ FSMS_U
+                  // ?????: ????? ???? DOWN ?? body-break ? FSMS_U
                   if(S.have_w3 && S.breakAchieved)
                   {
                      datetime bt = rates[(S.bodyBreakIdx>=0 ? S.bodyBreakIdx : j)].time;
 
-                     // بذر FSMS–SW (UP) بر اساس C1 موج۲ + C1 موج۳ هم‌جهت منبع FSMS
+                     // ??? FSMS–SW (UP) ?? ???? C1 ???? + C1 ???? ?????? ???? FSMS
                      FSMS_SW_UP_ActivateSeed(rates, n,
-                                             S.c1_index,          // C1 موج۲ اصلی
-                                             S.same_w3_c1_index,  // C1 موج۳ اصلی
+                                             S.c1_index,          // C1 ???? ????
+                                             S.same_w3_c1_index,  // C1 ???? ????
                                              bt);
 
-                     // مارکر FSMS_U روی کندل FSMS
+                     // ????? FSMS_U ??? ???? FSMS
                      __FSMS_Mark_UP(bt);
 
-                     // از این به بعد FSMS_W2 / FSMS_W3 دیگر روی چارت نمایش داده نمی‌شوند؛
-                     // فقط در لحظه‌ای که همین FSMS به FSMS_Minor تبدیل شد،
-                     // Textهای C1_W2_Minor_* و C1_W3_Minor_* در FSMS_SW رسم خواهند شد.
+                     // ?? ??? ?? ??? FSMS_W2 / FSMS_W3 ???? ??? ???? ????? ???? ?????????
+                     // ??? ?? ??????? ?? ???? FSMS ?? FSMS_Minor ????? ???
+                     // Text??? C1_W2_Minor_* ? C1_W3_Minor_* ?? FSMS_SW ??? ?????? ??.
 
                      S.fired      = true;
                      S.c1_active  = false;
@@ -684,8 +692,9 @@ inline void FSMS_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
       g_fsms_from_up=S;
    }
 
-   // ===== پس از W3-DOWN: دنبال UP (FSMS_D) وقتی C1-DN فعال است =====
-   if(g_fsms_from_dn.w3_seen && g_fsms_from_dn.c1_active && !g_fsms_from_dn.fired)
+   // ===== ?? ?? W3-DOWN: ????? UP (FSMS_D) ???? C1-DN ???? ??? =====
+   if(FSMSLC_CanOwnerScanAt(FSMSLC_OWNER_DN, rates[upto_j].time) &&
+      g_fsms_from_dn.w3_seen && g_fsms_from_dn.c1_active && !g_fsms_from_dn.fired)
    {
       FSMSCtx S=g_fsms_from_dn;
       if(upto_j>=0 && upto_j<n && rates[upto_j].time >= S.c1_time)
@@ -701,7 +710,7 @@ inline void FSMS_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
                   if(insideHL[i]) continue;
                   int i2=-1,i3=-1,i4=-1;
 
-                  // --- FSMS pre-lock for C1 (UP) — عینا مثل C1Pre_UP --------------------
+                  // --- FSMS pre-lock for C1 (UP) — ???? ??? C1Pre_UP --------------------
                   if(!S.prelock_active)
                   {
                      S.prelock_active = true;
@@ -712,11 +721,11 @@ inline void FSMS_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
                   {
                      if(i == S.prelock_idx)
                      {
-                        // همان C1 قبلی
+                        // ???? C1 ????
                      }
                      else if(i > S.prelock_idx)
                      {
-                        // فقط اگر High جدید، H1 قبلی را بشکند ⇒ C1 جدید
+                        // ??? ??? High ????? H1 ???? ?? ????? ? C1 ????
                         if(rates[i].high > S.prelock_level)
                         {
                            S.prelock_idx   = i;
@@ -724,13 +733,13 @@ inline void FSMS_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
                         }
                         else
                         {
-                           // وفاداری به C1 قبلی
+                           // ??????? ?? C1 ????
                            continue;
                         }
                      }
                      else
                      {
-                        // i < prelock_idx ⇒ برای ایمنی رد می‌کنیم
+                        // i < prelock_idx ? ???? ????? ?? ???????
                         continue;
                      }
                   }
@@ -749,7 +758,7 @@ inline void FSMS_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
                   S.postBreak_c1_lock=false; S.postBreak_c1_ref=-1;
 
                   S.idx=S.cend; S.state=FSMS_WAIT_CONFIRM;
-                  S.prelock_active = false;  // NEW: قفل FSMS تا تکلیف این W2 مشخص شود
+                  S.prelock_active = false;  // NEW: ??? FSMS ?? ????? ??? W2 ???? ???
                   found=true; break;
                }
                if(!found){ S.idx=limit+1; break; }
@@ -802,14 +811,14 @@ inline void FSMS_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
                      { S.have_w3=false; S.w3_end=-1; S.k2=S.k3=S.k4=-1; S.w3_cand=j; S.w3_cand_low=rates[j].low; S.w3_c1=-1; continue; }
                   }
 
-                  // direct-path anchor: کمترین Low پس از cend
+                  // direct-path anchor: ?????? Low ?? ?? cend
                   if(!S.wickActive)
                   {
                      if(j>=S.cend && (S.w3_cand<0 || rates[j].low < S.w3_cand_low))
                      { S.w3_cand=j; S.w3_cand_low=rates[j].low; S.have_w3=false; }
                   }
 
-                  // شمارش W3 (UP)
+                  // ????? W3 (UP)
                   int startIdx=-1;
                   if(S.w3_c1>=0) startIdx=S.w3_c1; else if(S.w3_cand>=0) startIdx=S.w3_cand;
                   if(!S.have_w3 && startIdx>=0 && !insideHL[startIdx])
@@ -819,7 +828,7 @@ inline void FSMS_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
                      { S.have_w3=true; if(S.w3_c1<0) S.w3_c1=startIdx; S.k2=a2; S.k3=a3; S.k4=a4; S.w3_end=w3e; }
                   }
 
-                  // نگهبان: تغییر C1_W3 بعد از body-break ⇒ ابطال W2
+                  // ??????: ????? C1_W3 ??? ?? body-break ? ????? W2
                   if(S.breakAchieved && !S.have_w3)
                   {
                      int c1n=(S.w3_c1>=0?S.w3_c1:S.w3_cand);
@@ -832,7 +841,7 @@ inline void FSMS_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
                      progressed=true; break; }
                   }
 
-                  // پس از body-break تا قبل از پایان W3: L < L(C1_W3) ⇒ ابطال W2
+                  // ?? ?? body-break ?? ??? ?? ????? W3: L < L(C1_W3) ? ????? W2
                   if(S.breakAchieved && !S.have_w3)
                   {
                      int c1e=(S.w3_c1>=0?S.w3_c1:S.w3_cand);
@@ -844,21 +853,21 @@ inline void FSMS_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
                      progressed=true; break; }
                   }
 
-                  // نهایی: اولین جفتِ UP با body-break ⇒ FSMS_D
+                  // ?????: ????? ???? UP ?? body-break ? FSMS_D
                   if(S.have_w3 && S.breakAchieved)
                   {
                      datetime bt = rates[(S.bodyBreakIdx>=0 ? S.bodyBreakIdx : j)].time;
 
-                     // بذر FSMS–SW (DOWN) بر اساس C1 موج۲ + C1 موج۳ هم‌جهت منبع FSMS
+                     // ??? FSMS–SW (DOWN) ?? ???? C1 ???? + C1 ???? ?????? ???? FSMS
                      FSMS_SW_DN_ActivateSeed(rates, n,
-                                             S.c1_index,          // C1 موج۲ اصلی نزولی
-                                             S.same_w3_c1_index,  // C1 موج۳ اصلی نزولی
+                                             S.c1_index,          // C1 ???? ???? ?????
+                                             S.same_w3_c1_index,  // C1 ???? ???? ?????
                                              bt);
 
-                     // مارکر FSMS_D
+                     // ????? FSMS_D
                      __FSMS_Mark_DN(bt);
 
-                     // هیچ Text با نام FSMS_W2 / FSMS_W3 دیگر رسم نمی‌شود
+                     // ??? Text ?? ??? FSMS_W2 / FSMS_W3 ???? ??? ???????
 
                      S.fired      = true;
                      S.c1_active  = false;
@@ -875,3 +884,4 @@ inline void FSMS_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
 }
 
 #endif // WAVEBOT_FSMS_MQH
+

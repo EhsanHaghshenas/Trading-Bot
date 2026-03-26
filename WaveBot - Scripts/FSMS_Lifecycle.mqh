@@ -1,5 +1,4 @@
-// WaveBot/FSMS_Lifecycle.mqh
-#ifndef WAVEBOT_FSMS_LIFECYCLE_MQH
+﻿#ifndef WAVEBOT_FSMS_LIFECYCLE_MQH
 #define WAVEBOT_FSMS_LIFECYCLE_MQH
 
 #include <WaveBot/Types.mqh>
@@ -22,22 +21,24 @@ enum FSMSLCTerminalKind
 
 struct FSMSLifecycleContext
 {
-   bool     pending;
+   bool     pending;           // ???? ????? ???? ?? ????? W3 ????????
    int      owner;
-   datetime formed_time;
+   datetime open_time;         // ???? W3 ???????? (???? ???? FSMS)
+   datetime formed_time;       // ???? ????? FSMS? ?? ??? ?? ????? = 0
 
    int      terminal_kind;
    datetime terminal_time;
 
-   datetime resume_after_time;
+   datetime resume_after_time; // ???? ??????? ?? ?????? ???? ??? ???? ????? terminal
 };
 
-static bool     g_fsmslc_pending          = false;
-static int      g_fsmslc_owner            = FSMSLC_OWNER_NONE;
-static datetime g_fsmslc_formed_time      = 0;
-static int      g_fsmslc_terminal_kind    = FSMSLC_TERM_NONE;
-static datetime g_fsmslc_terminal_time    = 0;
-static datetime g_fsmslc_resume_after_time= 0;
+static bool     g_fsmslc_pending           = false;
+static int      g_fsmslc_owner             = FSMSLC_OWNER_NONE;
+static datetime g_fsmslc_open_time         = 0;
+static datetime g_fsmslc_formed_time       = 0;
+static int      g_fsmslc_terminal_kind     = FSMSLC_TERM_NONE;
+static datetime g_fsmslc_terminal_time     = 0;
+static datetime g_fsmslc_resume_after_time = 0;
 
 inline int __FSMSLC_OwnerFromDir(const Direction dir)
 {
@@ -48,6 +49,7 @@ inline void FSMSLC_ContextInit(FSMSLifecycleContext &ctx)
 {
    ctx.pending           = false;
    ctx.owner             = FSMSLC_OWNER_NONE;
+   ctx.open_time         = 0;
    ctx.formed_time       = 0;
    ctx.terminal_kind     = FSMSLC_TERM_NONE;
    ctx.terminal_time     = 0;
@@ -58,6 +60,7 @@ inline void FSMSLC_ContextExport(FSMSLifecycleContext &ctx)
 {
    ctx.pending           = g_fsmslc_pending;
    ctx.owner             = g_fsmslc_owner;
+   ctx.open_time         = g_fsmslc_open_time;
    ctx.formed_time       = g_fsmslc_formed_time;
    ctx.terminal_kind     = g_fsmslc_terminal_kind;
    ctx.terminal_time     = g_fsmslc_terminal_time;
@@ -68,6 +71,7 @@ inline void FSMSLC_ContextImport(const FSMSLifecycleContext &ctx)
 {
    g_fsmslc_pending           = ctx.pending;
    g_fsmslc_owner             = ctx.owner;
+   g_fsmslc_open_time         = ctx.open_time;
    g_fsmslc_formed_time       = ctx.formed_time;
    g_fsmslc_terminal_kind     = ctx.terminal_kind;
    g_fsmslc_terminal_time     = ctx.terminal_time;
@@ -78,13 +82,21 @@ inline void FSMSLC_ResetGlobals()
 {
    g_fsmslc_pending           = false;
    g_fsmslc_owner             = FSMSLC_OWNER_NONE;
+   g_fsmslc_open_time         = 0;
    g_fsmslc_formed_time       = 0;
    g_fsmslc_terminal_kind     = FSMSLC_TERM_NONE;
    g_fsmslc_terminal_time     = 0;
    g_fsmslc_resume_after_time = 0;
 }
 
+// pending ?? ??? ????? ??? ???? true ????????? ?? ??? FSMS ????? ??? ????
+// ? ???? lifecycle ???? ???? ???? ???? ????.
 inline bool FSMSLC_HasPending()
+{
+   return (g_fsmslc_pending && g_fsmslc_formed_time > 0);
+}
+
+inline bool FSMSLC_HasOpenOpportunity()
 {
    return g_fsmslc_pending;
 }
@@ -92,6 +104,11 @@ inline bool FSMSLC_HasPending()
 inline int FSMSLC_Owner()
 {
    return g_fsmslc_owner;
+}
+
+inline datetime FSMSLC_OpenTime()
+{
+   return g_fsmslc_open_time;
 }
 
 inline datetime FSMSLC_FormedTime()
@@ -104,24 +121,99 @@ inline datetime FSMSLC_ResumeAfterTime()
    return g_fsmslc_resume_after_time;
 }
 
+// ??? ??????? ??? ??? ???? «???? ????» ?? ?? W3 ???? ??? ????
 inline bool FSMSLC_CanOpenAt(const datetime t)
 {
-   if(g_fsmslc_pending) return false;
    if(g_fsmslc_resume_after_time > 0 && t > 0 && t <= g_fsmslc_resume_after_time)
       return false;
    return true;
 }
 
-inline void FSMSLC_OnFormed(const Direction dir, const datetime formed_time)
+inline bool FSMSLC_IsOwnerOpen(const int owner)
 {
-   if(formed_time <= 0) return;
+   if(!g_fsmslc_pending) return false;
+   if(owner == FSMSLC_OWNER_NONE) return false;
+   return (g_fsmslc_owner == owner);
+}
+
+// ??? owner ???????? ?? ??? ???? ????/??????? ??????? C1 ????
+// ??? ?? ??? ?? ????? FSMS ? ?? ???? terminal ?????? ????.
+inline bool FSMSLC_CanOwnerRearmAt(const int owner, const datetime t)
+{
+   if(!FSMSLC_IsOwnerOpen(owner)) return false;
+   if(g_fsmslc_formed_time > 0)   return false;
+
+   if(g_fsmslc_open_time > 0 && t > 0 && t < g_fsmslc_open_time)
+      return false;
+
+   if(g_fsmslc_resume_after_time > 0 && t > 0 && t <= g_fsmslc_resume_after_time)
+      return false;
+
+   if(g_fsmslc_terminal_kind != FSMSLC_TERM_NONE &&
+      g_fsmslc_terminal_time > 0 &&
+      t > 0 &&
+      t >= g_fsmslc_terminal_time)
+      return false;
+
+   return true;
+}
+
+// ??? owner ???????? ?? ??? ???? ???? ????/???? ????
+// ??? ?? ????? FSMS ?? true ??????? ?? terminal ???? ???? ????.
+inline bool FSMSLC_CanOwnerScanAt(const int owner, const datetime t)
+{
+   if(!FSMSLC_IsOwnerOpen(owner)) return false;
+
+   if(g_fsmslc_open_time > 0 && t > 0 && t < g_fsmslc_open_time)
+      return false;
+
+   if(g_fsmslc_resume_after_time > 0 && t > 0 && t <= g_fsmslc_resume_after_time)
+      return false;
+
+   if(g_fsmslc_terminal_kind != FSMSLC_TERM_NONE &&
+      g_fsmslc_terminal_time > 0 &&
+      t > 0 &&
+      t >= g_fsmslc_terminal_time)
+      return false;
+
+   return true;
+}
+
+// ?????? ???? ????? ??? ?? W3 ?????????? ????
+inline void FSMSLC_OnOpportunityOpen(const Direction dir, const datetime open_time)
+{
+   if(open_time <= 0) return;
+   if(!FSMSLC_CanOpenAt(open_time)) return;
 
    g_fsmslc_pending           = true;
    g_fsmslc_owner             = __FSMSLC_OwnerFromDir(dir);
-   g_fsmslc_formed_time       = formed_time;
+   g_fsmslc_open_time         = open_time;
+   g_fsmslc_formed_time       = 0;
    g_fsmslc_terminal_kind     = FSMSLC_TERM_NONE;
    g_fsmslc_terminal_time     = 0;
-   g_fsmslc_resume_after_time = 0;
+}
+
+// ??? ????? FSMS ??? ???? ???? ??? ?? terminal ???/??????? ?????? ????
+inline void FSMSLC_OnFormed(const Direction dir, const datetime formed_time)
+{
+   if(!g_fsmslc_pending) return;
+   if(formed_time <= 0)  return;
+
+   const int owner = __FSMSLC_OwnerFromDir(dir);
+   if(g_fsmslc_owner != owner) return;
+
+   if(g_fsmslc_open_time > 0 && formed_time < g_fsmslc_open_time)
+      return;
+
+   if(g_fsmslc_resume_after_time > 0 && formed_time <= g_fsmslc_resume_after_time)
+      return;
+
+   if(g_fsmslc_terminal_kind != FSMSLC_TERM_NONE &&
+      g_fsmslc_terminal_time > 0 &&
+      g_fsmslc_terminal_time <= formed_time)
+      return;
+
+   g_fsmslc_formed_time = formed_time;
 }
 
 inline void FSMSLC_RequestTerminal(const int terminal_kind, const datetime terminal_time)
@@ -129,7 +221,9 @@ inline void FSMSLC_RequestTerminal(const int terminal_kind, const datetime termi
    if(!g_fsmslc_pending) return;
    if(terminal_kind == FSMSLC_TERM_NONE) return;
    if(terminal_time <= 0) return;
-   if(g_fsmslc_formed_time > 0 && terminal_time < g_fsmslc_formed_time) return;
+
+   if(g_fsmslc_open_time > 0 && terminal_time < g_fsmslc_open_time)
+      return;
 
    if(g_fsmslc_terminal_kind == FSMSLC_TERM_NONE ||
       g_fsmslc_terminal_time <= 0 ||
@@ -143,7 +237,9 @@ inline void FSMSLC_RequestTerminal(const int terminal_kind, const datetime termi
 
 inline bool FSMSLC_HasTerminalRequest()
 {
-   return (g_fsmslc_pending && g_fsmslc_terminal_kind != FSMSLC_TERM_NONE && g_fsmslc_terminal_time > 0);
+   return (g_fsmslc_pending &&
+           g_fsmslc_terminal_kind != FSMSLC_TERM_NONE &&
+           g_fsmslc_terminal_time > 0);
 }
 
 inline void FSMSLC_PeekTerminal(int &owner, int &terminal_kind, datetime &terminal_time)
@@ -163,6 +259,7 @@ inline void FSMSLC_FinishTerminal(const datetime resume_after)
 {
    g_fsmslc_pending           = false;
    g_fsmslc_owner             = FSMSLC_OWNER_NONE;
+   g_fsmslc_open_time         = 0;
    g_fsmslc_formed_time       = 0;
    g_fsmslc_resume_after_time = resume_after;
    g_fsmslc_terminal_kind     = FSMSLC_TERM_NONE;
@@ -170,3 +267,5 @@ inline void FSMSLC_FinishTerminal(const datetime resume_after)
 }
 
 #endif // WAVEBOT_FSMS_LIFECYCLE_MQH
+
+

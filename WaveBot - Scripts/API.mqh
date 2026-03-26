@@ -221,8 +221,7 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
             SR_GoozBaghali_OnBar_UP(rates, n, i);
             FSMS_SW_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);   // NEW: parallel guard for FSMS–SW
             WBWM_ProcessMinorStarterEvents(rates, n, i, to_time);
-            if(Race_ShouldAllowFSMS())
-               FSMS_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);
+            FSMS_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);
             if(insideHL[i]) continue;
             
             bool __reanched = false;
@@ -239,8 +238,7 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
                SR_GoozBaghali_OnBar_UP(rates, n, i);
                FSMS_SW_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);   // NEW
                WBWM_ProcessMinorStarterEvents(rates, n, i, to_time);
-               if(Race_ShouldAllowFSMS())
-                  FSMS_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);
+               FSMS_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);
                continue;
             }
             // ????: C1W2 ??? ??? ??? ?? ??? ???? ???? ???? FSMS ?? ?? ?? ??? ????????.
@@ -328,8 +326,7 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
             SR_GoozBaghali_OnBar_UP(rates, n, j);
             FSMS_SW_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, j);   // NEW: parallel guard for FSMS–SW
             WBWM_ProcessMinorStarterEvents(rates, n, j, to_time);
-            if(Race_ShouldAllowFSMS())
-               FSMS_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, j);
+            FSMS_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, j);
             
             // --- NEW: Chain invalidation after ShadowBreaker (UP) -----------------
             if(SB_UP_InvalidatorReady())
