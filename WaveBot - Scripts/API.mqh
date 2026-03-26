@@ -204,17 +204,13 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
             }
 
             ExtLQ_OnBar(rates[i]);
-            if(Race_ShouldAllowFSMS())
-               FSMS_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);
-            FSMS_SW_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);   // NEW: parallel guard for FSMS–SW
-            WBWM_ProcessMinorStarterEvents(rates, n, i, to_time);
-            HW_BB_UP_OnBar(rates[i], rates, n, i);   // NEW (???? ???? ??? ?? ?? Seed ???? ??????)
+            HW_BB_UP_OnBar(rates[i], rates, n, i);   // NEW (???? ???? ??? ?? ?? Seed ??????)
             if(Race_ConsumeAbortAPIScan(__api_token))
             {
                Race_LeaveAPIScan(__api_token);
                return pairs;
             }
-            
+
             Race_OnBar_UP(rates, insideHL, bodyLowEff, bodyHighEff, n, i);
             if(Race_ConsumeAbortAPIScan(__api_token))
             {
@@ -223,22 +219,28 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
             }
             SR_Mitigator_OnBar_UP(rates, n, i);   // NEW
             SR_GoozBaghali_OnBar_UP(rates, n, i);
+            FSMS_SW_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);   // NEW: parallel guard for FSMS–SW
+            WBWM_ProcessMinorStarterEvents(rates, n, i, to_time);
+            if(Race_ShouldAllowFSMS())
+               FSMS_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);
             if(insideHL[i]) continue;
             
             bool __reanched = false;
             if(!C1W2_UP_ShouldAllowAt(rates, i, __reanched))
             {
                ExtLQ_OnBar(rates[i]);
-               if(Race_ShouldAllowFSMS())
-                  FSMS_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);
-               FSMS_SW_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);   // NEW
-               WBWM_ProcessMinorStarterEvents(rates, n, i, to_time);
                HW_BB_UP_OnBar(rates[i], rates, n, i);
                if(Race_ConsumeAbortAPIScan(__api_token))
                {
                   Race_LeaveAPIScan(__api_token);
                   return pairs;
                }
+               SR_Mitigator_OnBar_UP(rates, n, i);
+               SR_GoozBaghali_OnBar_UP(rates, n, i);
+               FSMS_SW_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);   // NEW
+               WBWM_ProcessMinorStarterEvents(rates, n, i, to_time);
+               if(Race_ShouldAllowFSMS())
+                  FSMS_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);
                continue;
             }
             // ????: C1W2 ??? ??? ??? ?? ??? ???? ???? ???? FSMS ?? ?? ?? ??? ????????.
@@ -308,17 +310,13 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
             ExtLQ_OnBar(rates[j]);
             if(Hunter_IsExtLQCross(rates[j]))
                Hunter_TryMarkIfValid(rates, n, c1, j);
-            if(Race_ShouldAllowFSMS())
-               FSMS_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, j);
-            FSMS_SW_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, j);   // NEW: parallel guard for FSMS–SW
-            WBWM_ProcessMinorStarterEvents(rates, n, j, to_time);
-            Race_OnBar_UP(rates, insideHL, bodyLowEff, bodyHighEff, n, j);
+            HW_BB_UP_OnBar(rates[j],rates, n, j);
             if(Race_ConsumeAbortAPIScan(__api_token))
             {
                Race_LeaveAPIScan(__api_token);
                return pairs;
             }
-            HW_BB_UP_OnBar(rates[j],rates, n, j);
+            Race_OnBar_UP(rates, insideHL, bodyLowEff, bodyHighEff, n, j);
             if(Race_ConsumeAbortAPIScan(__api_token))
             {
                Race_LeaveAPIScan(__api_token);
@@ -328,6 +326,10 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
 
             SB_UP_OnBarCtx(rates, insideHL, n, cend, j);   // ShadowBreaker + temp-c1-sw
             SR_GoozBaghali_OnBar_UP(rates, n, j);
+            FSMS_SW_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, j);   // NEW: parallel guard for FSMS–SW
+            WBWM_ProcessMinorStarterEvents(rates, n, j, to_time);
+            if(Race_ShouldAllowFSMS())
+               FSMS_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, j);
             
             // --- NEW: Chain invalidation after ShadowBreaker (UP) -----------------
             if(SB_UP_InvalidatorReady())

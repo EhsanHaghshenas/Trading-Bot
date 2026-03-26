@@ -339,7 +339,7 @@ inline bool Race_IsLocked() { return g_race_locked; }
 inline bool     Race_WorldHWBBSeen()  { return (g_world_hwbb_time > 0); }
 inline datetime Race_WorldHWBBTime()  { return g_world_hwbb_time; }
 // FSMS is an early (pre-HWBB) detector; in MIN world we stop it after the first HWBB is seen
-inline bool Race_ShouldAllowFSMS(){ return !(StringCompare(Markers_GetNamespace(),"MIN")==0 && Race_WorldHWBBSeen()); }
+inline bool Race_ShouldAllowFSMS(){ return !g_race_locked; }
 // --------------------[ API execution / abort handoff ]--------------------
 // این state فقط runtime است و جزو snapshot world نیست.
 // هدف: وقتی MTC در میانه‌ی یک API scan رخ می‌دهد و همان‌جا nested-scan جدید

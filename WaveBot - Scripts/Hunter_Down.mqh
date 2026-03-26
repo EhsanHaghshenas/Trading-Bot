@@ -5,6 +5,7 @@
 #include <WaveBot/ExtLQ_Down.mqh>
 #include <WaveBot/Utils.mqh>
 #include <WaveBot/RaceCoordinator.mqh>
+#include <WaveBot/FSMS_Lifecycle.mqh>
 #include <WaveBot/SWGate.mqh>
 
 // ---------------- Hunter (DOWN) state ----------------
@@ -172,6 +173,8 @@ inline void Hunter_Down_TryMarkIfValid(const MqlRates &rates[], const int n,
       MarkV("HW_"+tag+"_X",  rates[cross_idx].time, clrMagenta);
    }
    g_marked_for_lq_d = true;
+
+   FSMSLC_RequestTerminal(FSMSLC_TERM_HWX, rates[cross_idx].time);
 
    // NEW (H4->M15 bridge): HWX is a START trigger (intrabar)
    WB15_PublishStartHWX(InpSymbol, DIR_DOWN, rates[cross_idx].time, ExtLQ_Down_Get());

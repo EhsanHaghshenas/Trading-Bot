@@ -887,6 +887,26 @@ inline bool __WB15_ShouldStop(const WB15ActiveState &st, const int stop_kind, co
    return false;
 }
 
+inline bool __WB15_ShouldAutoStopOnNewStart(const WB15ActiveState &st,
+                                            const int new_kind,
+                                            const int new_ns)
+{
+   if(!st.active) return false;
+   if(st.start_kind != WB15_KIND_START_FSMS) return false;
+
+   if(new_kind != WB15_KIND_START_HWX && new_kind != WB15_KIND_START_HWBB)
+      return false;
+
+   if(st.start_ns == WB15_NS_MAJ)
+      return (new_ns == WB15_NS_MAJ);
+
+   if(st.start_ns == WB15_NS_MIN)
+      return (new_ns == WB15_NS_MIN || new_ns == WB15_NS_MAJ);
+
+   return false;
+}
+
+
 inline void WB15_SlaveInit()
 {
    __WB15_DeleteAllCountLabels();
@@ -962,6 +982,29 @@ inline void WB15_Slave_OnTimer(const string sym)
             datetime on_bar_time = 0;
             if(!__WB15_ResolveM15BarTime(sym, t, on_bar_time))
                on_bar_time = t;
+
+            // FSMS lifecycle mirror on M15:
+            // a fresh HWX/HWBB start closes the currently active FSMS session first.
+            if(__WB15_ShouldAutoStopOnNewStart(g_wb15_state, kind, ns))
+            {
+               if(__WB15_CountsEnabled())
+               {
+                  if(g_wb15_state.start_bar_time > 0 && on_bar_time > 0 && on_bar_time >= g_wb15_state.start_bar_time)
+                  {
+                     __WB15_LiveCountAdvance(sym, on_bar_time);
+
+                     int correct = __WB15_CountBarsExclusiveM15(sym, g_wb15_state.start_bar_time, on_bar_time);
+                     if(g_wb15_state.count > correct)
+                     {
+                        __WB15_DeleteCountLabels(run_id, g_wb15_state.start_evt_seq, correct + 1, g_wb15_state.count);
+                        g_wb15_state.count = correct;
+                     }
+                  }
+               }
+
+               __WB15_DrawSignalMarker(sym, run_id, i, t, false, g_wb15_state.start_dir, 0, 0);
+               g_wb15_state.active = false;
+            }
 
             // RE-ENTRY while already active:
             // finalize old count up to this new ON candle, then restart counting from here

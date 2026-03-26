@@ -9,6 +9,7 @@
 #include <WaveBot/Wave2_Down.mqh>
 #include <WaveBot/Wave3_Down.mqh>
 #include <WaveBot/W2W3_ChainInvalidation.mqh>
+#include <WaveBot/FSMS_Lifecycle.mqh>
 #include <WaveBot/FSMS_SW.mqh>   // NEW: FSMS–SW
 
 // وضعیت داخلی: اسکن DOWN پس از W3-UP و برعکس
@@ -99,6 +100,59 @@ inline void __FSMS_Reset(FSMSCtx &S)
    S.same_w3_c1_index = -1;
    S.same_w3_c1_time  = 0;
 }
+
+inline void __FSMS_ResetKeepW3(FSMSCtx &S)
+{
+   const bool     had_w3  = S.w3_seen;
+   const int      w3_idx  = S.same_w3_c1_index;
+   const datetime w3_time = S.same_w3_c1_time;
+
+   __FSMS_Reset(S);
+
+   S.w3_seen          = had_w3;
+   S.same_w3_c1_index = w3_idx;
+   S.same_w3_c1_time  = w3_time;
+}
+
+inline void __FSMS_ApplyLifecycleTransition()
+{
+   if(!FSMSLC_HasTerminalRequest())
+      return;
+
+   int owner = FSMSLC_OWNER_NONE;
+   int term_kind = FSMSLC_TERM_NONE;
+   datetime term_time = 0;
+   FSMSLC_PeekTerminal(owner, term_kind, term_time);
+
+   if(owner == FSMSLC_OWNER_UP)
+   {
+      if(term_kind == FSMSLC_TERM_HWBB)
+         __FSMS_Reset(g_fsms_from_up);
+      else
+         __FSMS_ResetKeepW3(g_fsms_from_up);
+   }
+   else if(owner == FSMSLC_OWNER_DN)
+   {
+      if(term_kind == FSMSLC_TERM_HWBB)
+         __FSMS_Reset(g_fsms_from_dn);
+      else
+         __FSMS_ResetKeepW3(g_fsms_from_dn);
+   }
+   else
+   {
+      __FSMS_Reset(g_fsms_from_up);
+      __FSMS_Reset(g_fsms_from_dn);
+   }
+
+   FSMSLC_FinishTerminal(term_time);
+}
+
+inline bool __FSMS_CanOpenAt(const datetime t)
+{
+   __FSMS_ApplyLifecycleTransition();
+   return FSMSLC_CanOpenAt(t);
+}
+
 // مقداردهی اولیهٔ یک کانتکست خالی (برای ساخت world جدید: ماژور/مینور)
 inline void FSMS_ContextInit(FSMSContext &ctx)
 {
@@ -133,13 +187,26 @@ inline void FSMS_ResetGlobals()
    __FSMS_Reset(g_fsms_from_dn);
    g_fsms_u_counter = 0;
    g_fsms_d_counter = 0;
+   FSMSLC_ResetGlobals();
 }
 
-inline void FSMS_DisarmAll(){ __FSMS_Reset(g_fsms_from_up); __FSMS_Reset(g_fsms_from_dn); }
+inline void FSMS_DisarmAll()
+{
+   __FSMS_Reset(g_fsms_from_up);
+   __FSMS_Reset(g_fsms_from_dn);
+   FSMSLC_ResetGlobals();
+}
 
 // --- مرحله 1: ثبت W3 (هنوز پایش FSMS شروع نمی‌شود)
 inline void FSMS_OnW3Confirmed_UP(const MqlRates &rates[], const int n, const int w3_c1_index)
 {
+   datetime evt_t = TimeCurrent();
+   if(w3_c1_index >= 0 && w3_c1_index < n)
+      evt_t = rates[w3_c1_index].time;
+
+   if(!__FSMS_CanOpenAt(evt_t))
+      return;
+
    FSMS_DisarmAll();
    g_fsms_from_up.w3_seen = true;
 
@@ -157,6 +224,13 @@ inline void FSMS_OnW3Confirmed_UP(const MqlRates &rates[], const int n, const in
 
 inline void FSMS_OnW3Confirmed_DOWN(const MqlRates &rates[], const int n, const int w3_c1_index)
 {
+   datetime evt_t = TimeCurrent();
+   if(w3_c1_index >= 0 && w3_c1_index < n)
+      evt_t = rates[w3_c1_index].time;
+
+   if(!__FSMS_CanOpenAt(evt_t))
+      return;
+
    FSMS_DisarmAll();
    g_fsms_from_dn.w3_seen = true;
 
@@ -175,6 +249,12 @@ inline void FSMS_OnW3Confirmed_DOWN(const MqlRates &rates[], const int n, const 
 // --- مرحله 2: اولین C1 موج۲ هم‌جهت ظاهر شد ⇒ آغـاز پنجرهٔ FSMS از همین کندل
 inline void FSMS_OnSameDirC1_First_UP(const MqlRates &rates[], const int n, const int idx)
 {
+   const int safe_idx = (idx>=0 && idx<n ? idx : 0);
+   const datetime evt_t = (n>0 ? rates[safe_idx].time : TimeCurrent());
+
+   if(!__FSMS_CanOpenAt(evt_t))
+      return;
+
    // شروع تازه از C1 جدید؛ وضعیت W3 هم‌جهت را نگه می‌داریم
    const bool     was_w3        = g_fsms_from_up.w3_seen;
    const int      was_w3_c1_idx = g_fsms_from_up.same_w3_c1_index;
@@ -187,8 +267,8 @@ inline void FSMS_OnSameDirC1_First_UP(const MqlRates &rates[], const int n, cons
    g_fsms_from_up.same_w3_c1_time   = was_w3_c1_t;
 
    g_fsms_from_up.c1_active = true;
-   g_fsms_from_up.c1_index  = (idx>=0 && idx<n? idx:0);
-   g_fsms_from_up.c1_time   = rates[g_fsms_from_up.c1_index].time;
+   g_fsms_from_up.c1_index  = safe_idx;
+   g_fsms_from_up.c1_time   = evt_t;
    g_fsms_from_up.idx       = g_fsms_from_up.c1_index;
    g_fsms_from_up.state     = FSMS_SEARCH_W2;
 
@@ -199,6 +279,12 @@ inline void FSMS_OnSameDirC1_First_UP(const MqlRates &rates[], const int n, cons
 
 inline void FSMS_OnSameDirC1_First_DOWN(const MqlRates &rates[], const int n, const int idx)
 {
+   const int safe_idx = (idx>=0 && idx<n ? idx : 0);
+   const datetime evt_t = (n>0 ? rates[safe_idx].time : TimeCurrent());
+
+   if(!__FSMS_CanOpenAt(evt_t))
+      return;
+
    const bool     was_w3        = g_fsms_from_dn.w3_seen;
    const int      was_w3_c1_idx = g_fsms_from_dn.same_w3_c1_index;
    const datetime was_w3_c1_t   = g_fsms_from_dn.same_w3_c1_time;
@@ -210,8 +296,8 @@ inline void FSMS_OnSameDirC1_First_DOWN(const MqlRates &rates[], const int n, co
    g_fsms_from_dn.same_w3_c1_time   = was_w3_c1_t;
 
    g_fsms_from_dn.c1_active = true;
-   g_fsms_from_dn.c1_index  = (idx>=0 && idx<n? idx:0);
-   g_fsms_from_dn.c1_time   = rates[g_fsms_from_dn.c1_index].time;
+   g_fsms_from_dn.c1_index  = safe_idx;
+   g_fsms_from_dn.c1_time   = evt_t;
    g_fsms_from_dn.idx       = g_fsms_from_dn.c1_index;
    g_fsms_from_dn.state     = FSMS_SEARCH_W2;
 
@@ -236,6 +322,9 @@ inline void FSMS_OnSameDirC1_Reanchor_DOWN(const MqlRates &rates[], const int n,
 
 inline void FSMS_OnSameDirW2Invalidated_UP()
 {
+   __FSMS_ApplyLifecycleTransition();
+   if(FSMSLC_HasPending()) return;
+
    bool     fired_prev      = g_fsms_from_up.fired;
    bool     w3_prev         = g_fsms_from_up.w3_seen;
    int      w3_c1_prev_idx  = g_fsms_from_up.same_w3_c1_index;
@@ -251,6 +340,9 @@ inline void FSMS_OnSameDirW2Invalidated_UP()
 
 inline void FSMS_OnSameDirW2Invalidated_DOWN()
 {
+   __FSMS_ApplyLifecycleTransition();
+   if(FSMSLC_HasPending()) return;
+
    bool     fired_prev      = g_fsms_from_dn.fired;
    bool     w3_prev         = g_fsms_from_dn.w3_seen;
    int      w3_c1_prev_idx  = g_fsms_from_dn.same_w3_c1_index;
@@ -271,6 +363,8 @@ inline void __FSMS_Mark_UP(const datetime t)
    if(InpDrawMarkers)
       MarkV("FSMS_U_"+IntegerToString(g_fsms_u_counter), t, clrWhite);
 
+   FSMSLC_OnFormed(DIR_UP, t);
+
    // NEW (H4->M15 bridge): FSMS (MAJ-only) is a START trigger (on close)
    WB15_PublishStartFSMS_MAJONLY(InpSymbol, DIR_UP, t);
 }
@@ -279,6 +373,8 @@ inline void __FSMS_Mark_DN(const datetime t)
    ++g_fsms_d_counter;
    if(InpDrawMarkers)
       MarkV("FSMS_D_"+IntegerToString(g_fsms_d_counter), t, clrWhite);
+
+   FSMSLC_OnFormed(DIR_DOWN, t);
 
    // NEW (H4->M15 bridge): FSMS (MAJ-only) is a START trigger (on close)
    WB15_PublishStartFSMS_MAJONLY(InpSymbol, DIR_DOWN, t);
@@ -371,6 +467,11 @@ inline void FSMS_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
                           const double &bodyLowEff[], const double &bodyHighEff[],
                           const int n, const int upto_j)
 {
+   if(n <= 0 || upto_j < 0 || upto_j >= n) return;
+
+   __FSMS_ApplyLifecycleTransition();
+   if(!FSMSLC_CanOpenAt(rates[upto_j].time)) return;
+
    // ===== پس از W3-UP: دنبال DOWN (FSMS_U) وقتی C1-UP فعال است =====
    if(g_fsms_from_up.w3_seen && g_fsms_from_up.c1_active && !g_fsms_from_up.fired)
    {

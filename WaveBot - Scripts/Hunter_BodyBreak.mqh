@@ -7,6 +7,7 @@
 #include <WaveBot/Hunter.mqh>       // برای دسترسی به SW_UP_Seed* (بذرهانتر معتبر)
 #include <WaveBot/Hunter_Down.mqh>  // برای دسترسی به SW_DOWN_Seed*
 #include <WaveBot/RaceCoordinator.mqh>
+#include <WaveBot/FSMS_Lifecycle.mqh>
 #include <WaveBot/ShadowBreaker.mqh>   // brings SB_*_BinaryPhaseActive definitions
 
 // -------------------- UP state --------------------
@@ -184,6 +185,8 @@ inline void HW_BB_UP_OnBar(const MqlRates &r, const MqlRates &rates[], const int
       ++g_bb_counter_u;
       if(InpDrawMarkers) MarkV("HWBB_U_"+IntegerToString(g_bb_counter_u), r.time, clrRoyalBlue);
 
+      FSMSLC_RequestTerminal(FSMSLC_TERM_HWBB, r.time);
+
       // NEW (H4->M15 bridge): HWBB is a START trigger (intrabar)
       WB15_PublishStartHWBB(InpSymbol, DIR_UP, r.time, g_bb_level_u, g_bb_cross_time_u);
 
@@ -253,6 +256,8 @@ inline void HW_BB_DOWN_OnBar(const MqlRates &r, const MqlRates &rates[], const i
    {
       ++g_bb_counter_d;
       if(InpDrawMarkers) MarkV("HWBB_D_"+IntegerToString(g_bb_counter_d), r.time, clrDarkOrange);
+
+      FSMSLC_RequestTerminal(FSMSLC_TERM_HWBB, r.time);
 
       // NEW (H4->M15 bridge): HWBB is a START trigger (intrabar)
       WB15_PublishStartHWBB(InpSymbol, DIR_DOWN, r.time, g_bb_level_d, g_bb_cross_time_d);

@@ -10,6 +10,7 @@
 #include <WaveBot/W2W3_ChainInvalidation.mqh>
 #include <WaveBot/ShadowBreaker.mqh>   // برای BringToFront پس از مارک نهایی
 #include <WaveBot/Types.mqh>   // برای Direction (DIR_UP / DIR_DOWN)
+#include <WaveBot/FSMS_Lifecycle.mqh>
 
 // ============================================================================
 // وضعیت Seed برای FSMS–SW
@@ -645,6 +646,7 @@ inline void FSMS_SW_RecordMinorPair_DN(const MqlRates &rates[], const int n, con
    {
       // NEW (H4->M15 bridge): MinorStarter is a STOP trigger for FSMS sessions
       WB15_PublishStopMinorStarter(InpSymbol, DIR_DOWN, rates[S.bodyBreakIdx].time);
+      FSMSLC_RequestTerminal(FSMSLC_TERM_MINORSTARTER, rates[S.bodyBreakIdx].time);
 
       g_minor_starter_d_active = true;
       g_minor_starter_d_idx    = S.bodyBreakIdx;
@@ -754,6 +756,7 @@ inline void FSMS_SW_RecordMinorPair_UP(const MqlRates &rates[], const int n, con
    {
       // NEW (H4->M15 bridge): MinorStarter is a STOP trigger for FSMS sessions
       WB15_PublishStopMinorStarter(InpSymbol, DIR_UP, rates[S.bodyBreakIdx].time);
+      FSMSLC_RequestTerminal(FSMSLC_TERM_MINORSTARTER, rates[S.bodyBreakIdx].time);
 
       g_minor_starter_u_active = true;
       g_minor_starter_u_idx    = S.bodyBreakIdx;
@@ -1146,6 +1149,8 @@ inline void FSMS_SW_UP_TryMarkOnConfirmedW3(const MqlRates &rates[], const int n
                " | BODY-BREAK=", T(rates[bodyBreakIdx].time),
                " | > H(FSMS_C1)=", DoubleToString(g_fsms_sw_up_level, _Digits));
 
+      FSMSLC_RequestTerminal(FSMSLC_TERM_FSMS_SW, rates[bodyBreakIdx].time);
+
       g_fsms_sw_up_active = false;
       __SW_ResetOppCtx(g_sw_guard_after_u);
 
@@ -1179,6 +1184,8 @@ inline void FSMS_SW_DN_TryMarkOnConfirmedW3(const MqlRates &rates[], const int n
          Print("[FSMS–SW-DOWN] OK | W3_C1=", T(rates[w3_c1].time),
                " | BODY-BREAK=", T(rates[bodyBreakIdx].time),
                " | < L(FSMS_C1)=", DoubleToString(g_fsms_sw_dn_level, _Digits));
+
+      FSMSLC_RequestTerminal(FSMSLC_TERM_FSMS_SW, rates[bodyBreakIdx].time);
 
       g_fsms_sw_dn_active = false;
       __SW_ResetOppCtx(g_sw_guard_after_d);
