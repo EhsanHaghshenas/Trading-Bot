@@ -120,6 +120,35 @@ inline void __API_DrawConfirmedPair_DN(const string tag,
    if(k4 >= 0) MarkV("W3_" + tag + "_C4", rates[k4].time, clrMaroon);
 }
 
+inline int __API_CurrentHunterC1_SEARCH_DN()
+{
+   if(C1Pre_DN_IsActive())
+   {
+      const int idx = C1Pre_DN_CurrentIndex();
+      if(idx >= 0) return idx;
+   }
+
+   if(C1W2_DN_IsActive())
+   {
+      const int idx = C1W2_DN_CurrentIndex();
+      if(idx >= 0) return idx;
+   }
+
+   return -1;
+}
+
+inline void __API_TryHunterInSearch_DN(const MqlRates &rates[], const int n, const int bar_idx)
+{
+   if(bar_idx < 0 || bar_idx >= n) return;
+
+   const int c1_idx = __API_CurrentHunterC1_SEARCH_DN();
+   if(c1_idx < 0 || c1_idx >= n) return;
+   if(bar_idx < c1_idx) return;
+
+   if(Hunter_Down_IsExtLQCross(rates[bar_idx]))
+      Hunter_Down_TryMarkIfValid(rates, n, c1_idx, bar_idx);
+}
+
 // full scan (DOWN)
 int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf,
                                            const datetime from_time, const datetime to_time,
@@ -221,13 +250,25 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
             SR_GoozBaghali_OnBar_DOWN(rates, n, i);
             FSMS_SW_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);   // NEW: parallel guard for FSMS–SW^
             WBWM_ProcessMinorStarterEvents(rates, n, i, to_time);
-            FSMS_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);
-            if(insideHL[i]) continue;
+            if(Race_ShouldAllowFSMS())
+               FSMS_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);
+            if(insideHL[i])
+            {
+               __API_TryHunterInSearch_DN(rates, n, i);
+               HW_BB_DOWN_OnBar(rates[i], rates, n, i);
+               if(Race_ConsumeAbortAPIScan(__api_token))
+               {
+                  Race_LeaveAPIScan(__api_token);
+                  return pairs;
+               }
+               continue;
+            }
             
             bool __reanched = false;
             if(!C1W2_DN_ShouldAllowAt(rates, i, __reanched))
             {
                ExtLQ_Down_OnBar(rates[i]);
+               __API_TryHunterInSearch_DN(rates, n, i);
                HW_BB_DOWN_OnBar(rates[i], rates, n, i);
                if(Race_ConsumeAbortAPIScan(__api_token))
                {
@@ -238,7 +279,8 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
                SR_GoozBaghali_OnBar_DOWN(rates, n, i);
                FSMS_SW_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);   // NEW
                WBWM_ProcessMinorStarterEvents(rates, n, i, to_time);
-               FSMS_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);
+               if(Race_ShouldAllowFSMS())
+                  FSMS_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);
                continue;
             }
             // C1W2 ??? ??? ??? ?? ??? ???? ???? FSMS ?? ?? C1Pre ??? ???????.
@@ -252,6 +294,14 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
             if(__pre_re)
             {
                FSMS_OnSameDirC1_Reanchor_DOWN(rates, n, i);
+            }
+
+            __API_TryHunterInSearch_DN(rates, n, i);
+            HW_BB_DOWN_OnBar(rates[i], rates, n, i);
+            if(Race_ConsumeAbortAPIScan(__api_token))
+            {
+               Race_LeaveAPIScan(__api_token);
+               return pairs;
             }
 
             int i2=-1,i3=-1,i4=-1;
@@ -323,7 +373,8 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
             SR_GoozBaghali_OnBar_DOWN(rates, n, j);
             FSMS_SW_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, j);   // NEW: parallel guard for FSMS–SW
             WBWM_ProcessMinorStarterEvents(rates, n, j, to_time);
-            FSMS_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, j);
+            if(Race_ShouldAllowFSMS())
+               FSMS_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, j);
             // --- NEW: Chain invalidation after ShadowBreaker (DOWN) --------------
             if(SB_DN_InvalidatorReady())
             {
@@ -569,3 +620,5 @@ void API_Down_ShowMostRecent_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES
 }
 
 #endif // WAVEBOT_API_DOWN_MQH
+
+

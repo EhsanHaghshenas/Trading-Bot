@@ -119,6 +119,35 @@ inline void __API_DrawConfirmedPair_UP(const string tag,
    if(k4 >= 0) MarkV("W3_" + tag + "_C4", rates[k4].time, clrDarkGreen);
 }
 
+inline int __API_CurrentHunterC1_SEARCH_UP()
+{
+   if(C1Pre_UP_IsActive())
+   {
+      const int idx = C1Pre_UP_CurrentIndex();
+      if(idx >= 0) return idx;
+   }
+
+   if(C1W2_UP_IsActive())
+   {
+      const int idx = C1W2_UP_CurrentIndex();
+      if(idx >= 0) return idx;
+   }
+
+   return -1;
+}
+
+inline void __API_TryHunterInSearch_UP(const MqlRates &rates[], const int n, const int bar_idx)
+{
+   if(bar_idx < 0 || bar_idx >= n) return;
+
+   const int c1_idx = __API_CurrentHunterC1_SEARCH_UP();
+   if(c1_idx < 0 || c1_idx >= n) return;
+   if(bar_idx < c1_idx) return;
+
+   if(Hunter_IsExtLQCross(rates[bar_idx]))
+      Hunter_TryMarkIfValid(rates, n, c1_idx, bar_idx);
+}
+
 // ???? ???? (UP): W2 -> WAIT_CONFIRM(W3) + Hunter + ExtLQ
 int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf,
                                       const datetime from_time, const datetime to_time,
@@ -221,13 +250,25 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
             SR_GoozBaghali_OnBar_UP(rates, n, i);
             FSMS_SW_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);   // NEW: parallel guard for FSMS–SW
             WBWM_ProcessMinorStarterEvents(rates, n, i, to_time);
-            FSMS_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);
-            if(insideHL[i]) continue;
+            if(Race_ShouldAllowFSMS())
+               FSMS_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);
+            if(insideHL[i])
+            {
+               __API_TryHunterInSearch_UP(rates, n, i);
+               HW_BB_UP_OnBar(rates[i], rates, n, i);
+               if(Race_ConsumeAbortAPIScan(__api_token))
+               {
+                  Race_LeaveAPIScan(__api_token);
+                  return pairs;
+               }
+               continue;
+            }
             
             bool __reanched = false;
             if(!C1W2_UP_ShouldAllowAt(rates, i, __reanched))
             {
                ExtLQ_OnBar(rates[i]);
+               __API_TryHunterInSearch_UP(rates, n, i);
                HW_BB_UP_OnBar(rates[i], rates, n, i);
                if(Race_ConsumeAbortAPIScan(__api_token))
                {
@@ -238,7 +279,8 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
                SR_GoozBaghali_OnBar_UP(rates, n, i);
                FSMS_SW_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);   // NEW
                WBWM_ProcessMinorStarterEvents(rates, n, i, to_time);
-               FSMS_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);
+               if(Race_ShouldAllowFSMS())
+                  FSMS_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);
                continue;
             }
             // ????: C1W2 ??? ??? ??? ?? ??? ???? ???? ???? FSMS ?? ?? ?? ??? ????????.
@@ -254,6 +296,14 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
             if(__pre_re)
             {
                FSMS_OnSameDirC1_Reanchor_UP(rates, n, i);
+            }
+
+            __API_TryHunterInSearch_UP(rates, n, i);
+            HW_BB_UP_OnBar(rates[i], rates, n, i);
+            if(Race_ConsumeAbortAPIScan(__api_token))
+            {
+               Race_LeaveAPIScan(__api_token);
+               return pairs;
             }
 
             int i2=-1,i3=-1,i4=-1;
@@ -326,7 +376,8 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
             SR_GoozBaghali_OnBar_UP(rates, n, j);
             FSMS_SW_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, j);   // NEW: parallel guard for FSMS–SW
             WBWM_ProcessMinorStarterEvents(rates, n, j, to_time);
-            FSMS_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, j);
+            if(Race_ShouldAllowFSMS())
+               FSMS_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, j);
             
             // --- NEW: Chain invalidation after ShadowBreaker (UP) -----------------
             if(SB_UP_InvalidatorReady())
