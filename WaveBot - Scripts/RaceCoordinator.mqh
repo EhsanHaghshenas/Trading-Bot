@@ -1161,7 +1161,28 @@ inline void Race_DrawW2W3_MTC_Up(const MqlRates &rates[], const int n, const Rac
 
 
 // Draw MTC_DOWN only (special-case): just BB + REF, no W2/W3
-inline void Race_DrawMTCOnly_Down(const MqlRates &rates[], const int n, const int bodyIdx)
+inline void __Race_LaunchSpecialDirectionScan(const Direction dir,
+                                             const MqlRates &rates[],
+                                             const int n,
+                                             const datetime from_time)
+{
+   const datetime __from = from_time;
+   const datetime __to   = __Race_ScanToTime(rates, n);
+   const bool     __bump = __Race_IsMajorWorld();
+   const ENUM_TIMEFRAMES runtime_tf = __Race_RuntimeTF();
+
+   if(dir == DIR_UP)
+      API_RunScanSequential_W2W3_Hunter(InpSymbol, runtime_tf, __from, __to,
+                                       false, 0.0, 0, "", __bump);
+   else
+      API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, runtime_tf, __from, __to,
+                                            false, 0.0, 0, "", __bump);
+}
+
+inline void Race_DrawMTCOnly_Down_ByRef(const MqlRates &rates[],
+                                        const int n,
+                                        const int bodyIdx,
+                                        const double ref_price)
 {
    const string tag = IntegerToString(g_race_counter);
 
@@ -1172,7 +1193,7 @@ inline void Race_DrawMTCOnly_Down(const MqlRates &rates[], const int n, const in
    if(bodyIdx >= 0 && bodyIdx < n)
       WB15_PublishStopMTC(InpSymbol, DIR_DOWN, rates[bodyIdx].time);
 
-   if(g_race_ref_mtc_down > 0.0)
+   if(ref_price > 0.0)
    {
       Race_DeleteRefVisuals_AllScans();
 
@@ -1182,16 +1203,22 @@ inline void Race_DrawMTCOnly_Down(const MqlRates &rates[], const int n, const in
          const string rname      = __ScanPrefix() + base_rname;
 
          if(ObjectFind(0, rname) == -1)
-            ObjectCreate(0, rname, OBJ_HLINE, 0, 0, g_race_ref_mtc_down);
+            ObjectCreate(0, rname, OBJ_HLINE, 0, 0, ref_price);
 
          ObjectSetInteger(0, rname, OBJPROP_COLOR, clrWhite);
          ObjectSetInteger(0, rname, OBJPROP_WIDTH, 1);
          ObjectSetInteger(0, rname, OBJPROP_STYLE, STYLE_SOLID);
       }
 
-      Race_ActivateRef_Down(g_race_ref_mtc_down, (bodyIdx>=0 && bodyIdx<n ? rates[bodyIdx].time : TimeCurrent()));
+      Race_ActivateRef_Down(ref_price, (bodyIdx>=0 && bodyIdx<n ? rates[bodyIdx].time : TimeCurrent()));
       SB_UP_BringToFront();
       SB_DN_BringToFront();
+   }
+   else
+   {
+      Race_DeleteRefVisuals_AllScans();
+      g_active_ref_down      = 0.0;
+      g_active_ref_down_time = (bodyIdx>=0 && bodyIdx<n ? rates[bodyIdx].time : TimeCurrent());
    }
 
    SR_AllowOnly(DIR_DOWN);
@@ -1199,10 +1226,16 @@ inline void Race_DrawMTCOnly_Down(const MqlRates &rates[], const int n, const in
    SWGate_ResetGlobals();
 }
 
-
+inline void Race_DrawMTCOnly_Down(const MqlRates &rates[], const int n, const int bodyIdx)
+{
+   Race_DrawMTCOnly_Down_ByRef(rates, n, bodyIdx, g_race_ref_mtc_down);
+}
 
 // Draw MTC_UP only (special-case): just BB + REF, no W2/W3
-inline void Race_DrawMTCOnly_Up(const MqlRates &rates[], const int n, const int bodyIdx)
+inline void Race_DrawMTCOnly_Up_ByRef(const MqlRates &rates[],
+                                      const int n,
+                                      const int bodyIdx,
+                                      const double ref_price)
 {
    const string tag = IntegerToString(g_race_counter);
 
@@ -1213,7 +1246,7 @@ inline void Race_DrawMTCOnly_Up(const MqlRates &rates[], const int n, const int 
    if(bodyIdx >= 0 && bodyIdx < n)
       WB15_PublishStopMTC(InpSymbol, DIR_UP, rates[bodyIdx].time);
 
-   if(g_race_ref_mtc_up > 0.0)
+   if(ref_price > 0.0)
    {
       Race_DeleteRefVisuals_AllScans();
 
@@ -1223,16 +1256,22 @@ inline void Race_DrawMTCOnly_Up(const MqlRates &rates[], const int n, const int 
          const string rname      = __ScanPrefix() + base_rname;
 
          if(ObjectFind(0, rname) == -1)
-            ObjectCreate(0, rname, OBJ_HLINE, 0, 0, g_race_ref_mtc_up);
+            ObjectCreate(0, rname, OBJ_HLINE, 0, 0, ref_price);
 
          ObjectSetInteger(0, rname, OBJPROP_COLOR, clrWhite);
          ObjectSetInteger(0, rname, OBJPROP_WIDTH, 1);
          ObjectSetInteger(0, rname, OBJPROP_STYLE, STYLE_SOLID);
       }
 
-      Race_ActivateRef_Up(g_race_ref_mtc_up, (bodyIdx>=0 && bodyIdx<n ? rates[bodyIdx].time : TimeCurrent()));
+      Race_ActivateRef_Up(ref_price, (bodyIdx>=0 && bodyIdx<n ? rates[bodyIdx].time : TimeCurrent()));
       SB_UP_BringToFront();
       SB_DN_BringToFront();
+   }
+   else
+   {
+      Race_DeleteRefVisuals_AllScans();
+      g_active_ref_up      = 0.0;
+      g_active_ref_up_time = (bodyIdx>=0 && bodyIdx<n ? rates[bodyIdx].time : TimeCurrent());
    }
 
    SR_AllowOnly(DIR_UP);
@@ -1240,6 +1279,10 @@ inline void Race_DrawMTCOnly_Up(const MqlRates &rates[], const int n, const int 
    SWGate_ResetGlobals();
 }
 
+inline void Race_DrawMTCOnly_Up(const MqlRates &rates[], const int n, const int bodyIdx)
+{
+   Race_DrawMTCOnly_Up_ByRef(rates, n, bodyIdx, g_race_ref_mtc_up);
+}
 
 // SPECIAL: ref-up body-break by HWBB(UP) => immediate MTC_DOWN win (Path B)
 inline void Race_SpecialRefBreak_MTC_Down(const MqlRates &rates[], const int n, const int j)
@@ -1248,34 +1291,23 @@ inline void Race_SpecialRefBreak_MTC_Down(const MqlRates &rates[], const int n, 
    g_race_winner      = "B";
    g_race_winner_time = bt;
 
-   // 0) ?????? ???? ext lq ?? ??? DOWN ?? ????? ref ????????? ?? HWBB(UP)
-   //    (??? ???? High? C1? Hunter-UP ??? ?? ????? ?? Race_SetRefLevelForMTC_Down ?? ???)
+   // 0) ست‌کردن ext lq اولیهٔ جهت جدید از ref همین race
    if(g_race_ref_mtc_down > 0.0)
-      ExtLQ_Down_Set(g_race_ref_mtc_down, bt);   // <-- ???? ?? ????
+      ExtLQ_Down_Set(g_race_ref_mtc_down, bt);
 
-   // 1) ????????? MTC (????? BB + REF ????)
+   // 1) ثبت MTC
    Race_MarkWin_B(DIR_UP, bt);
-   Race_DrawMTCOnly_Down(rates, n, j);
+   Race_DrawMTCOnly_Down_ByRef(rates, n, j, g_race_ref_mtc_down);
 
-   // 2) ??? ?? ???? ????? ??? ?????? ?? ???? ??
-   Direction __prev_mode = g_race_mode;
+   // 2) handoff کامل به روند جدید
    Race_RequestAbortCurrentAPIScan();
    Race_InternalClearAll();
    SR_AllowOnly(DIR_DOWN);
    SW_UP_ClearSeed();
 
-   // 3) ???? ?????? DOWN ?? ??? ???? BB (?? ???? ???? Hunter ??? ext lq ???? ???? ???)
-   //    ????: ?? ????? MIN ????? namespace/scan_id ?? MAJ ????? ???.
-   const datetime __from = bt;
-   const datetime __to   = __Race_ScanToTime(rates, n);
-   const bool     __bump = __Race_IsMajorWorld();
-   const ENUM_TIMEFRAMES runtime_tf = __Race_RuntimeTF();
-
-   if(__prev_mode == DIR_UP)
-      API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, runtime_tf, __from, __to,
-                                            false, 0.0, 0, "", __bump);
+   // 3) launch اسکن DOWN از همین کندل
+   __Race_LaunchSpecialDirectionScan(DIR_DOWN, rates, n, bt);
 }
-
 
 // SPECIAL: ref-down body-break by HWBB(DOWN) => immediate MTC_UP win (Path B)
 inline void Race_SpecialRefBreak_MTC_Up(const MqlRates &rates[], const int n, const int j)
@@ -1284,31 +1316,98 @@ inline void Race_SpecialRefBreak_MTC_Up(const MqlRates &rates[], const int n, co
    g_race_winner      = "B";
    g_race_winner_time = bt;
 
-   // 0) ?????? ???? ext lq ?? ??? UP ?? ????? ref ????????? ?? HWBB(DOWN)
    if(g_race_ref_mtc_up > 0.0)
-      ExtLQ_Set(g_race_ref_mtc_up, bt);          // <-- ???? ?? ???? (??? UP)
+      ExtLQ_Set(g_race_ref_mtc_up, bt);
 
-   // 1) ????????? MTC (????? BB + REF ????)
    Race_MarkWin_B(DIR_DOWN, bt);
-   Race_DrawMTCOnly_Up(rates, n, j);
+   Race_DrawMTCOnly_Up_ByRef(rates, n, j, g_race_ref_mtc_up);
 
-   // 2) ???????? ???
-   Direction __prev_mode = g_race_mode;
    Race_RequestAbortCurrentAPIScan();
    Race_InternalClearAll();
    SR_AllowOnly(DIR_UP);
    SW_DOWN_ClearSeed();
 
-   // 3) ???? ?????? UP ?? ???? ???? BB
-   //    ????: ?? ????? MIN ????? namespace/scan_id ?? MAJ ????? ???.
-   const datetime __from = bt;
-   const datetime __to   = __Race_ScanToTime(rates, n);
-   const bool     __bump = __Race_IsMajorWorld();
-   const ENUM_TIMEFRAMES runtime_tf = __Race_RuntimeTF();
+   __Race_LaunchSpecialDirectionScan(DIR_UP, rates, n, bt);
+}
 
-   if(__prev_mode == DIR_DOWN)
-      API_RunScanSequential_W2W3_Hunter(InpSymbol, runtime_tf, __from, __to,
-                                       false, 0.0, 0, "", __bump);
+// SPECIAL (global, post-MTC): اگر خط مرجع active شکسته شود، همان کندل باید
+// بلافاصله تغییر روندِ MTC special را بسازد؛ حتی اگر race قفل نباشد و ext lq هم
+// دیگر active نباشد.
+inline void Race_SpecialRefBreak_ActiveRef_MTC_Down(const MqlRates &rates[], const int n, const int j)
+{
+   const datetime bt = (j>=0 && j<n ? rates[j].time : TimeCurrent());
+   const double   ref_price = g_active_ref_down;
+
+   ++g_race_counter;
+   g_race_winner      = "B";
+   g_race_winner_time = bt;
+
+   // برای DOWN، اگر آخرین ref نزولیِ ذخیره‌شده موجود باشد آن را به‌عنوان ext lq اولیه می‌گذاریم.
+   if(ref_price > 0.0)
+      ExtLQ_Down_Set(ref_price, bt);
+
+   Race_MarkWin_B(DIR_UP, bt);
+   Race_DrawMTCOnly_Down_ByRef(rates, n, j, ref_price);
+
+   Race_RequestAbortCurrentAPIScan();
+   Race_InternalClearAll();
+   SR_AllowOnly(DIR_DOWN);
+   SW_UP_ClearSeed();
+
+   __Race_LaunchSpecialDirectionScan(DIR_DOWN, rates, n, bt);
+}
+
+inline void Race_SpecialRefBreak_ActiveRef_MTC_Up(const MqlRates &rates[], const int n, const int j)
+{
+   const datetime bt = (j>=0 && j<n ? rates[j].time : TimeCurrent());
+   const double   ref_price = g_active_ref_up;
+
+   ++g_race_counter;
+   g_race_winner      = "B";
+   g_race_winner_time = bt;
+
+   if(ref_price > 0.0)
+      ExtLQ_Set(ref_price, bt);
+
+   Race_MarkWin_B(DIR_DOWN, bt);
+   Race_DrawMTCOnly_Up_ByRef(rates, n, j, ref_price);
+
+   Race_RequestAbortCurrentAPIScan();
+   Race_InternalClearAll();
+   SR_AllowOnly(DIR_UP);
+   SW_DOWN_ClearSeed();
+
+   __Race_LaunchSpecialDirectionScan(DIR_UP, rates, n, bt);
+}
+
+inline bool Race_CheckActiveRefBreak_Global(const MqlRates &rates[], const int n, const int bar_idx)
+{
+   if(bar_idx < 0 || bar_idx >= n) return false;
+   if(g_race_locked) return false;
+
+   const datetime bt = rates[bar_idx].time;
+
+   // روند فعال UP => اگر ref-up شکسته شود، باید MTC_DOWN special رخ بدهد
+   if(Race_RefUp_IsActive())
+   {
+      if(bt > Race_ActiveRef_Up_Time() && rates[bar_idx].close < Race_ActiveRef_Up())
+      {
+         Race_SpecialRefBreak_ActiveRef_MTC_Down(rates, n, bar_idx);
+         return true;
+      }
+   }
+
+   // روند فعال DOWN => اگر ref-down شکسته شود، باید MTC_UP special رخ بدهد
+   if(Race_RefDown_IsActive())
+   {
+      if(bt > Race_ActiveRef_Down_Time() && rates[bar_idx].close > Race_ActiveRef_Down())
+      {
+         Race_SpecialRefBreak_ActiveRef_MTC_Up(rates, n, bar_idx);
+         return true;
+      }
+   }
+
+   return false;
 }
 
 #endif // WAVEBOT_RACECOORDINATOR_MQH
