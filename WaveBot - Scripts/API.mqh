@@ -119,6 +119,49 @@ inline void __API_DrawConfirmedPair_UP(const string tag,
    if(k4 >= 0) MarkV("W3_" + tag + "_C4", rates[k4].time, clrDarkGreen);
 }
 
+
+inline int __API_TriggerPickLatestIndex(const int current_best, const int candidate)
+{
+   if(candidate < 0) return current_best;
+   if(current_best < 0) return candidate;
+   if(candidate > current_best) return candidate;
+   return current_best;
+}
+
+inline int __API_TriggerActiveCandidate_ANY_UP(const int fallback_idx)
+{
+   int best = fallback_idx;
+
+   if(C1Pre_UP_IsActive())
+      best = __API_TriggerPickLatestIndex(best, C1Pre_UP_CurrentIndex());
+   if(C1W2_UP_IsActive())
+      best = __API_TriggerPickLatestIndex(best, C1W2_UP_CurrentIndex());
+   if(C1W2_PB_UP_IsActive())
+      best = __API_TriggerPickLatestIndex(best, C1W2_PB_UP_CurrentIndex());
+
+   if(SW_UP_SeedActive())
+      best = __API_TriggerPickLatestIndex(best, SW_UP_C1Index());
+   if(SW_DOWN_SeedActive())
+      best = __API_TriggerPickLatestIndex(best, SW_DOWN_C1Index());
+
+   if(FSMS_SW_UP_SeedActive())
+      best = __API_TriggerPickLatestIndex(best, FSMS_SW_UP_C1Index());
+   if(FSMS_SW_DN_SeedActive())
+      best = __API_TriggerPickLatestIndex(best, FSMS_SW_DN_C1Index());
+
+   return best;
+}
+
+inline int __API_TriggerCandidate_WAIT_UP(const int fallback_idx, const int w3_c1, const int w3_cand)
+{
+   int best = __API_TriggerActiveCandidate_ANY_UP(fallback_idx);
+   if(w3_c1 >= 0)
+      best = __API_TriggerPickLatestIndex(best, w3_c1);
+   if(w3_cand >= 0)
+      best = __API_TriggerPickLatestIndex(best, w3_cand);
+   return best;
+}
+
 // ???? ???? (UP): W2 -> WAIT_CONFIRM(W3) + Hunter + ExtLQ
 int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf,
                                       const datetime from_time, const datetime to_time,
@@ -209,6 +252,8 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
                return pairs;
             }
 
+            Trigger_OnBarCandidate(InpSymbol, rates, insideHL, n, i, __API_TriggerActiveCandidate_ANY_UP(i));
+
             ExtLQ_OnBar(rates[i]);
             HW_BB_UP_OnBar(rates[i], rates, n, i);   // NEW (???? ???? ??? ?? ?? Seed ??????)
             if(Race_ConsumeAbortAPIScan(__api_token))
@@ -264,6 +309,8 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
                FSMS_OnSameDirC1_Reanchor_UP(rates, n, i);
             }
 
+            Trigger_OnBarCandidate(InpSymbol, rates, insideHL, n, i, __API_TriggerActiveCandidate_ANY_UP(i));
+
             int i2=-1,i3=-1,i4=-1;
             if(!CheckWave2_FromIndex_LocalOnly(rates, insideHL, bodyLowEff, bodyHighEff, n, i, i2, i3, i4))
                continue;
@@ -318,6 +365,8 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
                Race_LeaveAPIScan(__api_token);
                return pairs;
             }
+
+            Trigger_OnBarCandidate(InpSymbol, rates, insideHL, n, j, __API_TriggerCandidate_WAIT_UP(c1, w3_c1, w3_cand));
 
             ExtLQ_OnBar(rates[j]);
             if(Hunter_IsExtLQCross(rates[j]))
@@ -416,6 +465,7 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
 
                         // ???? ?????? ?? ???? ?????
                         w3_cand=-1; w3_cand_low=DBL_MAX;
+                        Trigger_OnBarCandidate(InpSymbol, rates, insideHL, n, j, __API_TriggerCandidate_WAIT_UP(c1, w3_c1, w3_cand));
                      }
                   }
                }
@@ -454,6 +504,7 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
                   w3_c1 = -1;
                   w3_cand     = j;                 // ???? ????? C1 ????
                   w3_cand_low = rates[j].low;
+                  Trigger_OnBarCandidate(InpSymbol, rates, insideHL, n, j, __API_TriggerCandidate_WAIT_UP(c1, w3_c1, w3_cand));
                   continue;
                }
             }
@@ -467,6 +518,7 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
                   w3_cand     = j;                 // ???? ??? j == cend ????
                   w3_cand_low = rates[j].low;
                   have_w3     = false;
+                  Trigger_OnBarCandidate(InpSymbol, rates, insideHL, n, j, __API_TriggerCandidate_WAIT_UP(c1, w3_c1, w3_cand));
                }
             }
 
@@ -491,6 +543,7 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
                   have_w3=true;
                   if(w3_c1 < 0) w3_c1 = startIdx;
                   k2=a2; k3=a3; k4=a4; w3_end=w3e;
+                  Trigger_OnBarCandidate(InpSymbol, rates, insideHL, n, j, __API_TriggerCandidate_WAIT_UP(c1, w3_c1, w3_cand));
                }
             }
             

@@ -36,6 +36,7 @@ input bool InpRunShadowBreakerOnce = false;  // ??? true ????? ?????? SB_RunOneS
 #include <WaveBot/Markers.mqh>
 // NEW: Simple H4->M15 bridge (signals + candle counting)
 #include <WaveBot/WB15_SignalBridge.mqh>
+#include <WaveBot/Trigger.mqh>
 #include <WaveBot/Wave2.mqh>
 #include <WaveBot/Wave3.mqh>
 #include <WaveBot/Wave2_Down.mqh>
@@ -251,6 +252,7 @@ int OnInit()
    // Ensure WorldManager captures clean baselines before any scan starts
    Markers_SetNamespace("MAJ");
    WBWM_Init();
+   Trigger_ResetGlobals();
    __WB_ApplyHiddenVisualPolicies();
    __WB_DeleteAllM15NumberingObjects();
 
@@ -261,7 +263,7 @@ int OnInit()
    EventSetTimer(g_role == WBROLE_SLAVE_M15 ? 1 : 2);
    return(INIT_SUCCEEDED);
 }
-void OnDeinit(const int reason){ __WB_ApplyHiddenVisualPolicies(); __WB_DeleteAllM15NumberingObjects(); EventKillTimer(); }
+void OnDeinit(const int reason){ __WB_ApplyHiddenVisualPolicies(); __WB_DeleteAllM15NumberingObjects(); Trigger_ResetGlobals(); EventKillTimer(); }
 void OnTick(){}
 
 // --- One-shot ShadowBreaker scan (migrated from old OnStart) ---
