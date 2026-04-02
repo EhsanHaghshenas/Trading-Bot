@@ -1,3 +1,4 @@
+
 #ifndef WAVEBOT_TRIGGER_MQH
 #define WAVEBOT_TRIGGER_MQH
 
@@ -7,31 +8,26 @@
 
 // ============================================================================
 // Trigger.mqh
-// Dedicated lower-TF trigger detector driven by H4 bridge events.
+// Independent trigger engine driven only by the H4->worker bridge and
+// worker-TF candles. It must remain fully passive relative to the normal
+// wave/candle engine.
 //
-// This module is intentionally passive:
-// - it never changes the normal wave / candle detection logic;
-// - it only watches the already-running scan through Trigger_OnBarCandidate().
-//
-// Current rules implemented here:
-//  1) trigger detection starts only after a valid incoming H4 START signal;
-//  2) any H4 STOP signal halts trigger detection immediately;
-//  3) a new H4 START signal resets the trigger scan from scratch;
-//  4) trigger detection is always bound to the current candidate first candle
-//     of the in-progress wave; when that candidate changes, the trigger scan
-//     resets completely;
-//  5) inside bars are fully allowed to participate in trigger formation;
-//  6) Type-1 and Type-2 are evaluated in parallel on every bar and whichever
-//     completes first wins;
-//  7) for bullish triggers, the shared lower boundary is Low(anchor candidate),
-//     and the primary ceiling is the highest high formed before or during the
-//     first down leg;
-//  8) for bearish triggers, the shared upper boundary is High(anchor candidate),
-//     and the primary floor is the lowest low formed before or during the first
-//     up leg;
-//  9) once a trigger fires, the trigger range is reset and a new range must be
-//     rebuilt from scratch under the still-active H4 START window.
+// Core rules implemented:
+//   - Start only after an effective H4 START signal reaches the worker bar.
+//   - Stop immediately when the effective H4 window is no longer active.
+//   - Max 3 triggers per active H4 window.
+//   - A mother boundary (bullish = mother low, bearish = mother high) governs
+//     the whole trigger cycle.
+//   - Inside one mother range, multiple gates can be open simultaneously.
+//   - Type-1 and Type-2 are evaluated in parallel on every gate.
+//   - If multiple gates hit on the same bar, the latest-created gate wins.
+//   - All logic is candle-by-candle, wick/body agnostic for the final break.
+//   - API rewinds / duplicate bar calls must not reset the trigger engine.
 // ============================================================================
+
+#define TRG_MAX_ACTIVE_SESSIONS  32
+#define TRG_MAX_CLOSED_LEGS       8
+#define TRG_MAX_HITS_PER_WINDOW   3
 
 enum TriggerLegDir
 {
@@ -40,13 +36,14 @@ enum TriggerLegDir
    TRG_LEG_DN   = -1
 };
 
-struct TriggerBridgeEvent
+struct TriggerEvent
 {
-   datetime  t;
+   datetime  t;         // raw bridge time
+   datetime  bar_time;  // effective worker-TF bar open time
    Direction dir;
    int       kind;
+   int       ns;
    int       seq;
-   bool      is_start;
 };
 
 struct TriggerLeg
@@ -63,57 +60,112 @@ struct TriggerLeg
    int    low_idx;
 };
 
-struct TriggerContext
+struct TriggerGate
 {
-   // H4 bridge snapshot
-   double             run_id;
-   int                bridge_seq;
-   TriggerBridgeEvent events[];
+   bool     used;
+   int      serial;
+   int      birth_idx;
+   datetime birth_time;
 
-   // active bridge window
-   bool      active;
-   int       active_event_pos;
-   int       active_start_seq;
-   Direction active_dir;
-   datetime  active_start_time;
+   // base boundary for this gate
+   double   base_level;   // bullish: floor | bearish: roof
+   int      base_idx;
 
-   // current anchor = candidate first candle of the in-progress wave
-   int       anchor_idx;
-   datetime  anchor_time;
-   double    anchor_level;
-   bool      anchor_blocked;
+   // Phase-1 / Phase-2 stored levels
+   double   phase1_level; // bullish: ceiling-1 | bearish: floor-1
+   int      phase1_idx;
 
-   // fixed trigger range inside the current anchor cycle
-   bool      range_ready;
-   double    range_primary_level;
-   int       range_primary_idx;
-   datetime  range_primary_time;
+   double   phase2_level; // bullish: floor-2   | bearish: roof-2
+   int      phase2_idx;
 
-   // candle-chain FSM (recent legs only; range itself is stored separately)
-   TriggerLeg closed_legs[4];
-   int        closed_count;
-   TriggerLeg current_leg;
-   bool       current_leg_active;
+   // Type-1 path
+   bool     type1_possible;
+   bool     type1_middle_seen;
+   bool     type1_arm_final;
+   double   type1_target;
+   int      type1_src_idx;
+   int      type1_arm_idx;
 
-   // duplicate / rewind guards
-   datetime   last_bar_time;
-   int        last_bar_idx;
-   int        last_anchor_idx;
-   int        last_start_seq;
-
-   // last emitted trigger (duplicate guard)
-   datetime   last_hit_time;
-   double     last_hit_level;
-   Direction  last_hit_dir;
-   int        last_hit_type;
-
-   // marker counters
-   int        up_counter;
-   int        dn_counter;
+   // Type-2 path
+   bool     type2_possible;
+   bool     type2_break1_seen;
+   double   phase3_level; // bullish: ceiling-3 | bearish: floor-3
+   int      phase3_idx;
+   bool     type2_arm_final;
+   double   type2_target;
+   int      type2_src_idx;
+   int      type2_arm_idx;
 };
 
-static TriggerContext g_trigger_ctx;
+struct TriggerHitCandidate
+{
+   bool   hit;
+   int    gate_index;
+   int    gate_serial;
+   int    gate_birth_idx;
+   int    type_id;
+   int    bar_idx;
+   double level;
+   int    src_idx;
+};
 
+struct TriggerStartSession
+{
+   bool      active;
+   int       kind;
+   int       ns;
+   Direction dir;
+   datetime  t;
+   datetime  bar_time;
+   int       seq;
+};
+
+struct TriggerCore
+{
+   // bridge snapshot
+   double        run_id;
+   int           bridge_seq;
+
+   // active worker window
+   bool          active;
+   int           active_start_seq;
+   int           active_start_kind;
+   int           active_start_ns;
+   Direction     active_dir;
+   datetime      active_start_time;
+   datetime      active_start_bar_time;
+
+   // independent trigger engine state
+   int           window_hit_count;
+
+   bool          mother_set;
+   double        mother_level;  // bullish: mother low | bearish: mother high
+   int           mother_idx;
+   datetime      mother_time;
+
+   int           gate_serial_seq;
+
+   TriggerLeg    closed_legs[TRG_MAX_CLOSED_LEGS];
+   int           closed_count;
+   TriggerLeg    current_leg;
+   bool          current_leg_active;
+
+   // dedupe / rewind shield
+   datetime      last_processed_time;
+   int           last_processed_idx;
+
+   // marker counters
+   int           up_counter;
+   int           dn_counter;
+};
+
+static TriggerCore g_trigger_ctx;
+static TriggerEvent g_trigger_events[];
+static TriggerGate  g_trigger_gates[];
+
+// ----------------------------------------------------------------------------
+// Basic helpers
+// ----------------------------------------------------------------------------
 inline bool __TRG_IsWorkerTF()
 {
    ENUM_TIMEFRAMES tf = (ENUM_TIMEFRAMES)Period();
@@ -131,6 +183,46 @@ inline double __TRG_Eps()
    return (_Point * 0.10);
 }
 
+inline bool __TRG_TouchHigh(const double high_price, const double level)
+{
+   return (high_price >= (level - __TRG_Eps()));
+}
+
+inline bool __TRG_TouchLow(const double low_price, const double level)
+{
+   return (low_price <= (level + __TRG_Eps()));
+}
+
+inline bool __TRG_BreakAboveStrict(const double high_price, const double level)
+{
+   return (high_price > (level + __TRG_Eps()));
+}
+
+inline bool __TRG_BreakBelowStrict(const double low_price, const double level)
+{
+   return (low_price < (level - __TRG_Eps()));
+}
+
+inline datetime __TRG_WorkerBarOpen(const datetime t)
+{
+   int sec = PeriodSeconds((ENUM_TIMEFRAMES)Period());
+   if(sec <= 0) sec = 60;
+
+   long ts = (long)t;
+   long ss = (long)sec;
+   return (datetime)(ts - (ts % ss));
+}
+
+inline int __TRG_CandleDir(const MqlRates &bar)
+{
+   if(bar.close > bar.open) return TRG_LEG_UP;
+   if(bar.close < bar.open) return TRG_LEG_DN;
+   return TRG_LEG_NONE;
+}
+
+// ----------------------------------------------------------------------------
+// Clear / reset helpers
+// ----------------------------------------------------------------------------
 inline void __TRG_ClearLeg(TriggerLeg &leg)
 {
    leg.used      = false;
@@ -143,63 +235,129 @@ inline void __TRG_ClearLeg(TriggerLeg &leg)
    leg.low_idx   = -1;
 }
 
-inline void __TRG_ResetRange()
+inline void __TRG_ClearGate(TriggerGate &gate)
 {
-   g_trigger_ctx.range_ready         = false;
-   g_trigger_ctx.range_primary_level = 0.0;
-   g_trigger_ctx.range_primary_idx   = -1;
-   g_trigger_ctx.range_primary_time  = 0;
+   gate.used             = false;
+   gate.serial           = 0;
+   gate.birth_idx        = -1;
+   gate.birth_time       = 0;
+
+   gate.base_level       = 0.0;
+   gate.base_idx         = -1;
+
+   gate.phase1_level     = 0.0;
+   gate.phase1_idx       = -1;
+   gate.phase2_level     = 0.0;
+   gate.phase2_idx       = -1;
+
+   gate.type1_possible   = true;
+   gate.type1_middle_seen= false;
+   gate.type1_arm_final  = false;
+   gate.type1_target     = 0.0;
+   gate.type1_src_idx    = -1;
+   gate.type1_arm_idx    = -1;
+
+   gate.type2_possible   = true;
+   gate.type2_break1_seen= false;
+   gate.phase3_level     = 0.0;
+   gate.phase3_idx       = -1;
+   gate.type2_arm_final  = false;
+   gate.type2_target     = 0.0;
+   gate.type2_src_idx    = -1;
+   gate.type2_arm_idx    = -1;
+}
+
+inline void __TRG_ClearHitCandidate(TriggerHitCandidate &hit)
+{
+   hit.hit            = false;
+   hit.gate_index     = -1;
+   hit.gate_serial    = 0;
+   hit.gate_birth_idx = -1;
+   hit.type_id        = 0;
+   hit.bar_idx        = -1;
+   hit.level          = 0.0;
+   hit.src_idx        = -1;
+}
+
+inline void __TRG_ClearAllGates()
+{
+   ArrayResize(g_trigger_gates, 0);
 }
 
 inline void __TRG_ResetLegsOnly()
 {
-   for(int i=0; i<4; ++i)
+   for(int i=0; i<TRG_MAX_CLOSED_LEGS; ++i)
       __TRG_ClearLeg(g_trigger_ctx.closed_legs[i]);
 
    g_trigger_ctx.closed_count       = 0;
    g_trigger_ctx.current_leg_active = false;
    __TRG_ClearLeg(g_trigger_ctx.current_leg);
-
-   g_trigger_ctx.last_bar_time   = 0;
-   g_trigger_ctx.last_bar_idx    = -1;
-   g_trigger_ctx.last_anchor_idx = -1;
-   g_trigger_ctx.last_start_seq  = -1;
-
-   __TRG_ResetRange();
 }
 
-inline void __TRG_ResetAnchorAndLegs()
+inline void __TRG_ResetWindowState(const bool reset_hit_count)
 {
-   g_trigger_ctx.anchor_idx     = -1;
-   g_trigger_ctx.anchor_time    = 0;
-   g_trigger_ctx.anchor_level   = 0.0;
-   g_trigger_ctx.anchor_blocked = false;
+   __TRG_ClearAllGates();
    __TRG_ResetLegsOnly();
+
+   g_trigger_ctx.mother_set   = false;
+   g_trigger_ctx.mother_level = 0.0;
+   g_trigger_ctx.mother_idx   = -1;
+   g_trigger_ctx.mother_time  = 0;
+
+   g_trigger_ctx.last_processed_time = 0;
+   g_trigger_ctx.last_processed_idx  = -1;
+
+   g_trigger_ctx.gate_serial_seq     = 0;
+   if(reset_hit_count)
+      g_trigger_ctx.window_hit_count = 0;
+}
+
+inline void __TRG_ResetForNewMother(const MqlRates &rates[], const int bar_idx)
+{
+   __TRG_ClearAllGates();
+   __TRG_ResetLegsOnly();
+
+   g_trigger_ctx.mother_set  = true;
+   g_trigger_ctx.mother_idx  = bar_idx;
+   g_trigger_ctx.mother_time = rates[bar_idx].time;
+   g_trigger_ctx.mother_level = (g_trigger_ctx.active_dir == DIR_UP ? rates[bar_idx].low
+                                                                    : rates[bar_idx].high);
 }
 
 inline void Trigger_ResetGlobals()
 {
-   g_trigger_ctx.run_id            = 0.0;
-   g_trigger_ctx.bridge_seq        = 0;
-   ArrayResize(g_trigger_ctx.events, 0);
+   g_trigger_ctx.run_id                = 0.0;
+   g_trigger_ctx.bridge_seq            = 0;
 
-   g_trigger_ctx.active            = false;
-   g_trigger_ctx.active_event_pos  = -1;
-   g_trigger_ctx.active_start_seq  = -1;
-   g_trigger_ctx.active_dir        = DIR_UP;
-   g_trigger_ctx.active_start_time = 0;
+   g_trigger_ctx.active                = false;
+   g_trigger_ctx.active_start_seq      = -1;
+   g_trigger_ctx.active_start_kind     = 0;
+   g_trigger_ctx.active_start_ns       = WB15_NS_NONE;
+   g_trigger_ctx.active_dir            = DIR_UP;
+   g_trigger_ctx.active_start_time     = 0;
+   g_trigger_ctx.active_start_bar_time = 0;
 
-   __TRG_ResetAnchorAndLegs();
+   g_trigger_ctx.window_hit_count      = 0;
+   g_trigger_ctx.mother_set            = false;
+   g_trigger_ctx.mother_level          = 0.0;
+   g_trigger_ctx.mother_idx            = -1;
+   g_trigger_ctx.mother_time           = 0;
 
-   g_trigger_ctx.last_hit_time  = 0;
-   g_trigger_ctx.last_hit_level = 0.0;
-   g_trigger_ctx.last_hit_dir   = DIR_UP;
-   g_trigger_ctx.last_hit_type  = 0;
+   g_trigger_ctx.gate_serial_seq       = 0;
+   g_trigger_ctx.last_processed_time   = 0;
+   g_trigger_ctx.last_processed_idx    = -1;
 
-   g_trigger_ctx.up_counter     = 0;
-   g_trigger_ctx.dn_counter     = 0;
+   g_trigger_ctx.up_counter            = 0;
+   g_trigger_ctx.dn_counter            = 0;
+
+   __TRG_ResetLegsOnly();
+   ArrayResize(g_trigger_events, 0);
+   ArrayResize(g_trigger_gates, 0);
 }
 
+// ----------------------------------------------------------------------------
+// Bridge event helpers
+// ----------------------------------------------------------------------------
 inline bool __TRG_IsStartKind(const int kind)
 {
    return (kind == WB15_KIND_START_HWX ||
@@ -215,8 +373,73 @@ inline bool __TRG_IsStopKind(const int kind)
            kind == WB15_KIND_STOP_MINOROFF_ZONE);
 }
 
-inline int __TRG_DecodeKind(const int code) { return (code / 100); }
+inline int __TRG_DecodeKind(const int code)    { return (code / 100); }
+inline int __TRG_DecodeNS(const int code)      { return ((code / 10) % 10); }
 inline int __TRG_DecodeDirCode(const int code) { return (code % 10); }
+
+inline void __TRG_ClearSession(TriggerStartSession &s)
+{
+   s.active   = false;
+   s.kind     = 0;
+   s.ns       = WB15_NS_NONE;
+   s.dir      = DIR_UP;
+   s.t        = 0;
+   s.bar_time = 0;
+   s.seq      = -1;
+}
+
+inline bool __TRG_ShouldAutoStopOnNewStart(const TriggerStartSession &sess,
+                                           const int new_kind,
+                                           const int new_ns)
+{
+   if(sess.kind != WB15_KIND_START_FSMS)
+      return false;
+
+   if(new_kind != WB15_KIND_START_HWX && new_kind != WB15_KIND_START_HWBB)
+      return false;
+
+   return (sess.ns == new_ns);
+}
+
+inline bool __TRG_SessionMatchesStop(const TriggerStartSession &sess,
+                                     const int stop_kind,
+                                     const int stop_ns,
+                                     const Direction stop_dir)
+{
+   if(!sess.active) return false;
+   if(stop_dir != __WB15_Opposite(sess.dir)) return false;
+
+   if(sess.kind == WB15_KIND_START_FSMS)
+   {
+      if(sess.ns == WB15_NS_MAJ)
+      {
+         if(stop_ns != WB15_NS_MAJ) return false;
+         return (stop_kind == WB15_KIND_STOP_MINORSTARTER || stop_kind == WB15_KIND_STOP_MTC);
+      }
+
+      if(sess.ns == WB15_NS_MIN)
+      {
+         if(stop_kind != WB15_KIND_STOP_MTC) return false;
+         return (stop_ns == WB15_NS_MIN || stop_ns == WB15_NS_MAJ);
+      }
+
+      return false;
+   }
+
+   if(stop_kind == WB15_KIND_STOP_MINOROFF_ZONE)
+      return (sess.ns == WB15_NS_MIN && stop_ns == WB15_NS_MAJ);
+
+   if(stop_kind != WB15_KIND_STOP_MTC)
+      return false;
+
+   if(sess.ns == WB15_NS_MAJ)
+      return (stop_ns == WB15_NS_MAJ);
+
+   if(sess.ns == WB15_NS_MIN)
+      return (stop_ns == WB15_NS_MIN || stop_ns == WB15_NS_MAJ);
+
+   return false;
+}
 
 inline bool __TRG_LoadBridgeEvents(const string sym)
 {
@@ -237,7 +460,7 @@ inline bool __TRG_LoadBridgeEvents(const string sym)
 
    g_trigger_ctx.run_id     = run_id;
    g_trigger_ctx.bridge_seq = seq;
-   ArrayResize(g_trigger_ctx.events, 0);
+   ArrayResize(g_trigger_events, 0);
 
    for(int i=1; i<=seq; ++i)
    {
@@ -249,151 +472,143 @@ inline bool __TRG_LoadBridgeEvents(const string sym)
       const datetime t    = (datetime)GlobalVariableGet(kt);
       const int      code = (int)GlobalVariableGet(kc);
       const int      kind = __TRG_DecodeKind(code);
-      const bool     is_start = __TRG_IsStartKind(kind);
-      const bool     is_stop  = __TRG_IsStopKind(kind);
-      if(!is_start && !is_stop)
+
+      if(!__TRG_IsStartKind(kind) && !__TRG_IsStopKind(kind))
          continue;
 
-      TriggerBridgeEvent evt;
+      TriggerEvent evt;
       evt.t        = t;
-      evt.dir      = __WB15_CodeDir(__TRG_DecodeDirCode(code));
+      evt.bar_time = __TRG_WorkerBarOpen(t);
       evt.kind     = kind;
+      evt.ns       = __TRG_DecodeNS(code);
+      evt.dir      = __WB15_CodeDir(__TRG_DecodeDirCode(code));
       evt.seq      = i;
-      evt.is_start = is_start;
 
-      int pos = ArraySize(g_trigger_ctx.events);
-      ArrayResize(g_trigger_ctx.events, pos + 1);
-      g_trigger_ctx.events[pos] = evt;
+      int pos = ArraySize(g_trigger_events);
+      ArrayResize(g_trigger_events, pos + 1);
+      g_trigger_events[pos] = evt;
    }
 
-   g_trigger_ctx.active           = false;
-   g_trigger_ctx.active_event_pos = -1;
-   g_trigger_ctx.active_start_seq = -1;
-   g_trigger_ctx.active_start_time= 0;
-   __TRG_ResetAnchorAndLegs();
+   g_trigger_ctx.active                = false;
+   g_trigger_ctx.active_start_seq      = -1;
+   g_trigger_ctx.active_start_kind     = 0;
+   g_trigger_ctx.active_start_ns       = WB15_NS_NONE;
+   g_trigger_ctx.active_dir            = DIR_UP;
+   g_trigger_ctx.active_start_time     = 0;
+   g_trigger_ctx.active_start_bar_time = 0;
+
+   __TRG_ResetWindowState(true);
    return true;
 }
 
-inline int __TRG_FindLatestEventPosAt(const datetime t)
+inline void __TRG_ApplyWindowAt(const datetime bar_time)
 {
-   int count = ArraySize(g_trigger_ctx.events);
-   for(int i=count-1; i>=0; --i)
+   TriggerStartSession sessions[TRG_MAX_ACTIVE_SESSIONS];
+   for(int i=0; i<TRG_MAX_ACTIVE_SESSIONS; ++i)
+      __TRG_ClearSession(sessions[i]);
+
+   int session_count = 0;
+   const int evt_count = ArraySize(g_trigger_events);
+
+   for(int i=0; i<evt_count; ++i)
    {
-      if(g_trigger_ctx.events[i].t <= t)
-         return i;
-   }
-   return -1;
-}
+      TriggerEvent evt = g_trigger_events[i];
+      if(evt.bar_time > bar_time)
+         break;
 
-inline void __TRG_ApplyEventAt(const datetime t)
-{
-   int pos = __TRG_FindLatestEventPosAt(t);
-   if(pos == g_trigger_ctx.active_event_pos)
-      return;
+      if(__TRG_IsStartKind(evt.kind))
+      {
+         for(int s=0; s<session_count; ++s)
+         {
+            if(sessions[s].active && __TRG_ShouldAutoStopOnNewStart(sessions[s], evt.kind, evt.ns))
+               sessions[s].active = false;
+         }
 
-   g_trigger_ctx.active_event_pos = pos;
+         if(session_count < TRG_MAX_ACTIVE_SESSIONS)
+         {
+            sessions[session_count].active   = true;
+            sessions[session_count].kind     = evt.kind;
+            sessions[session_count].ns       = evt.ns;
+            sessions[session_count].dir      = evt.dir;
+            sessions[session_count].t        = evt.t;
+            sessions[session_count].bar_time = evt.bar_time;
+            sessions[session_count].seq      = evt.seq;
+            session_count++;
+         }
+         else
+         {
+            for(int k=1; k<TRG_MAX_ACTIVE_SESSIONS; ++k)
+               sessions[k-1] = sessions[k];
 
-   if(pos < 0)
-   {
-      g_trigger_ctx.active            = false;
-      g_trigger_ctx.active_start_seq  = -1;
-      g_trigger_ctx.active_start_time = 0;
-      __TRG_ResetAnchorAndLegs();
-      return;
-   }
-
-   const TriggerBridgeEvent evt = g_trigger_ctx.events[pos];
-   if(!evt.is_start)
-   {
-      g_trigger_ctx.active            = false;
-      g_trigger_ctx.active_start_seq  = -1;
-      g_trigger_ctx.active_start_time = 0;
-      __TRG_ResetAnchorAndLegs();
-      return;
-   }
-
-   g_trigger_ctx.active            = true;
-   g_trigger_ctx.active_start_seq  = evt.seq;
-   g_trigger_ctx.active_start_time = evt.t;
-   g_trigger_ctx.active_dir        = evt.dir;
-   __TRG_ResetAnchorAndLegs();
-}
-
-inline int __TRG_CandleDir(const MqlRates &bar)
-{
-   if(bar.close > bar.open) return TRG_LEG_UP;
-   if(bar.close < bar.open) return TRG_LEG_DN;
-   return TRG_LEG_NONE;
-}
-
-inline void __TRG_StartCurrentLeg(const int dir,
-                                  const int idx,
-                                  const double hi,
-                                  const double lo)
-{
-   g_trigger_ctx.current_leg_active = true;
-   g_trigger_ctx.current_leg.used   = true;
-   g_trigger_ctx.current_leg.dir    = dir;
-   g_trigger_ctx.current_leg.start_idx = idx;
-   g_trigger_ctx.current_leg.end_idx   = idx;
-
-   g_trigger_ctx.current_leg.high     = hi;
-   g_trigger_ctx.current_leg.high_idx = idx;
-
-   g_trigger_ctx.current_leg.low      = lo;
-   g_trigger_ctx.current_leg.low_idx  = idx;
-}
-
-inline void __TRG_ExtendCurrentLeg(const int idx,
-                                   const double hi,
-                                   const double lo)
-{
-   if(!g_trigger_ctx.current_leg_active) return;
-
-   g_trigger_ctx.current_leg.end_idx = idx;
-
-   if(hi > g_trigger_ctx.current_leg.high)
-   {
-      g_trigger_ctx.current_leg.high     = hi;
-      g_trigger_ctx.current_leg.high_idx = idx;
+            const int last = TRG_MAX_ACTIVE_SESSIONS - 1;
+            sessions[last].active   = true;
+            sessions[last].kind     = evt.kind;
+            sessions[last].ns       = evt.ns;
+            sessions[last].dir      = evt.dir;
+            sessions[last].t        = evt.t;
+            sessions[last].bar_time = evt.bar_time;
+            sessions[last].seq      = evt.seq;
+            session_count = TRG_MAX_ACTIVE_SESSIONS;
+         }
+      }
+      else
+      {
+         for(int s=session_count-1; s>=0; --s)
+         {
+            if(__TRG_SessionMatchesStop(sessions[s], evt.kind, evt.ns, evt.dir))
+            {
+               sessions[s].active = false;
+               break;
+            }
+         }
+      }
    }
 
-   if(lo < g_trigger_ctx.current_leg.low)
-   {
-      g_trigger_ctx.current_leg.low     = lo;
-      g_trigger_ctx.current_leg.low_idx = idx;
-   }
-}
+   bool      new_active     = false;
+   int       new_start_seq  = -1;
+   int       new_start_kind = 0;
+   int       new_start_ns   = WB15_NS_NONE;
+   Direction new_dir        = DIR_UP;
+   datetime  new_start_time = 0;
+   datetime  new_start_bar  = 0;
 
-inline void __TRG_ShiftClosedLegsLeft()
-{
-   for(int i=1; i<4; ++i)
-      g_trigger_ctx.closed_legs[i-1] = g_trigger_ctx.closed_legs[i];
-}
-
-inline void __TRG_PushCurrentLegToClosed()
-{
-   if(!g_trigger_ctx.current_leg_active || !g_trigger_ctx.current_leg.used)
-      return;
-
-   if(g_trigger_ctx.closed_count < 4)
+   for(int s=session_count-1; s>=0; --s)
    {
-      g_trigger_ctx.closed_legs[g_trigger_ctx.closed_count] = g_trigger_ctx.current_leg;
-      g_trigger_ctx.closed_count++;
-   }
-   else
-   {
-      __TRG_ShiftClosedLegsLeft();
-      g_trigger_ctx.closed_legs[3] = g_trigger_ctx.current_leg;
+      if(!sessions[s].active) continue;
+      new_active     = true;
+      new_start_seq  = sessions[s].seq;
+      new_start_kind = sessions[s].kind;
+      new_start_ns   = sessions[s].ns;
+      new_dir        = sessions[s].dir;
+      new_start_time = sessions[s].t;
+      new_start_bar  = sessions[s].bar_time;
+      break;
    }
 
-   g_trigger_ctx.current_leg_active = false;
-   __TRG_ClearLeg(g_trigger_ctx.current_leg);
+   bool changed = false;
+   if(new_active     != g_trigger_ctx.active) changed = true;
+   if(new_start_seq  != g_trigger_ctx.active_start_seq) changed = true;
+   if(new_start_kind != g_trigger_ctx.active_start_kind) changed = true;
+   if(new_start_ns   != g_trigger_ctx.active_start_ns) changed = true;
+   if(new_dir        != g_trigger_ctx.active_dir) changed = true;
+   if(new_start_time != g_trigger_ctx.active_start_time) changed = true;
+   if(new_start_bar  != g_trigger_ctx.active_start_bar_time) changed = true;
+
+   g_trigger_ctx.active                = new_active;
+   g_trigger_ctx.active_start_seq      = new_start_seq;
+   g_trigger_ctx.active_start_kind     = new_start_kind;
+   g_trigger_ctx.active_start_ns       = new_start_ns;
+   g_trigger_ctx.active_dir            = new_dir;
+   g_trigger_ctx.active_start_time     = new_start_time;
+   g_trigger_ctx.active_start_bar_time = new_start_bar;
+
+   if(changed)
+      __TRG_ResetWindowState(true);
 }
 
-inline bool __TRG_LegIsUp(const TriggerLeg &leg) { return (leg.used && leg.dir == TRG_LEG_UP); }
-inline bool __TRG_LegIsDn(const TriggerLeg &leg) { return (leg.used && leg.dir == TRG_LEG_DN); }
-
+// ----------------------------------------------------------------------------
+// Marker helpers
+// ----------------------------------------------------------------------------
 inline void __TRG_DrawTextUnique(const string base,
                                  const datetime t,
                                  const double price,
@@ -451,301 +666,201 @@ inline void __TRG_DrawDashedLine(const string base,
    ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
 }
 
-inline void __TRG_DrawMarker(const string base,
+inline void __TRG_DrawMarker(const int type_id,
+                             const int gate_serial,
                              const datetime ref_t,
                              const datetime hit_t,
-                             const double   level)
+                             const double level)
 {
+   string dir_tag = (g_trigger_ctx.active_dir == DIR_UP ? "U" : "D");
+   string seq_tag = IntegerToString(g_trigger_ctx.active_start_seq);
+   string hit_tag = IntegerToString(g_trigger_ctx.window_hit_count + 1);
+   string gate_tag= IntegerToString(gate_serial);
+   string type_tag= IntegerToString(type_id);
+   string base = StringFormat("TRG_%s_%s_%s_%s_%s", dir_tag, seq_tag, hit_tag, gate_tag, type_tag);
+
    __TRG_DrawDashedLine(base + "_L", ref_t, hit_t, level, clrYellow);
    __TRG_DrawTextUnique(base + "_T", hit_t, level, "T", clrYellow, 10);
 }
 
-inline void __TRG_SelectMaxHigh(const TriggerLeg &leg, double &best_price, int &best_idx)
+// ----------------------------------------------------------------------------
+// Leg processing / gate creation
+// ----------------------------------------------------------------------------
+inline void __TRG_StartCurrentLeg(const int dir,
+                                  const int idx,
+                                  const double hi,
+                                  const double lo)
 {
-   if(!leg.used) return;
-   if(best_idx < 0 || leg.high > best_price)
+   g_trigger_ctx.current_leg_active   = true;
+   g_trigger_ctx.current_leg.used     = true;
+   g_trigger_ctx.current_leg.dir      = dir;
+   g_trigger_ctx.current_leg.start_idx= idx;
+   g_trigger_ctx.current_leg.end_idx  = idx;
+   g_trigger_ctx.current_leg.high     = hi;
+   g_trigger_ctx.current_leg.high_idx = idx;
+   g_trigger_ctx.current_leg.low      = lo;
+   g_trigger_ctx.current_leg.low_idx  = idx;
+}
+
+inline void __TRG_ExtendCurrentLeg(const int idx,
+                                   const double hi,
+                                   const double lo)
+{
+   if(!g_trigger_ctx.current_leg_active) return;
+
+   g_trigger_ctx.current_leg.end_idx = idx;
+   if(hi > g_trigger_ctx.current_leg.high)
    {
-      best_price = leg.high;
-      best_idx   = leg.high_idx;
+      g_trigger_ctx.current_leg.high     = hi;
+      g_trigger_ctx.current_leg.high_idx = idx;
+   }
+   if(lo < g_trigger_ctx.current_leg.low)
+   {
+      g_trigger_ctx.current_leg.low      = lo;
+      g_trigger_ctx.current_leg.low_idx  = idx;
    }
 }
 
-inline void __TRG_SelectMinLow(const TriggerLeg &leg, double &best_price, int &best_idx)
+inline void __TRG_PushCurrentLegToClosed()
 {
-   if(!leg.used) return;
-   if(best_idx < 0 || leg.low < best_price)
-   {
-      best_price = leg.low;
-      best_idx   = leg.low_idx;
-   }
-}
-
-inline void __TRG_ProcessMaxHigh2(const TriggerLeg &L0,
-                                  const TriggerLeg &L1,
-                                  double &price,
-                                  int &idx)
-{
-   idx = -1;
-   price = 0.0;
-   __TRG_SelectMaxHigh(L0, price, idx);
-   __TRG_SelectMaxHigh(L1, price, idx);
-}
-
-inline void __TRG_ProcessMinLow2(const TriggerLeg &L0,
-                                 const TriggerLeg &L1,
-                                 double &price,
-                                 int &idx)
-{
-   idx = -1;
-   price = 0.0;
-   __TRG_SelectMinLow(L0, price, idx);
-   __TRG_SelectMinLow(L1, price, idx);
-}
-
-inline void __TRG_ProcessMaxHigh2_FromLegs(const TriggerLeg &L2,
-                                           const TriggerLeg &L3,
-                                           double &price,
-                                           int &idx)
-{
-   idx = -1;
-   price = 0.0;
-   __TRG_SelectMaxHigh(L2, price, idx);
-   __TRG_SelectMaxHigh(L3, price, idx);
-}
-
-inline void __TRG_ProcessMinLow2_FromLegs(const TriggerLeg &L2,
-                                          const TriggerLeg &L3,
-                                          double &price,
-                                          int &idx)
-{
-   idx = -1;
-   price = 0.0;
-   __TRG_SelectMinLow(L2, price, idx);
-   __TRG_SelectMinLow(L3, price, idx);
-}
-
-inline void __TRG_AfterHitReset()
-{
-   __TRG_ResetLegsOnly();
-   g_trigger_ctx.anchor_blocked = false;
-}
-
-inline void __TRG_RecordHit(const MqlRates &rates[],
-                            const int       n,
-                            const int       bar_idx,
-                            const int       src_idx,
-                            const double    level,
-                            const int       trig_type)
-{
-   if(bar_idx < 0 || bar_idx >= n) return;
-   if(src_idx < 0 || src_idx >= n) return;
-   if(level <= 0.0) return;
-
-   const datetime t = rates[bar_idx].time;
-   if(g_trigger_ctx.last_hit_time  == t &&
-      MathAbs(g_trigger_ctx.last_hit_level - level) <= __TRG_Eps() &&
-      g_trigger_ctx.last_hit_dir   == g_trigger_ctx.active_dir &&
-      g_trigger_ctx.last_hit_type  == trig_type)
-   {
+   if(!g_trigger_ctx.current_leg_active || !g_trigger_ctx.current_leg.used)
       return;
-   }
 
-   string name;
-   if(g_trigger_ctx.active_dir == DIR_UP)
+   if(g_trigger_ctx.closed_count < TRG_MAX_CLOSED_LEGS)
    {
-      g_trigger_ctx.up_counter++;
-      name = "TRG_U_" + IntegerToString(g_trigger_ctx.up_counter)
-           + "_S" + IntegerToString(g_trigger_ctx.active_start_seq)
-           + "_A" + IntegerToString(g_trigger_ctx.anchor_idx)
-           + "_T" + IntegerToString(trig_type);
+      g_trigger_ctx.closed_legs[g_trigger_ctx.closed_count] = g_trigger_ctx.current_leg;
+      g_trigger_ctx.closed_count++;
    }
    else
    {
-      g_trigger_ctx.dn_counter++;
-      name = "TRG_D_" + IntegerToString(g_trigger_ctx.dn_counter)
-           + "_S" + IntegerToString(g_trigger_ctx.active_start_seq)
-           + "_A" + IntegerToString(g_trigger_ctx.anchor_idx)
-           + "_T" + IntegerToString(trig_type);
+      for(int i=1; i<TRG_MAX_CLOSED_LEGS; ++i)
+         g_trigger_ctx.closed_legs[i-1] = g_trigger_ctx.closed_legs[i];
+      g_trigger_ctx.closed_legs[TRG_MAX_CLOSED_LEGS - 1] = g_trigger_ctx.current_leg;
    }
 
-   __TRG_DrawMarker(name, rates[src_idx].time, t, level);
-
-   g_trigger_ctx.last_hit_time  = t;
-   g_trigger_ctx.last_hit_level = level;
-   g_trigger_ctx.last_hit_dir   = g_trigger_ctx.active_dir;
-   g_trigger_ctx.last_hit_type  = trig_type;
-
-   if(InpDebugPrints)
-      Print("[TRIGGER] Hit | dir=", (g_trigger_ctx.active_dir==DIR_UP?"UP":"DOWN"),
-            " | type=", trig_type,
-            " | time=", T(t),
-            " | level=", DoubleToString(level, _Digits),
-            " | start_seq=", g_trigger_ctx.active_start_seq,
-            " | anchor_idx=", g_trigger_ctx.anchor_idx);
-
-   __TRG_AfterHitReset();
+   g_trigger_ctx.current_leg_active = false;
+   __TRG_ClearLeg(g_trigger_ctx.current_leg);
 }
 
-inline void __TRG_MaybeEstablishBullishRange()
+inline bool __TRG_LegIsUp(const TriggerLeg &leg)
 {
-   if(g_trigger_ctx.range_ready) return;
-   if(g_trigger_ctx.closed_count < 2) return;
-   if(g_trigger_ctx.anchor_idx < 0) return;
-
-   const TriggerLeg L0 = g_trigger_ctx.closed_legs[g_trigger_ctx.closed_count - 2];
-   const TriggerLeg L1 = g_trigger_ctx.closed_legs[g_trigger_ctx.closed_count - 1];
-   if(!__TRG_LegIsUp(L0) || !__TRG_LegIsDn(L1))
-      return;
-
-   const double floor = g_trigger_ctx.anchor_level;
-   if(L1.low <= (floor + __TRG_Eps()))
-      return;
-
-   double ceiling = 0.0;
-   int    ceil_idx = -1;
-   __TRG_ProcessMaxHigh2(L0, L1, ceiling, ceil_idx);
-   if(ceil_idx < 0) return;
-
-   g_trigger_ctx.range_ready         = true;
-   g_trigger_ctx.range_primary_level = ceiling;
-   g_trigger_ctx.range_primary_idx   = ceil_idx;
-   g_trigger_ctx.range_primary_time  = g_trigger_ctx.anchor_time;
+   return (leg.used && leg.dir == TRG_LEG_UP);
 }
 
-inline void __TRG_MaybeEstablishBearishRange()
+inline bool __TRG_LegIsDn(const TriggerLeg &leg)
 {
-   if(g_trigger_ctx.range_ready) return;
-   if(g_trigger_ctx.closed_count < 2) return;
-   if(g_trigger_ctx.anchor_idx < 0) return;
-
-   const TriggerLeg L0 = g_trigger_ctx.closed_legs[g_trigger_ctx.closed_count - 2];
-   const TriggerLeg L1 = g_trigger_ctx.closed_legs[g_trigger_ctx.closed_count - 1];
-   if(!__TRG_LegIsDn(L0) || !__TRG_LegIsUp(L1))
-      return;
-
-   const double ceiling = g_trigger_ctx.anchor_level;
-   if(L1.high >= (ceiling - __TRG_Eps()))
-      return;
-
-   double floor = 0.0;
-   int    floor_idx = -1;
-   __TRG_ProcessMinLow2(L0, L1, floor, floor_idx);
-   if(floor_idx < 0) return;
-
-   g_trigger_ctx.range_ready         = true;
-   g_trigger_ctx.range_primary_level = floor;
-   g_trigger_ctx.range_primary_idx   = floor_idx;
-   g_trigger_ctx.range_primary_time  = g_trigger_ctx.anchor_time;
+   return (leg.used && leg.dir == TRG_LEG_DN);
 }
 
-inline void __TRG_ResolvePrimarySourceTime(const MqlRates &rates[], const int n, datetime &t)
+inline bool __TRG_GateExists(const int base_idx, const int phase2_idx)
 {
-   t = 0;
-   if(g_trigger_ctx.range_primary_idx >= 0 && g_trigger_ctx.range_primary_idx < n)
-      t = rates[g_trigger_ctx.range_primary_idx].time;
-   if(t <= 0)
-      t = g_trigger_ctx.anchor_time;
-}
-
-inline void __TRG_EvalBullish(const MqlRates &rates[], const int n, const int bar_idx)
-{
-   if(g_trigger_ctx.anchor_idx < 0 || g_trigger_ctx.anchor_idx >= n) return;
-   if(!g_trigger_ctx.range_ready) return;
-   if(!g_trigger_ctx.current_leg_active) return;
-   if(g_trigger_ctx.current_leg.dir != TRG_LEG_UP) return;
-   if(g_trigger_ctx.closed_count < 4) return;
-
-   const TriggerLeg L0 = g_trigger_ctx.closed_legs[g_trigger_ctx.closed_count - 4];
-   const TriggerLeg L1 = g_trigger_ctx.closed_legs[g_trigger_ctx.closed_count - 3];
-   const TriggerLeg L2 = g_trigger_ctx.closed_legs[g_trigger_ctx.closed_count - 2];
-   const TriggerLeg L3 = g_trigger_ctx.closed_legs[g_trigger_ctx.closed_count - 1];
-
-   if(!__TRG_LegIsUp(L0) || !__TRG_LegIsDn(L1) || !__TRG_LegIsUp(L2) || !__TRG_LegIsDn(L3))
-      return;
-
-   const double floor      = g_trigger_ctx.anchor_level;
-   const double primary_hi = g_trigger_ctx.range_primary_level;
-   const double eps        = __TRG_Eps();
-
-   if(primary_hi <= 0.0) return;
-   if(L1.low <= (floor + eps)) return;
-   if(L3.low <= (floor + eps)) return;
-   if(L3.low >= (L1.low - eps)) return;
-
-   // Type-1: the second up-leg must stay inside the primary ceiling,
-   // and the final current up-leg must break that primary ceiling.
-   if(L2.high <= (primary_hi + eps) &&
-      g_trigger_ctx.current_leg.high > (primary_hi + eps))
+   int cnt = ArraySize(g_trigger_gates);
+   for(int i=0; i<cnt; ++i)
    {
-      int src_idx = g_trigger_ctx.range_primary_idx;
-      if(src_idx < 0) src_idx = L0.high_idx;
-      __TRG_RecordHit(rates, n, bar_idx, src_idx, primary_hi, 1);
-      return;
+      if(!g_trigger_gates[i].used) continue;
+      if(g_trigger_gates[i].base_idx == base_idx && g_trigger_gates[i].phase2_idx == phase2_idx)
+         return true;
+   }
+   return false;
+}
+
+inline void __TRG_AddBullGate(const TriggerLeg &up_leg,
+                              const TriggerLeg &dn_leg,
+                              const int birth_idx,
+                              const MqlRates &rates[],
+                              const int n)
+{
+   if(birth_idx < 0 || birth_idx >= n) return;
+   if(up_leg.low_idx < 0 || dn_leg.low_idx < 0) return;
+   if(__TRG_GateExists(up_leg.low_idx, dn_leg.low_idx)) return;
+
+   TriggerGate gate;
+   __TRG_ClearGate(gate);
+
+   gate.used       = true;
+   gate.serial     = (++g_trigger_ctx.gate_serial_seq);
+   gate.birth_idx  = birth_idx;
+   gate.birth_time = rates[birth_idx].time;
+
+   gate.base_level = up_leg.low;
+   gate.base_idx   = up_leg.low_idx;
+
+   gate.phase1_level = up_leg.high;
+   gate.phase1_idx   = up_leg.high_idx;
+   if(dn_leg.high > gate.phase1_level)
+   {
+      gate.phase1_level = dn_leg.high;
+      gate.phase1_idx   = dn_leg.high_idx;
    }
 
-   // Type-2: the second up-leg must already break the primary ceiling,
-   // then the next down-leg breaks the recent source low, and the final
-   // current up-leg breaks the highest high seen between break-1 and break-2.
-   if(L2.high > (primary_hi + eps))
+   gate.phase2_level = dn_leg.low;
+   gate.phase2_idx   = dn_leg.low_idx;
+
+   int pos = ArraySize(g_trigger_gates);
+   ArrayResize(g_trigger_gates, pos + 1);
+   g_trigger_gates[pos] = gate;
+}
+
+inline void __TRG_AddBearGate(const TriggerLeg &dn_leg,
+                              const TriggerLeg &up_leg,
+                              const int birth_idx,
+                              const MqlRates &rates[],
+                              const int n)
+{
+   if(birth_idx < 0 || birth_idx >= n) return;
+   if(dn_leg.high_idx < 0 || up_leg.high_idx < 0) return;
+   if(__TRG_GateExists(dn_leg.high_idx, up_leg.high_idx)) return;
+
+   TriggerGate gate;
+   __TRG_ClearGate(gate);
+
+   gate.used       = true;
+   gate.serial     = (++g_trigger_ctx.gate_serial_seq);
+   gate.birth_idx  = birth_idx;
+   gate.birth_time = rates[birth_idx].time;
+
+   gate.base_level = dn_leg.high;
+   gate.base_idx   = dn_leg.high_idx;
+
+   gate.phase1_level = dn_leg.low;
+   gate.phase1_idx   = dn_leg.low_idx;
+   if(up_leg.low < gate.phase1_level)
    {
-      double sec_hi = 0.0;
-      int    sec_hi_idx = -1;
-      __TRG_ProcessMaxHigh2_FromLegs(L2, L3, sec_hi, sec_hi_idx);
-      if(sec_hi_idx >= 0 && sec_hi > (primary_hi + eps) &&
-         g_trigger_ctx.current_leg.high > (sec_hi + eps))
+      gate.phase1_level = up_leg.low;
+      gate.phase1_idx   = up_leg.low_idx;
+   }
+
+   gate.phase2_level = up_leg.high;
+   gate.phase2_idx   = up_leg.high_idx;
+
+   int pos = ArraySize(g_trigger_gates);
+   ArrayResize(g_trigger_gates, pos + 1);
+   g_trigger_gates[pos] = gate;
+}
+
+inline void __TRG_TrySpawnGateOnReversal(const MqlRates &rates[],
+                                         const int n,
+                                         const int birth_idx)
+{
+   if(g_trigger_ctx.closed_count < 2) return;
+
+   TriggerLeg leg_a = g_trigger_ctx.closed_legs[g_trigger_ctx.closed_count - 2];
+   TriggerLeg leg_b = g_trigger_ctx.closed_legs[g_trigger_ctx.closed_count - 1];
+
+   if(g_trigger_ctx.active_dir == DIR_UP)
+   {
+      if(g_trigger_ctx.current_leg_active && g_trigger_ctx.current_leg.dir == TRG_LEG_UP &&
+         __TRG_LegIsUp(leg_a) && __TRG_LegIsDn(leg_b))
       {
-         __TRG_RecordHit(rates, n, bar_idx, sec_hi_idx, sec_hi, 2);
-         return;
+         __TRG_AddBullGate(leg_a, leg_b, birth_idx, rates, n);
       }
    }
-}
-
-inline void __TRG_EvalBearish(const MqlRates &rates[], const int n, const int bar_idx)
-{
-   if(g_trigger_ctx.anchor_idx < 0 || g_trigger_ctx.anchor_idx >= n) return;
-   if(!g_trigger_ctx.range_ready) return;
-   if(!g_trigger_ctx.current_leg_active) return;
-   if(g_trigger_ctx.current_leg.dir != TRG_LEG_DN) return;
-   if(g_trigger_ctx.closed_count < 4) return;
-
-   const TriggerLeg L0 = g_trigger_ctx.closed_legs[g_trigger_ctx.closed_count - 4];
-   const TriggerLeg L1 = g_trigger_ctx.closed_legs[g_trigger_ctx.closed_count - 3];
-   const TriggerLeg L2 = g_trigger_ctx.closed_legs[g_trigger_ctx.closed_count - 2];
-   const TriggerLeg L3 = g_trigger_ctx.closed_legs[g_trigger_ctx.closed_count - 1];
-
-   if(!__TRG_LegIsDn(L0) || !__TRG_LegIsUp(L1) || !__TRG_LegIsDn(L2) || !__TRG_LegIsUp(L3))
-      return;
-
-   const double ceiling    = g_trigger_ctx.anchor_level;
-   const double primary_lo = g_trigger_ctx.range_primary_level;
-   const double eps        = __TRG_Eps();
-
-   if(primary_lo <= 0.0) return;
-   if(L1.high >= (ceiling - eps)) return;
-   if(L3.high >= (ceiling - eps)) return;
-   if(L3.high <= (L1.high + eps)) return;
-
-   // Type-1 mirror.
-   if(L2.low >= (primary_lo - eps) &&
-      g_trigger_ctx.current_leg.low < (primary_lo - eps))
+   else
    {
-      int src_idx = g_trigger_ctx.range_primary_idx;
-      if(src_idx < 0) src_idx = L0.low_idx;
-      __TRG_RecordHit(rates, n, bar_idx, src_idx, primary_lo, 1);
-      return;
-   }
-
-   // Type-2 mirror.
-   if(L2.low < (primary_lo - eps))
-   {
-      double sec_lo = 0.0;
-      int    sec_lo_idx = -1;
-      __TRG_ProcessMinLow2_FromLegs(L2, L3, sec_lo, sec_lo_idx);
-      if(sec_lo_idx >= 0 && sec_lo < (primary_lo - eps) &&
-         g_trigger_ctx.current_leg.low < (sec_lo - eps))
+      if(g_trigger_ctx.current_leg_active && g_trigger_ctx.current_leg.dir == TRG_LEG_DN &&
+         __TRG_LegIsDn(leg_a) && __TRG_LegIsUp(leg_b))
       {
-         __TRG_RecordHit(rates, n, bar_idx, sec_lo_idx, sec_lo, 2);
-         return;
+         __TRG_AddBearGate(leg_a, leg_b, birth_idx, rates, n);
       }
    }
 }
@@ -758,54 +873,403 @@ inline void __TRG_ProcessBarToLegs(const MqlRates &rates[],
    if(bar_idx < 0 || bar_idx >= n) return;
 
    const MqlRates bar = rates[bar_idx];
-   const int dir = __TRG_CandleDir(bar);
-   const bool is_inside = ((bar_idx >= 0 && bar_idx < n) ? insideHL[bar_idx] : false);
+   const int dir      = __TRG_CandleDir(bar);
+   const bool inside  = insideHL[bar_idx];
 
-   // Inside bars must participate in trigger formation,
-   // but they must never force a direction flip by themselves.
-   if(is_inside)
+   if(!g_trigger_ctx.current_leg_active)
    {
-      if(!g_trigger_ctx.current_leg_active)
-      {
-         if(dir != TRG_LEG_NONE)
-            __TRG_StartCurrentLeg(dir, bar_idx, bar.high, bar.low);
-      }
-      else
-      {
-         __TRG_ExtendCurrentLeg(bar_idx, bar.high, bar.low);
-      }
+      if(dir == TRG_LEG_NONE)
+         return;
+
+      __TRG_StartCurrentLeg(dir, bar_idx, bar.high, bar.low);
+      return;
+   }
+
+   if(inside || dir == TRG_LEG_NONE || dir == g_trigger_ctx.current_leg.dir)
+   {
+      __TRG_ExtendCurrentLeg(bar_idx, bar.high, bar.low);
+      return;
+   }
+
+   __TRG_PushCurrentLegToClosed();
+   __TRG_StartCurrentLeg(dir, bar_idx, bar.high, bar.low);
+   __TRG_TrySpawnGateOnReversal(rates, n, bar_idx);
+}
+
+// ----------------------------------------------------------------------------
+// Hit selection helpers
+// ----------------------------------------------------------------------------
+inline bool __TRG_IsBetterHit(const TriggerHitCandidate &cand,
+                              const TriggerHitCandidate &best)
+{
+   if(!cand.hit)  return false;
+   if(!best.hit)  return true;
+
+   if(cand.bar_idx < best.bar_idx) return true;
+   if(cand.bar_idx > best.bar_idx) return false;
+
+   if(cand.gate_birth_idx > best.gate_birth_idx) return true;
+   if(cand.gate_birth_idx < best.gate_birth_idx) return false;
+
+   if(g_trigger_ctx.active_dir == DIR_UP)
+   {
+      if(cand.level < (best.level - __TRG_Eps())) return true;
+      if(cand.level > (best.level + __TRG_Eps())) return false;
    }
    else
    {
-      if(dir == TRG_LEG_NONE)
+      if(cand.level > (best.level + __TRG_Eps())) return true;
+      if(cand.level < (best.level - __TRG_Eps())) return false;
+   }
+
+   return (cand.type_id < best.type_id);
+}
+
+inline void __TRG_ConsiderHit(TriggerHitCandidate &best,
+                              const int gate_index,
+                              const TriggerGate &gate,
+                              const int type_id,
+                              const int bar_idx,
+                              const double level,
+                              const int src_idx)
+{
+   if(gate_index < 0) return;
+   if(bar_idx < 0) return;
+   if(src_idx < 0) return;
+
+   TriggerHitCandidate cand;
+   __TRG_ClearHitCandidate(cand);
+
+   cand.hit            = true;
+   cand.gate_index     = gate_index;
+   cand.gate_serial    = gate.serial;
+   cand.gate_birth_idx = gate.birth_idx;
+   cand.type_id        = type_id;
+   cand.bar_idx        = bar_idx;
+   cand.level          = level;
+   cand.src_idx        = src_idx;
+
+   if(__TRG_IsBetterHit(cand, best))
+      best = cand;
+}
+
+// ----------------------------------------------------------------------------
+// Gate evaluation
+// ----------------------------------------------------------------------------
+inline void __TRG_UpdateBullGate(const int gate_index,
+                                 TriggerGate &gate,
+                                 const MqlRates &rates[],
+                                 const int n,
+                                 const int bar_idx,
+                                 TriggerHitCandidate &best)
+{
+   const MqlRates bar = rates[bar_idx];
+   const int cur_dir = (g_trigger_ctx.current_leg_active ? g_trigger_ctx.current_leg.dir
+                                                         : __TRG_CandleDir(bar));
+
+   if(__TRG_BreakBelowStrict(bar.low, gate.base_level))
+   {
+      gate.used = false;
+      return;
+   }
+
+   if(cur_dir == TRG_LEG_UP)
+   {
+      if(!gate.type1_arm_final && !gate.type2_arm_final)
       {
-         if(g_trigger_ctx.current_leg_active)
-            __TRG_ExtendCurrentLeg(bar_idx, bar.high, bar.low);
+         if(bar.low < gate.phase2_level && !__TRG_BreakBelowStrict(bar.low, gate.base_level))
+         {
+            gate.phase2_level = bar.low;
+            gate.phase2_idx   = bar_idx;
+         }
       }
-      else if(!g_trigger_ctx.current_leg_active)
+
+      if(gate.type2_possible && gate.type2_break1_seen && !gate.type2_arm_final)
       {
-         __TRG_StartCurrentLeg(dir, bar_idx, bar.high, bar.low);
+         if(bar.high > gate.phase3_level)
+         {
+            gate.phase3_level = bar.high;
+            gate.phase3_idx   = bar_idx;
+         }
       }
-      else if(g_trigger_ctx.current_leg.dir == dir)
+
+      if(!gate.type2_break1_seen)
       {
-         __TRG_ExtendCurrentLeg(bar_idx, bar.high, bar.low);
+         if(__TRG_BreakAboveStrict(bar.high, gate.phase1_level))
+         {
+            gate.type1_possible    = false;
+            gate.type2_break1_seen = true;
+            gate.phase3_level      = bar.high;
+            gate.phase3_idx        = bar_idx;
+         }
+         else if(gate.type1_possible)
+         {
+            gate.type1_middle_seen = true;
+         }
       }
+   }
+   else if(cur_dir == TRG_LEG_DN)
+   {
+      if(gate.type2_possible && gate.type2_break1_seen && !gate.type2_arm_final)
+      {
+         if(bar.high > gate.phase3_level)
+         {
+            gate.phase3_level = bar.high;
+            gate.phase3_idx   = bar_idx;
+         }
+      }
+
+      if(gate.type1_possible && gate.type1_middle_seen && !gate.type1_arm_final)
+      {
+         if(__TRG_BreakBelowStrict(bar.low, gate.phase2_level))
+         {
+            if(__TRG_BreakBelowStrict(bar.low, gate.base_level))
+            {
+               gate.used = false;
+               return;
+            }
+
+            gate.type1_arm_final = true;
+            gate.type1_target    = gate.phase1_level;
+            gate.type1_src_idx   = gate.phase1_idx;
+            gate.type1_arm_idx   = bar_idx;
+         }
+      }
+
+      if(gate.type2_possible && gate.type2_break1_seen && !gate.type2_arm_final)
+      {
+         if(__TRG_BreakBelowStrict(bar.low, gate.phase2_level))
+         {
+            if(__TRG_BreakBelowStrict(bar.low, gate.base_level))
+            {
+               gate.used = false;
+               return;
+            }
+
+            gate.type2_arm_final = true;
+            gate.type2_target    = gate.phase3_level;
+            gate.type2_src_idx   = gate.phase3_idx;
+            gate.type2_arm_idx   = bar_idx;
+         }
+      }
+   }
+
+   if(gate.type1_arm_final && gate.type1_src_idx >= 0 && bar_idx > gate.type1_arm_idx)
+   {
+      if(__TRG_TouchHigh(bar.high, gate.type1_target))
+         __TRG_ConsiderHit(best, gate_index, gate, 1, bar_idx, gate.type1_target, gate.type1_src_idx);
+   }
+
+   if(gate.type2_arm_final && gate.type2_src_idx >= 0 && bar_idx > gate.type2_arm_idx)
+   {
+      if(__TRG_TouchHigh(bar.high, gate.type2_target))
+         __TRG_ConsiderHit(best, gate_index, gate, 2, bar_idx, gate.type2_target, gate.type2_src_idx);
+   }
+}
+
+inline void __TRG_UpdateBearGate(const int gate_index,
+                                 TriggerGate &gate,
+                                 const MqlRates &rates[],
+                                 const int n,
+                                 const int bar_idx,
+                                 TriggerHitCandidate &best)
+{
+   const MqlRates bar = rates[bar_idx];
+   const int cur_dir = (g_trigger_ctx.current_leg_active ? g_trigger_ctx.current_leg.dir
+                                                         : __TRG_CandleDir(bar));
+
+   if(__TRG_BreakAboveStrict(bar.high, gate.base_level))
+   {
+      gate.used = false;
+      return;
+   }
+
+   if(cur_dir == TRG_LEG_DN)
+   {
+      if(!gate.type1_arm_final && !gate.type2_arm_final)
+      {
+         if(bar.high > gate.phase2_level && !__TRG_BreakAboveStrict(bar.high, gate.base_level))
+         {
+            gate.phase2_level = bar.high;
+            gate.phase2_idx   = bar_idx;
+         }
+      }
+
+      if(gate.type2_possible && gate.type2_break1_seen && !gate.type2_arm_final)
+      {
+         if(bar.low < gate.phase3_level)
+         {
+            gate.phase3_level = bar.low;
+            gate.phase3_idx   = bar_idx;
+         }
+      }
+
+      if(!gate.type2_break1_seen)
+      {
+         if(__TRG_BreakBelowStrict(bar.low, gate.phase1_level))
+         {
+            gate.type1_possible    = false;
+            gate.type2_break1_seen = true;
+            gate.phase3_level      = bar.low;
+            gate.phase3_idx        = bar_idx;
+         }
+         else if(gate.type1_possible)
+         {
+            gate.type1_middle_seen = true;
+         }
+      }
+   }
+   else if(cur_dir == TRG_LEG_UP)
+   {
+      if(gate.type2_possible && gate.type2_break1_seen && !gate.type2_arm_final)
+      {
+         if(bar.low < gate.phase3_level)
+         {
+            gate.phase3_level = bar.low;
+            gate.phase3_idx   = bar_idx;
+         }
+      }
+
+      if(gate.type1_possible && gate.type1_middle_seen && !gate.type1_arm_final)
+      {
+         if(__TRG_BreakAboveStrict(bar.high, gate.phase2_level))
+         {
+            if(__TRG_BreakAboveStrict(bar.high, gate.base_level))
+            {
+               gate.used = false;
+               return;
+            }
+
+            gate.type1_arm_final = true;
+            gate.type1_target    = gate.phase1_level;
+            gate.type1_src_idx   = gate.phase1_idx;
+            gate.type1_arm_idx   = bar_idx;
+         }
+      }
+
+      if(gate.type2_possible && gate.type2_break1_seen && !gate.type2_arm_final)
+      {
+         if(__TRG_BreakAboveStrict(bar.high, gate.phase2_level))
+         {
+            if(__TRG_BreakAboveStrict(bar.high, gate.base_level))
+            {
+               gate.used = false;
+               return;
+            }
+
+            gate.type2_arm_final = true;
+            gate.type2_target    = gate.phase3_level;
+            gate.type2_src_idx   = gate.phase3_idx;
+            gate.type2_arm_idx   = bar_idx;
+         }
+      }
+   }
+
+   if(gate.type1_arm_final && gate.type1_src_idx >= 0 && bar_idx > gate.type1_arm_idx)
+   {
+      if(__TRG_TouchLow(bar.low, gate.type1_target))
+         __TRG_ConsiderHit(best, gate_index, gate, 1, bar_idx, gate.type1_target, gate.type1_src_idx);
+   }
+
+   if(gate.type2_arm_final && gate.type2_src_idx >= 0 && bar_idx > gate.type2_arm_idx)
+   {
+      if(__TRG_TouchLow(bar.low, gate.type2_target))
+         __TRG_ConsiderHit(best, gate_index, gate, 2, bar_idx, gate.type2_target, gate.type2_src_idx);
+   }
+}
+
+inline void __TRG_CompactGates()
+{
+   int cnt = ArraySize(g_trigger_gates);
+   if(cnt <= 0) return;
+
+   int write_pos = 0;
+   for(int i=0; i<cnt; ++i)
+   {
+      if(!g_trigger_gates[i].used) continue;
+      if(write_pos != i)
+         g_trigger_gates[write_pos] = g_trigger_gates[i];
+      write_pos++;
+   }
+
+   if(write_pos != cnt)
+      ArrayResize(g_trigger_gates, write_pos);
+}
+
+inline void __TRG_EvaluateGates(const MqlRates &rates[],
+                                const int n,
+                                const int bar_idx,
+                                TriggerHitCandidate &best)
+{
+   int cnt = ArraySize(g_trigger_gates);
+   for(int i=0; i<cnt; ++i)
+   {
+      if(!g_trigger_gates[i].used) continue;
+
+      if(g_trigger_ctx.active_dir == DIR_UP)
+         __TRG_UpdateBullGate(i, g_trigger_gates[i], rates, n, bar_idx, best);
       else
-      {
-         __TRG_PushCurrentLegToClosed();
-         __TRG_StartCurrentLeg(dir, bar_idx, bar.high, bar.low);
-      }
+         __TRG_UpdateBearGate(i, g_trigger_gates[i], rates, n, bar_idx, best);
+   }
+
+   __TRG_CompactGates();
+}
+
+inline void __TRG_AfterHitKeepMother()
+{
+   __TRG_ClearAllGates();
+   __TRG_ResetLegsOnly();
+}
+
+inline void __TRG_HandleHit(const TriggerHitCandidate &best,
+                            const MqlRates &rates[],
+                            const int n)
+{
+   if(!best.hit) return;
+   if(best.bar_idx < 0 || best.bar_idx >= n) return;
+   if(best.src_idx < 0 || best.src_idx >= n) return;
+
+   __TRG_DrawMarker(best.type_id,
+                    best.gate_serial,
+                    rates[best.src_idx].time,
+                    rates[best.bar_idx].time,
+                    best.level);
+
+   g_trigger_ctx.window_hit_count++;
+   __TRG_AfterHitKeepMother();
+}
+
+// ----------------------------------------------------------------------------
+// Per-bar engine
+// ----------------------------------------------------------------------------
+inline void __TRG_EnsureMother(const MqlRates &rates[], const int bar_idx)
+{
+   if(g_trigger_ctx.mother_set) return;
+
+   g_trigger_ctx.mother_set   = true;
+   g_trigger_ctx.mother_idx   = bar_idx;
+   g_trigger_ctx.mother_time  = rates[bar_idx].time;
+   g_trigger_ctx.mother_level = (g_trigger_ctx.active_dir == DIR_UP ? rates[bar_idx].low
+                                                                    : rates[bar_idx].high);
+}
+
+inline void __TRG_CheckMotherReset(const MqlRates &rates[], const int bar_idx)
+{
+   if(!g_trigger_ctx.mother_set)
+   {
+      __TRG_EnsureMother(rates, bar_idx);
+      return;
    }
 
    if(g_trigger_ctx.active_dir == DIR_UP)
    {
-      __TRG_MaybeEstablishBullishRange();
-      __TRG_EvalBullish(rates, n, bar_idx);
+      if(__TRG_BreakBelowStrict(rates[bar_idx].low, g_trigger_ctx.mother_level))
+         __TRG_ResetForNewMother(rates, bar_idx);
    }
    else
    {
-      __TRG_MaybeEstablishBearishRange();
-      __TRG_EvalBearish(rates, n, bar_idx);
+      if(__TRG_BreakAboveStrict(rates[bar_idx].high, g_trigger_ctx.mother_level))
+         __TRG_ResetForNewMother(rates, bar_idx);
    }
 }
 
@@ -819,86 +1283,40 @@ inline void Trigger_OnBarCandidate(const string sym,
    if(!__TRG_IsWorkerTF()) return;
    if(!__TRG_IsMajorWorld()) return;
    if(n <= 0 || bar_idx < 0 || bar_idx >= n) return;
-   if(candidate_idx < 0 || candidate_idx >= n) return;
+   if(candidate_idx < -1) return; // intentionally unused in the independent engine
 
    if(!__TRG_LoadBridgeEvents(sym))
       return;
 
    const datetime bar_time = rates[bar_idx].time;
-   __TRG_ApplyEventAt(bar_time);
-   if(!g_trigger_ctx.active) return;
-
-   // Detection starts strictly from the active H4 START signal onward.
-   if(bar_time < g_trigger_ctx.active_start_time)
+   __TRG_ApplyWindowAt(bar_time);
+   if(!g_trigger_ctx.active)
       return;
 
-   // Rewind guard: if the API replays older bars inside the same start window,
-   // only reset the trigger-local FSM; normal scan logic stays untouched.
-   if(g_trigger_ctx.last_bar_time > 0 && bar_time < g_trigger_ctx.last_bar_time)
-      __TRG_ResetLegsOnly();
-
-   const double new_anchor_level = (g_trigger_ctx.active_dir == DIR_UP ? rates[candidate_idx].low
-                                                                       : rates[candidate_idx].high);
-   const datetime new_anchor_time = rates[candidate_idx].time;
-
-   const bool anchor_changed =
-      (candidate_idx != g_trigger_ctx.anchor_idx ||
-       new_anchor_time != g_trigger_ctx.anchor_time ||
-       MathAbs(new_anchor_level - g_trigger_ctx.anchor_level) > __TRG_Eps());
-
-   if(anchor_changed)
-   {
-      g_trigger_ctx.anchor_idx     = candidate_idx;
-      g_trigger_ctx.anchor_time    = new_anchor_time;
-      g_trigger_ctx.anchor_level   = new_anchor_level;
-      g_trigger_ctx.anchor_blocked = false;
-      __TRG_ResetLegsOnly();
-   }
-
-   if(g_trigger_ctx.anchor_idx < 0)
+   // Start from the very worker candle that contains the H4 signal-on event.
+   if(bar_time < g_trigger_ctx.active_start_bar_time)
       return;
 
-   // Do not re-process the same bar for the same active start + same anchor.
-   if(g_trigger_ctx.last_bar_time   == bar_time &&
-      g_trigger_ctx.last_start_seq  == g_trigger_ctx.active_start_seq &&
-      g_trigger_ctx.last_anchor_idx == g_trigger_ctx.anchor_idx)
-   {
-      return;
-   }
-
-   g_trigger_ctx.last_bar_time   = bar_time;
-   g_trigger_ctx.last_bar_idx    = bar_idx;
-   g_trigger_ctx.last_start_seq  = g_trigger_ctx.active_start_seq;
-   g_trigger_ctx.last_anchor_idx = g_trigger_ctx.anchor_idx;
-
-   // Trigger evaluation starts strictly AFTER the anchor candle itself.
-   if(bar_idx <= g_trigger_ctx.anchor_idx)
+   if(g_trigger_ctx.window_hit_count >= TRG_MAX_HITS_PER_WINDOW)
       return;
 
-   // Shared lower/upper boundary from the anchor candidate.
-   if(g_trigger_ctx.active_dir == DIR_UP)
-   {
-      if(rates[bar_idx].low < (g_trigger_ctx.anchor_level - __TRG_Eps()))
-      {
-         g_trigger_ctx.anchor_blocked = true;
-         __TRG_ResetLegsOnly();
-         return;
-      }
-   }
-   else
-   {
-      if(rates[bar_idx].high > (g_trigger_ctx.anchor_level + __TRG_Eps()))
-      {
-         g_trigger_ctx.anchor_blocked = true;
-         __TRG_ResetLegsOnly();
-         return;
-      }
-   }
-
-   if(g_trigger_ctx.anchor_blocked)
+   // Passive shield against duplicate calls and historical rewinds from the API.
+   if(g_trigger_ctx.last_processed_time > 0 && bar_time <= g_trigger_ctx.last_processed_time)
       return;
+
+   __TRG_CheckMotherReset(rates, bar_idx);
+   __TRG_EnsureMother(rates, bar_idx);
 
    __TRG_ProcessBarToLegs(rates, insideHL, n, bar_idx);
+
+   TriggerHitCandidate best;
+   __TRG_ClearHitCandidate(best);
+   __TRG_EvaluateGates(rates, n, bar_idx, best);
+   if(best.hit)
+      __TRG_HandleHit(best, rates, n);
+
+   g_trigger_ctx.last_processed_time = bar_time;
+   g_trigger_ctx.last_processed_idx  = bar_idx;
 }
 
 #endif // WAVEBOT_TRIGGER_MQH
