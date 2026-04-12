@@ -4,6 +4,7 @@
 #include <WaveBot/Types.mqh>
 #include <WaveBot/Markers.mqh>
 #include <WaveBot/WB15_SignalBridge.mqh>
+#include <WaveBot/TriggerSLTP.mqh>
 
 // ============================================================================
 // Trigger.mqh
@@ -124,6 +125,7 @@ struct TriggerCore
 
 static TriggerCore  g_trigger_ctx;
 static TriggerEvent g_trigger_events[];
+static string       g_trigger_symbol = "";
 
 // ----------------------------------------------------------------------------
 // Worker / bridge helpers
@@ -449,8 +451,11 @@ inline void Trigger_ResetGlobals()
    g_trigger_ctx.up_counter            = 0;
    g_trigger_ctx.dn_counter            = 0;
 
+   g_trigger_symbol                    = "";
+
    __TRG_ClearFSM();
    ArrayResize(g_trigger_events, 0);
+   TriggerSLTP_ResetGlobals();
 }
 
 // ----------------------------------------------------------------------------
@@ -1008,6 +1013,19 @@ inline void __TRG_FireTrigger(const int       type_id,
    if(src_idx < 0 || src_idx >= n) return;
    if(hit_idx < 0 || hit_idx >= n) return;
 
+   string sym = g_trigger_symbol;
+   if(sym == "")
+      sym = _Symbol;
+
+   TriggerSLTP_OnTriggerFired(sym,
+                              g_trigger_ctx.active_dir,
+                              type_id,
+                              src_idx,
+                              level,
+                              hit_idx,
+                              rates,
+                              n);
+
    __TRG_DrawTriggerMarker(type_id,
                            rates[src_idx].time,
                            rates[hit_idx].time,
@@ -1392,6 +1410,7 @@ inline void __TRG_ProcessLoadedBar(const string    sym,
                                    const int       bar_idx)
 {
    if(sym == "") return;
+   g_trigger_symbol = sym;
    if(n <= 0 || bar_idx < 0 || bar_idx >= n) return;
 
    const datetime bar_time = rates[bar_idx].time;
@@ -1417,6 +1436,8 @@ inline void __TRG_ProcessLoadedBar(const string    sym,
 inline void Trigger_OnTimer(const string sym)
 {
    if(!__TRG_IsWorkerTF()) return;
+   if(sym != "")
+      g_trigger_symbol = sym;
    if(!__TRG_IsMajorWorld()) return;
    if(sym == "") return;
 
