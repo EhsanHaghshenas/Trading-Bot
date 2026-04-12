@@ -475,6 +475,44 @@ inline int __TRG_DecodeKind(const int code)    { return (code / 100); }
 inline int __TRG_DecodeNS(const int code)      { return ((code / 10) % 10); }
 inline int __TRG_DecodeDirCode(const int code) { return (code % 10); }
 
+inline int __TRG_CompareEvent(const TriggerEvent &a,
+                              const TriggerEvent &b)
+{
+   if(a.bar_time < b.bar_time) return -1;
+   if(a.bar_time > b.bar_time) return 1;
+
+   if(a.t < b.t) return -1;
+   if(a.t > b.t) return 1;
+
+   if(a.seq < b.seq) return -1;
+   if(a.seq > b.seq) return 1;
+
+   return 0;
+}
+
+inline void __TRG_SortBridgeEvents()
+{
+   int n = ArraySize(g_trigger_events);
+   if(n <= 1) return;
+
+   for(int i=0; i<n-1; ++i)
+   {
+      int best = i;
+      for(int j=i+1; j<n; ++j)
+      {
+         if(__TRG_CompareEvent(g_trigger_events[j], g_trigger_events[best]) < 0)
+            best = j;
+      }
+
+      if(best != i)
+      {
+         TriggerEvent tmp  = g_trigger_events[i];
+         g_trigger_events[i] = g_trigger_events[best];
+         g_trigger_events[best] = tmp;
+      }
+   }
+}
+
 inline void __TRG_ClearSession(TriggerStartSession &s)
 {
    s.active   = false;
@@ -490,18 +528,11 @@ inline bool __TRG_ShouldAutoStopOnNewStart(const TriggerStartSession &sess,
                                            const int new_kind,
                                            const int new_ns)
 {
+   // Simplified lifecycle: a fresh 4H signal on replaces the previous window.
+   // No synthetic stop is generated on start.
    if(!sess.active) return false;
-   if(sess.kind != WB15_KIND_START_FSMS) return false;
-
-   if(new_kind != WB15_KIND_START_HWX && new_kind != WB15_KIND_START_HWBB)
-      return false;
-
-   if(sess.ns == WB15_NS_MAJ)
-      return (new_ns == WB15_NS_MAJ);
-
-   if(sess.ns == WB15_NS_MIN)
-      return (new_ns == WB15_NS_MIN || new_ns == WB15_NS_MAJ);
-
+   if(new_kind <= 0) return false;
+   if(new_ns < 0) return false;
    return false;
 }
 
@@ -511,38 +542,19 @@ inline bool __TRG_SessionMatchesStop(const TriggerStartSession &sess,
                                      const Direction stop_dir)
 {
    if(!sess.active) return false;
-   if(stop_dir != __WB15_Opposite(sess.dir)) return false;
+   if(!__TRG_IsStopKind(stop_kind)) return false;
 
-   if(sess.kind == WB15_KIND_START_FSMS)
-   {
-      if(sess.ns == WB15_NS_MAJ)
-      {
-         if(stop_ns != WB15_NS_MAJ) return false;
-         return (stop_kind == WB15_KIND_STOP_MINORSTARTER || stop_kind == WB15_KIND_STOP_MTC);
-      }
-
-      if(sess.ns == WB15_NS_MIN)
-      {
-         if(stop_kind != WB15_KIND_STOP_MTC) return false;
-         return (stop_ns == WB15_NS_MIN || stop_ns == WB15_NS_MAJ);
-      }
-
-      return false;
-   }
-
-   if(stop_kind == WB15_KIND_STOP_MINOROFF_ZONE)
-      return (sess.ns == WB15_NS_MIN && stop_ns == WB15_NS_MAJ);
-
-   if(stop_kind != WB15_KIND_STOP_MTC)
+   // Simplified rule:
+   //   any 4H signal off closes the active trigger window,
+   //   provided that its direction is the opposite of the active signal direction.
+   // Namespace and signal kind no longer affect stop matching.
+   if(stop_dir != __WB15_Opposite(sess.dir))
       return false;
 
-   if(sess.ns == WB15_NS_MAJ)
-      return (stop_ns == WB15_NS_MAJ);
+   if(stop_ns < WB15_NS_NONE)
+      return false;
 
-   if(sess.ns == WB15_NS_MIN)
-      return (stop_ns == WB15_NS_MIN || stop_ns == WB15_NS_MAJ);
-
-   return false;
+   return true;
 }
 
 inline bool __TRG_RebuildBridgeEvents(const string sym)
@@ -600,6 +612,8 @@ inline bool __TRG_RebuildBridgeEvents(const string sym)
       g_trigger_events[pos] = evt;
    }
 
+   __TRG_SortBridgeEvents();
+
    if(full_reset)
    {
       g_trigger_ctx.active                = false;
@@ -632,38 +646,24 @@ inline void __TRG_ApplyWindowAt(const datetime bar_time)
 
       if(__TRG_IsStartKind(evt.kind))
       {
+         // Simplified lifecycle:
+         // every new 4H signal on replaces the previously active window,
+         // regardless of type or namespace.
          for(int s=0; s<session_count; ++s)
-         {
-            if(sessions[s].active && __TRG_ShouldAutoStopOnNewStart(sessions[s], evt.kind, evt.ns))
-               sessions[s].active = false;
-         }
+            sessions[s].active = false;
 
-         if(session_count < TRG_MAX_ACTIVE_SESSIONS)
-         {
-            sessions[session_count].active   = true;
-            sessions[session_count].kind     = evt.kind;
-            sessions[session_count].ns       = evt.ns;
-            sessions[session_count].dir      = evt.dir;
-            sessions[session_count].t        = evt.t;
-            sessions[session_count].bar_time = evt.bar_time;
-            sessions[session_count].seq      = evt.seq;
-            session_count++;
-         }
-         else
-         {
-            for(int k=1; k<TRG_MAX_ACTIVE_SESSIONS; ++k)
-               sessions[k-1] = sessions[k];
-
-            int last = TRG_MAX_ACTIVE_SESSIONS - 1;
-            sessions[last].active   = true;
-            sessions[last].kind     = evt.kind;
-            sessions[last].ns       = evt.ns;
-            sessions[last].dir      = evt.dir;
-            sessions[last].t        = evt.t;
-            sessions[last].bar_time = evt.bar_time;
-            sessions[last].seq      = evt.seq;
+         if(session_count <= 0)
+            session_count = 1;
+         if(session_count > TRG_MAX_ACTIVE_SESSIONS)
             session_count = TRG_MAX_ACTIVE_SESSIONS;
-         }
+
+         sessions[0].active   = true;
+         sessions[0].kind     = evt.kind;
+         sessions[0].ns       = evt.ns;
+         sessions[0].dir      = evt.dir;
+         sessions[0].t        = evt.t;
+         sessions[0].bar_time = evt.bar_time;
+         sessions[0].seq      = evt.seq;
       }
       else
       {
@@ -1485,3 +1485,4 @@ inline void Trigger_OnBarCandidate(const string    sym,
 }
 
 #endif // WAVEBOT_TRIGGER_MQH
+

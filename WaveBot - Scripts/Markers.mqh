@@ -8,8 +8,9 @@ extern int g_scan_id;  // defined in WaveBot.mq5
 static string g_markers_ns = "";
 
 // Preview mode is used by WorldManager while a MIN session is still open.
-// In preview mode, logic is allowed to run, but chart objects and bridge side-effects
-// must stay silent until the session becomes stable/final.
+// In preview mode, chart objects stay silent.
+// Bridge publication is still allowed for MIN-origin H4 signal on/off events,
+// so the live M15 trigger engine can react immediately.
 static bool   g_markers_preview_mode = false;
 
 // set/get world namespace (used later by WorldManager)

@@ -42,7 +42,7 @@ struct WB15ActiveState
    double    run_id;
 
    // Legacy counting fields are kept only for compatibility.
-   // Candle numbering is intentionally disabled on the M15 chart.
+   // Candle numbering is enabled on the M15 chart.
    datetime  start_bar_time;
    datetime  last_count_bar_time;
    int       count;
@@ -183,7 +183,12 @@ inline void WB15_MasterPushEvent(const string sym,
 {
    if(!__WB15_IsMaster()) return;
    if(t <= 0) return;
-   if(Markers_IsPreviewMode()) return;
+
+   // MIN world is executed by WorldManager in preview mode.
+   // We still must publish bridge events there, otherwise M15 never sees
+   // MIN-origin 4H signal on/off windows in real time.
+   if(Markers_IsPreviewMode() && ns != WB15_NS_MIN)
+      return;
 
    const string kDed = __WB15_Key(sym, "DED_"
                                        + IntegerToString(kind) + "_"
@@ -677,6 +682,8 @@ inline int __WB15_BarShiftM15Safe(const string sym, const datetime bar_time)
 
 inline bool __WB15_CountsEnabled()
 {
+   // Signal-window numbering is intentionally disabled.
+   // Only trigger-phase labels from Trigger.mqh should remain on chart.
    return false;
 }
 
@@ -847,62 +854,27 @@ inline bool __WB15_IsStopKind(const int kind)
 inline bool __WB15_ShouldStop(const WB15ActiveState &st, const int stop_kind, const int stop_ns, const Direction stop_dir)
 {
    if(!st.active) return false;
-   if(stop_dir != __WB15_Opposite(st.start_dir)) return false;
+   if(!__WB15_IsStopKind(stop_kind)) return false;
 
-   // FSMS sessions:
-   //  - MAJ FSMS is stopped by MAJ MinorStarter OR MAJ MTC
-   //  - MIN FSMS is stopped by MTC (MIN or MAJ cross-stop)
-   if(st.start_kind == WB15_KIND_START_FSMS)
-   {
-      if(st.start_ns == WB15_NS_MAJ)
-      {
-         if(stop_ns != WB15_NS_MAJ) return false;
-         return (stop_kind == WB15_KIND_STOP_MINORSTARTER || stop_kind == WB15_KIND_STOP_MTC);
-      }
-
-      if(st.start_ns == WB15_NS_MIN)
-      {
-         if(stop_kind != WB15_KIND_STOP_MTC) return false;
-         return (stop_ns == WB15_NS_MIN || stop_ns == WB15_NS_MAJ);
-      }
-
+   // Simplified rule:
+   //   any 4H signal off closes the current M15 trigger window,
+   //   as long as the stop direction is the opposite of the active signal direction.
+   // Namespace and signal type no longer participate in stop matching.
+   if(stop_dir != __WB15_Opposite(st.start_dir))
       return false;
-   }
 
-   // HWX/HWBB/GOOZ sessions:
-   //  - stopped by MTC (same-namespace; MIN sessions also allow MAJ cross-stop)
-   //  - additionally, MIN sessions can be stopped by MAJ MinorOff breaking C1-W2 Minorzone boundary
-   if(stop_kind == WB15_KIND_STOP_MINOROFF_ZONE)
-   {
-      return (st.start_ns == WB15_NS_MIN && stop_ns == WB15_NS_MAJ);
-   }
-
-   if(stop_kind != WB15_KIND_STOP_MTC) return false;
-
-   if(st.start_ns == WB15_NS_MAJ)
-      return (stop_ns == WB15_NS_MAJ);
-   if(st.start_ns == WB15_NS_MIN)
-      return (stop_ns == WB15_NS_MIN || stop_ns == WB15_NS_MAJ); // cross-stop allowed
-
-   return false;
+   return true;
 }
 
 inline bool __WB15_ShouldAutoStopOnNewStart(const WB15ActiveState &st,
                                             const int new_kind,
                                             const int new_ns)
 {
+   // A fresh 4H signal on simply restarts the active window from its own candle.
+   // We no longer synthesize a pseudo-off when a new start arrives.
    if(!st.active) return false;
-   if(st.start_kind != WB15_KIND_START_FSMS) return false;
-
-   if(new_kind != WB15_KIND_START_HWX && new_kind != WB15_KIND_START_HWBB)
-      return false;
-
-   if(st.start_ns == WB15_NS_MAJ)
-      return (new_ns == WB15_NS_MAJ);
-
-   if(st.start_ns == WB15_NS_MIN)
-      return (new_ns == WB15_NS_MIN || new_ns == WB15_NS_MAJ);
-
+   if(new_kind <= 0) return false;
+   if(new_ns < 0) return false;
    return false;
 }
 
@@ -1074,7 +1046,7 @@ inline void WB15_Slave_OnTimer(const string sym)
       GlobalVariableSet(kPrc, (double)seq);
    }
 
-   // 2) Candle numbering is intentionally disabled on M15.
+   // 2) Keep candle numbering advancing live on M15 while the session is active.
    if(__WB15_CountsEnabled() && g_wb15_state.active)
       __WB15_LiveCountAdvance(sym, 0);
 }
