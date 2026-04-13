@@ -23,6 +23,7 @@
 #define TRGSTMT_SKIP_LOCKOUT       2
 #define TRGSTMT_SKIP_TREND_FILTER  3
 #define TRGSTMT_SKIP_LOCAL_GATE    4
+#define TRGSTMT_SKIP_POST_WIN_WAIT 5
 
 #define TRGSTMT_NS_MAJ             0
 #define TRGSTMT_NS_MIN             1
@@ -177,6 +178,8 @@ inline string __TRGSTM_SkipReasonName(const int skip_reason)
       return "M15_TREND_NOT_ALIGNED";
    if(skip_reason == TRGSTMT_SKIP_LOCAL_GATE)
       return "M15_LOCAL_SIGNAL_WINDOW_NOT_OPEN";
+   if(skip_reason == TRGSTMT_SKIP_POST_WIN_WAIT)
+      return "WAIT_NEW_LOCAL_M15_SIGNAL_ON_AFTER_WIN";
    return "-";
 }
 
@@ -541,6 +544,66 @@ inline int __TRGSTM_CollectLocalGateEvents(const string sym,
    return ArraySize(out);
 }
 
+inline int __TRGSTM_FilterLocalGateStartEvents(const TriggerStatementStartEvent &events[],
+                                               const int                         total,
+                                               TriggerStatementStartEvent        &out[])
+{
+   ArrayResize(out, 0);
+
+   for(int i = 0; i < total; ++i)
+   {
+      if(!__TRGM15_IsStartKind(events[i].kind))
+         continue;
+
+      int pos = ArraySize(out);
+      ArrayResize(out, pos + 1);
+      out[pos] = events[i];
+   }
+
+   return ArraySize(out);
+}
+
+inline datetime __TRGSTM_AdvanceLocalGateRearmEvents(const TriggerStatementStartEvent &events[],
+                                                     const int                         total,
+                                                     int                               &next_index,
+                                                     const datetime                    upto_time,
+                                                     bool                              &wait_active,
+                                                     datetime                          &wait_ref_time,
+                                                     Direction                         &release_dir,
+                                                     int                               &release_kind,
+                                                     int                               &release_ns)
+{
+   datetime release_time = 0;
+   release_dir  = DIR_UP;
+   release_kind = 0;
+   release_ns   = WB15_NS_NONE;
+
+   while(next_index < total)
+   {
+      TriggerStatementStartEvent evt = events[next_index];
+      if(evt.bar_time > upto_time)
+         break;
+
+      if(wait_active && evt.bar_time > wait_ref_time)
+      {
+         wait_active   = false;
+         wait_ref_time = 0;
+
+         if(release_time <= 0)
+         {
+            release_time = evt.bar_time;
+            release_dir  = evt.dir;
+            release_kind = evt.kind;
+            release_ns   = evt.ns;
+         }
+      }
+
+      next_index++;
+   }
+
+   return release_time;
+}
+
 inline datetime __TRGSTM_AdvanceStartEvents(const TriggerStatementStartEvent &events[],
                                             const int total,
                                             int &next_index,
@@ -664,6 +727,41 @@ inline string __TRGSTM_BuildLocalGateMatchNote(const Direction trg_dir,
 {
    string note = "M15_LOCAL_SIGNAL_GATE_OPEN";
    note = __TRGSTM_AppendNote(note, "TRG_" + __TRGSTM_DirName(trg_dir));
+   note = __TRGSTM_AppendNote(note, "TYPE_" + __TRGSTM_LocalGateKindName(gate_kind));
+   note = __TRGSTM_AppendNote(note, "NS_" + __TRGSTM_LocalGateNsName(gate_ns));
+   note = __TRGSTM_AppendNote(note, "FROM_" + __TRGSTM_SafeTime(gate_start_bar));
+   return note;
+}
+
+inline string __TRGSTM_BuildPostWinWaitSkipNote(const Direction trg_dir,
+                                                const datetime  ref_time,
+                                                const bool      gate_active,
+                                                const Direction gate_dir,
+                                                const int       gate_kind,
+                                                const int       gate_ns,
+                                                const datetime  gate_start_bar)
+{
+   string note = "SKIPPED_WAITING_FRESH_LOCAL_M15_SIGNAL_AFTER_WIN";
+   note = __TRGSTM_AppendNote(note, "TRG_" + __TRGSTM_DirName(trg_dir));
+   note = __TRGSTM_AppendNote(note, "AFTER_WIN_" + __TRGSTM_SafeTime(ref_time));
+
+   if(!gate_active)
+      return __TRGSTM_AppendNote(note, "LOCAL_GATE_NONE");
+
+   note = __TRGSTM_AppendNote(note, "LOCAL_GATE_" + __TRGSTM_DirName(gate_dir));
+   note = __TRGSTM_AppendNote(note, "TYPE_" + __TRGSTM_LocalGateKindName(gate_kind));
+   note = __TRGSTM_AppendNote(note, "NS_" + __TRGSTM_LocalGateNsName(gate_ns));
+   note = __TRGSTM_AppendNote(note, "FROM_" + __TRGSTM_SafeTime(gate_start_bar));
+   return note;
+}
+
+inline string __TRGSTM_BuildPostWinRearmNote(const Direction gate_dir,
+                                             const int       gate_kind,
+                                             const int       gate_ns,
+                                             const datetime  gate_start_bar)
+{
+   string note = "FRESH_LOCAL_M15_SIGNAL_ON_AFTER_WIN";
+   note = __TRGSTM_AppendNote(note, "LOCAL_GATE_" + __TRGSTM_DirName(gate_dir));
    note = __TRGSTM_AppendNote(note, "TYPE_" + __TRGSTM_LocalGateKindName(gate_kind));
    note = __TRGSTM_AppendNote(note, "NS_" + __TRGSTM_LocalGateNsName(gate_ns));
    note = __TRGSTM_AppendNote(note, "FROM_" + __TRGSTM_SafeTime(gate_start_bar));
@@ -2160,6 +2258,11 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    TriggerStatementStartEvent local_gate_events[];
    int local_gate_count = __TRGSTM_CollectLocalGateEvents(use_sym, use_scan_to, local_gate_events);
 
+   TriggerStatementStartEvent local_gate_start_events[];
+   int local_gate_start_count = __TRGSTM_FilterLocalGateStartEvents(local_gate_events,
+                                                                    local_gate_count,
+                                                                    local_gate_start_events);
+
    TriggerStatementModeEvent mtc_events[];
    int mtc_count = __TRGSTM_CollectMTCMarkerEvents(scan_from, use_scan_to, mtc_events);
 
@@ -2216,6 +2319,7 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    int skipped_lockout         = 0;
    int skipped_trend_filter    = 0;
    int skipped_local_gate      = 0;
+   int skipped_post_win_wait   = 0;
    int skipped_hypo_wins       = 0;
    int skipped_hypo_losses     = 0;
    int skipped_hypo_open       = 0;
@@ -2239,9 +2343,11 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    int max_win_streak      = 0;
    int max_loss_streak     = 0;
 
-   int gate_loss_streak    = 0;
-   int lockout_activations = 0;
-   int lockout_releases    = 0;
+   int gate_loss_streak      = 0;
+   int lockout_activations   = 0;
+   int lockout_releases      = 0;
+   int post_win_wait_arms    = 0;
+   int post_win_wait_releases= 0;
 
    int exec_trend_major_only = 0;
    int exec_trend_minor_only = 0;
@@ -2277,6 +2383,10 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    bool     lockout_active   = false;
    datetime lockout_ref_time = 0;
    int      next_start_index = 0;
+
+   bool     post_win_wait_active   = false;
+   datetime post_win_wait_ref_time = 0;
+   int      next_local_rearm_index = 0;
 
    bool      local_gate_active     = false;
    Direction local_gate_dir        = DIR_UP;
@@ -2321,6 +2431,21 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
          gate_cycle_dir   = DIR_UP;
          gate_cycle_start = 0;
       }
+
+      Direction local_rearm_dir  = DIR_UP;
+      int       local_rearm_kind = 0;
+      int       local_rearm_ns   = WB15_NS_NONE;
+      datetime  local_rearm_time = __TRGSTM_AdvanceLocalGateRearmEvents(local_gate_start_events,
+                                                                         local_gate_start_count,
+                                                                         next_local_rearm_index,
+                                                                         trades[i].rec.hit_time,
+                                                                         post_win_wait_active,
+                                                                         post_win_wait_ref_time,
+                                                                         local_rearm_dir,
+                                                                         local_rearm_kind,
+                                                                         local_rearm_ns);
+      if(local_rearm_time > 0)
+         post_win_wait_releases++;
 
       if(active_trade_open)
       {
@@ -2421,6 +2546,37 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
                                               "4L_COUNTER_RESET_NEW_M15_TREND_CYCLE");
       }
 
+      if(post_win_wait_active)
+      {
+         __TRGSTM_SetSkip(trades[i],
+                          TRGSTMT_SKIP_POST_WIN_WAIT,
+                          equity,
+                          __TRGSTM_AppendNote(trades[i].note,
+                                              __TRGSTM_BuildPostWinWaitSkipNote(trades[i].rec.dir,
+                                                                                post_win_wait_ref_time,
+                                                                                local_gate_active,
+                                                                                local_gate_dir,
+                                                                                local_gate_kind,
+                                                                                local_gate_ns,
+                                                                                local_gate_start_bar)));
+         ignored_valid_triggers++;
+         skipped_post_win_wait++;
+         __TRGSTM_BumpHypotheticalCounters(trades[i],
+                                           skipped_hypo_wins,
+                                           skipped_hypo_losses,
+                                           skipped_hypo_open);
+         continue;
+      }
+
+      if(local_rearm_time > 0)
+      {
+         trades[i].note = __TRGSTM_AppendNote(trades[i].note,
+                                              __TRGSTM_BuildPostWinRearmNote(local_rearm_dir,
+                                                                            local_rearm_kind,
+                                                                            local_rearm_ns,
+                                                                            local_rearm_time));
+      }
+
       if(!local_gate_active || local_gate_dir != trades[i].rec.dir)
       {
          __TRGSTM_SetSkip(trades[i],
@@ -2515,7 +2671,12 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
             else
                sell_wins++;
 
-            gate_loss_streak = 0;
+            gate_loss_streak      = 0;
+            post_win_wait_active  = true;
+            post_win_wait_ref_time= (trades[i].exit_time > 0 ? trades[i].exit_time : trades[i].rec.hit_time);
+            post_win_wait_arms++;
+            trades[i].note = __TRGSTM_AppendNote(trades[i].note,
+                                                 "WAIT_FRESH_LOCAL_M15_SIGNAL_ON_AFTER_WIN");
          }
          else
          {
@@ -2594,7 +2755,26 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
                                   lockout_releases);
    }
 
-   bool lockout_active_at_end = lockout_active;
+   if(post_win_wait_active)
+   {
+      Direction local_rearm_dir  = DIR_UP;
+      int       local_rearm_kind = 0;
+      int       local_rearm_ns   = WB15_NS_NONE;
+      datetime  local_rearm_time = __TRGSTM_AdvanceLocalGateRearmEvents(local_gate_start_events,
+                                                                         local_gate_start_count,
+                                                                         next_local_rearm_index,
+                                                                         use_scan_to,
+                                                                         post_win_wait_active,
+                                                                         post_win_wait_ref_time,
+                                                                         local_rearm_dir,
+                                                                         local_rearm_kind,
+                                                                         local_rearm_ns);
+      if(local_rearm_time > 0)
+         post_win_wait_releases++;
+   }
+
+   bool lockout_active_at_end   = lockout_active;
+   bool post_win_wait_at_end    = post_win_wait_active;
 
    if(executed_trades <= 0)
    {
@@ -2712,10 +2892,11 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "Initial Capital        : " + __TRGSTM_Money(initial_capital));
    __TRGSTM_WriteLine(handle, "Fixed Risk Per Trade   : " + __TRGSTM_Pct(risk_percent) + " = " + __TRGSTM_Money(risk_money));
    __TRGSTM_WriteLine(handle, "SL/TP Source           : TriggerSLTP.mqh valid triggers only");
-   __TRGSTM_WriteLine(handle, "Execution Model        : Single active trade only | entry at breakout level | touch-based TP/SL | conservative same-bar ambiguity = SL | M15 trend alignment required | active local M15 signal-on window required");
+   __TRGSTM_WriteLine(handle, "Execution Model        : Single active trade only | entry at breakout level | touch-based TP/SL | conservative same-bar ambiguity = SL | M15 trend alignment required | active local M15 signal-on window required | fresh local M15 signal-on required after every executed WIN");
    __TRGSTM_WriteLine(handle, "Protection Rule        : After 4 consecutive executed losses inside the same active M15-aligned trend cycle, trading is locked until a new 4H signal on arrives");
    __TRGSTM_WriteLine(handle, "Trend Filter           : Trigger direction must align with active M15 major trend or active M15 minor trend");
    __TRGSTM_WriteLine(handle, "Local M15 Signal Gate  : Trigger direction must also sit inside the active local M15 signal-on window opened by HWX/HWBB/FSMS/Gooz and closed by opposite MTC/MinorStarter/MinorOff");
+   __TRGSTM_WriteLine(handle, "Post-Win Re-Entry Rule : After each executed WIN, no new trigger can become a trade until a fresh local M15 signal-on event arrives after that win");
    __TRGSTM_WriteLine(handle, "Trend Seed (Major)     : " + major_seed_text);
    __TRGSTM_WriteLine(handle, "Trend Windows MAJ/MIN  : " + IntegerToString(major_window_count) + " / " + IntegerToString(minor_window_count));
    __TRGSTM_WriteLine(handle, "Aligned Trend Cycles   : " + IntegerToString(eligible_epoch_count));
@@ -2737,6 +2918,7 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "Ignored: 4L Lockout    : " + IntegerToString(skipped_lockout));
    __TRGSTM_WriteLine(handle, "Ignored: Trend Filter  : " + IntegerToString(skipped_trend_filter));
    __TRGSTM_WriteLine(handle, "Ignored: Local Gate    : " + IntegerToString(skipped_local_gate));
+   __TRGSTM_WriteLine(handle, "Ignored: Post-Win Wait : " + IntegerToString(skipped_post_win_wait));
    __TRGSTM_WriteLine(handle, "Skipped Hypo W/L/O     : " + IntegerToString(skipped_hypo_wins) + " / " + IntegerToString(skipped_hypo_losses) + " / " + IntegerToString(skipped_hypo_open));
    __TRGSTM_WriteLine(handle, "Trend Match MAJ/MIN/B  : " + IntegerToString(exec_trend_major_only) + " / " + IntegerToString(exec_trend_minor_only) + " / " + IntegerToString(exec_trend_both));
    __TRGSTM_WriteLine(handle, "Closed Trades          : " + IntegerToString(closed_trades));
@@ -2763,6 +2945,9 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "Lockout Activations    : " + IntegerToString(lockout_activations));
    __TRGSTM_WriteLine(handle, "Lockout Releases       : " + IntegerToString(lockout_releases));
    __TRGSTM_WriteLine(handle, "Lockout Active At End  : " + (lockout_active_at_end ? "YES" : "NO"));
+   __TRGSTM_WriteLine(handle, "Post-Win Wait Arms     : " + IntegerToString(post_win_wait_arms));
+   __TRGSTM_WriteLine(handle, "Post-Win Wait Releases : " + IntegerToString(post_win_wait_releases));
+   __TRGSTM_WriteLine(handle, "Post-Win Wait At End   : " + (post_win_wait_at_end ? "YES" : "NO"));
    __TRGSTM_WriteLine(handle, "Max Drawdown           : " + __TRGSTM_Money(max_drawdown_money) + " | " + __TRGSTM_Pct(max_drawdown_pct));
    __TRGSTM_WriteLine(handle, "Balance (Closed)       : " + __TRGSTM_Money(equity));
    __TRGSTM_WriteLine(handle, "Open Floating P/L      : " + __TRGSTM_Money(total_open_float_money) + " | " + DoubleToString(total_open_float_r, 2) + "R");
@@ -2778,7 +2963,7 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
 
    if(executed_trades <= 0)
    {
-      __TRGSTM_WriteLine(handle, "No executable trades were taken under the single-trade, 4-loss-lock, M15 trend-alignment, and local M15 signal-gate rules.");
+      __TRGSTM_WriteLine(handle, "No executable trades were taken under the single-trade, 4-loss-lock, M15 trend-alignment, local M15 signal-gate, and post-win fresh-local-signal re-entry rules.");
    }
    else
    {
@@ -2864,9 +3049,11 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "3) The 4-loss protection counter belongs to the current aligned M15 trend cycle; if that cycle ends and a fresh same-direction cycle appears later, the counter restarts from zero.");
    __TRGSTM_WriteLine(handle, "4) After 4 consecutive executed losses inside the same aligned cycle, new entries are blocked until a fresh 4H signal on is received from the H4->worker bridge.");
    __TRGSTM_WriteLine(handle, "5) A valid trigger is converted to a trade only when its direction matches the active M15 major trend or an active M15 minor trend at trigger time.");
-   __TRGSTM_WriteLine(handle, "6) Skipped valid triggers are listed separately together with their hypothetical outcome so you can inspect missed opportunities.");
-   __TRGSTM_WriteLine(handle, "7) Risk per executed trade is fixed on initial capital, not compounded trade-by-trade.");
-   __TRGSTM_WriteLine(handle, "8) Ambiguous same-bar outcomes are counted conservatively as SL to avoid optimistic bias.");
+   __TRGSTM_WriteLine(handle, "6) A valid trigger also needs an active local M15 signal-on window in the same direction at trigger time.");
+   __TRGSTM_WriteLine(handle, "7) After every executed WIN, the strategy waits for a fresh local M15 signal-on event after that win before any new trigger can become a trade again.");
+   __TRGSTM_WriteLine(handle, "8) Skipped valid triggers are listed separately together with their hypothetical outcome so you can inspect missed opportunities.");
+   __TRGSTM_WriteLine(handle, "9) Risk per executed trade is fixed on initial capital, not compounded trade-by-trade.");
+   __TRGSTM_WriteLine(handle, "10) Ambiguous same-bar outcomes are counted conservatively as SL to avoid optimistic bias.");
 
    FileFlush(handle);
    FileClose(handle);
@@ -2878,6 +3065,7 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
             " | executed=", executed_trades,
             " | ignored=", ignored_valid_triggers,
             " | trend_skips=", skipped_trend_filter,
+            " | postwin_skips=", skipped_post_win_wait,
             " | major_windows=", major_window_count,
             " | minor_windows=", minor_window_count,
             " | closed=", closed_trades,
