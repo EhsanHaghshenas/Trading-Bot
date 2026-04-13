@@ -2,15 +2,39 @@
 #define WAVEBOT_TRIGGER_STATEMENT_MQH
 
 #include <WaveBot/Types.mqh>
+#include <WaveBot/Data.mqh>
+#include <WaveBot/Bodies.mqh>
+#include <WaveBot/Wave2.mqh>
+#include <WaveBot/Wave3.mqh>
+#include <WaveBot/Wave2_Down.mqh>
+#include <WaveBot/Wave3_Down.mqh>
+#include <WaveBot/W2W3_ChainInvalidation.mqh>
+#include <WaveBot/Trigger.mqh>
 #include <WaveBot/TriggerSLTP.mqh>
+#include <WaveBot/FSMS_SW.mqh>
 
 #define TRGSTMT_RESULT_OPEN 0
 #define TRGSTMT_RESULT_WIN  1
 #define TRGSTMT_RESULT_LOSS 2
 
+#define TRGSTMT_SKIP_NONE          0
+#define TRGSTMT_SKIP_ACTIVE_TRADE  1
+#define TRGSTMT_SKIP_LOCKOUT       2
+#define TRGSTMT_SKIP_TREND_FILTER  3
+
+#define TRGSTMT_NS_MAJ             0
+#define TRGSTMT_NS_MIN             1
+
+#define TRGSTMT_LOCK_AFTER_LOSSES 4
+
 struct TriggerStatementTrade
 {
    bool              valid;
+   bool              taken;
+   int               raw_index;
+   int               exec_index;
+   int               skip_reason;
+   datetime          unlock_on_time;
    TriggerSLTPRecord rec;
 
    int               result_status;
@@ -33,7 +57,40 @@ struct TriggerStatementTrade
    string            note;
 };
 
+struct TriggerStatementStartEvent
+{
+   datetime          t;
+   datetime          bar_time;
+   Direction         dir;
+   int               kind;
+   int               ns;
+   int               seq;
+};
+
+struct TriggerStatementModeEvent
+{
+   datetime          t;
+   Direction         dir;
+   int               ns;
+};
+
+struct TriggerStatementTrendWindow
+{
+   datetime          start_time;
+   datetime          end_time;
+   Direction         dir;
+   string            tag;
+};
+
+struct TriggerStatementBootResult
+{
+   bool              ok;
+   Direction         mode;
+   datetime          complete_time;
+};
+
 static string   g_trgstmt_last_filename = "";
+
 static string   g_trgstmt_last_fullpath = "";
 static bool     g_trgstmt_last_write_ok = false;
 static datetime g_trgstmt_last_scan_from = 0;
@@ -42,21 +99,26 @@ static int      g_trgstmt_last_records   = 0;
 
 inline void __TRGSTM_ClearTrade(TriggerStatementTrade &stmt_trade)
 {
-   stmt_trade.valid                 = false;
+   stmt_trade.valid                  = false;
+   stmt_trade.taken                  = false;
+   stmt_trade.raw_index              = 0;
+   stmt_trade.exec_index             = -1;
+   stmt_trade.skip_reason            = TRGSTMT_SKIP_NONE;
+   stmt_trade.unlock_on_time         = 0;
    __TRGSL_ClearRecord(stmt_trade.rec);
-   stmt_trade.result_status         = TRGSTMT_RESULT_OPEN;
-   stmt_trade.ambiguous             = false;
-   stmt_trade.trigger_bar_ambiguous = false;
-   stmt_trade.exit_time             = 0;
-   stmt_trade.exit_price            = 0.0;
-   stmt_trade.result_r              = 0.0;
-   stmt_trade.pnl_money             = 0.0;
-   stmt_trade.floating_r            = 0.0;
-   stmt_trade.floating_money        = 0.0;
-   stmt_trade.equity_after          = 0.0;
-   stmt_trade.streak_after          = 0;
-   stmt_trade.bars_held             = 0;
-   stmt_trade.note                  = "";
+   stmt_trade.result_status          = TRGSTMT_RESULT_OPEN;
+   stmt_trade.ambiguous              = false;
+   stmt_trade.trigger_bar_ambiguous  = false;
+   stmt_trade.exit_time              = 0;
+   stmt_trade.exit_price             = 0.0;
+   stmt_trade.result_r               = 0.0;
+   stmt_trade.pnl_money              = 0.0;
+   stmt_trade.floating_r             = 0.0;
+   stmt_trade.floating_money         = 0.0;
+   stmt_trade.equity_after           = 0.0;
+   stmt_trade.streak_after           = 0;
+   stmt_trade.bars_held              = 0;
+   stmt_trade.note                   = "";
 }
 
 inline void TriggerStatement_ResetGlobals()
@@ -101,6 +163,79 @@ inline string __TRGSTM_StreakText(const int streak)
    if(streak < 0)
       return ("L" + IntegerToString(-streak));
    return "-";
+}
+
+inline string __TRGSTM_SkipReasonName(const int skip_reason)
+{
+   if(skip_reason == TRGSTMT_SKIP_ACTIVE_TRADE)
+      return "ACTIVE_TRADE_OPEN";
+   if(skip_reason == TRGSTMT_SKIP_LOCKOUT)
+      return "WAIT_NEW_4H_ON_AFTER_4_LOSSES";
+   if(skip_reason == TRGSTMT_SKIP_TREND_FILTER)
+      return "M15_TREND_NOT_ALIGNED";
+   return "-";
+}
+
+inline string __TRGSTM_AppendNote(const string left_text,
+                                  const string right_text)
+{
+   if(right_text == "")
+      return left_text;
+   if(left_text == "")
+      return right_text;
+   return (left_text + "|" + right_text);
+}
+
+inline bool __TRGSTM_IsClosedStatus(const int status)
+{
+   return (status == TRGSTMT_RESULT_WIN || status == TRGSTMT_RESULT_LOSS);
+}
+
+inline double __TRGSTM_EffectiveR(const TriggerStatementTrade &stmt_trade)
+{
+   if(stmt_trade.result_status == TRGSTMT_RESULT_OPEN)
+      return stmt_trade.floating_r;
+
+   return stmt_trade.result_r;
+}
+
+inline double __TRGSTM_EffectiveMoneyByRisk(const TriggerStatementTrade &stmt_trade,
+                                            const double                 risk_money)
+{
+   return (__TRGSTM_EffectiveR(stmt_trade) * risk_money);
+}
+
+inline void __TRGSTM_BumpHypotheticalCounters(const TriggerStatementTrade &stmt_trade,
+                                              int &wins,
+                                              int &losses,
+                                              int &opens)
+{
+   if(stmt_trade.result_status == TRGSTMT_RESULT_WIN)
+   {
+      wins++;
+      return;
+   }
+
+   if(stmt_trade.result_status == TRGSTMT_RESULT_LOSS)
+   {
+      losses++;
+      return;
+   }
+
+   opens++;
+}
+
+inline void __TRGSTM_SetSkip(TriggerStatementTrade &stmt_trade,
+                             const int              skip_reason,
+                             const double           equity_after,
+                             const string           note)
+{
+   stmt_trade.taken        = false;
+   stmt_trade.exec_index   = -1;
+   stmt_trade.skip_reason  = skip_reason;
+   stmt_trade.equity_after = equity_after;
+   stmt_trade.streak_after = 0;
+   stmt_trade.note         = note;
 }
 
 inline string __TRGSTM_TimeframeTag(const ENUM_TIMEFRAMES tf)
@@ -273,6 +408,1146 @@ inline int __TRGSTM_CollectRecords(const string   sym,
 
    __TRGSTM_SortRecords(out);
    return ArraySize(out);
+}
+
+
+inline int __TRGSTM_CollectStartEvents(const string sym,
+                                       const datetime scan_to,
+                                       TriggerStatementStartEvent &out[])
+{
+   ArrayResize(out, 0);
+
+   if(sym == "")
+      return 0;
+
+   if(!__TRG_RebuildBridgeEvents(sym))
+      return 0;
+
+   int total = ArraySize(g_trigger_events);
+   for(int i = 0; i < total; ++i)
+   {
+      TriggerEvent evt = g_trigger_events[i];
+
+      if(!__TRG_IsStartKind(evt.kind))
+         continue;
+      if(evt.bar_time <= 0)
+         continue;
+      if(scan_to > 0 && evt.bar_time > scan_to)
+         continue;
+
+      int pos = ArraySize(out);
+      ArrayResize(out, pos + 1);
+
+      out[pos].t        = evt.t;
+      out[pos].bar_time = evt.bar_time;
+      out[pos].dir      = evt.dir;
+      out[pos].kind     = evt.kind;
+      out[pos].ns       = evt.ns;
+      out[pos].seq      = evt.seq;
+   }
+
+   return ArraySize(out);
+}
+
+inline datetime __TRGSTM_AdvanceStartEvents(const TriggerStatementStartEvent &events[],
+                                            const int total,
+                                            int &next_index,
+                                            const datetime upto_time,
+                                            bool &lockout_active,
+                                            datetime &lockout_ref_time,
+                                            int &gate_loss_streak,
+                                            int &lockout_releases)
+{
+   datetime release_time = 0;
+
+   while(next_index < total)
+   {
+      TriggerStatementStartEvent evt = events[next_index];
+      if(evt.bar_time > upto_time)
+         break;
+
+      if(lockout_active && evt.bar_time > lockout_ref_time)
+      {
+         lockout_active   = false;
+         lockout_ref_time = 0;
+         gate_loss_streak = 0;
+         lockout_releases++;
+
+         if(release_time <= 0)
+            release_time = evt.bar_time;
+      }
+
+      next_index++;
+   }
+
+   return release_time;
+}
+
+inline int __TRGSTM_Boot_LeftmostMinLow_ExInside(const MqlRates &rates[],
+                                                 const bool     &insideHL[],
+                                                 const int       from,
+                                                 const int       to)
+{
+   if(from > to) return -1;
+
+   double mn = DBL_MAX;
+   int    idx = -1;
+
+   for(int i = from; i <= to; ++i)
+   {
+      if(insideHL[i]) continue;
+
+      double l = rates[i].low;
+      if(l < mn)
+      {
+         mn  = l;
+         idx = i;
+      }
+   }
+
+   if(idx < 0)
+      idx = from;
+
+   return idx;
+}
+
+inline int __TRGSTM_Boot_LeftmostMaxHigh_ExInside(const MqlRates &rates[],
+                                                  const bool     &insideHL[],
+                                                  const int       from,
+                                                  const int       to)
+{
+   if(from > to) return -1;
+
+   double mx = -DBL_MAX;
+   int    idx = -1;
+
+   for(int i = from; i <= to; ++i)
+   {
+      if(insideHL[i]) continue;
+
+      double h = rates[i].high;
+      if(h > mx)
+      {
+         mx  = h;
+         idx = i;
+      }
+   }
+
+   if(idx < 0)
+      idx = from;
+
+   return idx;
+}
+
+inline bool __TRGSTM_Boot_FindFirstPair_UP(const string          sym,
+                                           const ENUM_TIMEFRAMES tf,
+                                           const datetime        from_time,
+                                           const datetime        to_time,
+                                           datetime             &out_body_break_time)
+{
+   out_body_break_time = 0;
+
+   int tfsec = PeriodSeconds(tf);
+   if(tfsec <= 0)
+      tfsec = 60;
+
+   datetime effective_start = from_time;
+   datetime from_adj = from_time - (datetime)(tfsec * 10);
+   if(from_adj < 0)
+      from_adj = 0;
+
+   MqlRates rates[];
+   int n = LoadRatesRange(sym, tf, from_adj, to_time, rates);
+   if(n <= 0)
+      return false;
+
+   double bodyLowEff[];
+   double bodyHighEff[];
+   BuildEffectiveBodies(rates, n, bodyLowEff, bodyHighEff);
+
+   bool insideHL[];
+   BuildInsideClusterFlagsHL(rates, n, insideHL);
+
+   int first_eff = 0;
+   while(first_eff < n && rates[first_eff].time < effective_start)
+      first_eff++;
+
+   int idx = MathMax(0, first_eff - 2);
+
+   enum TRGSTMTBootStateUP
+   {
+      TRGSTMT_BOOT_SEARCH_W2_UP = 0,
+      TRGSTMT_BOOT_WAIT_CONFIRM_UP = 1
+   };
+
+   TRGSTMTBootStateUP state = TRGSTMT_BOOT_SEARCH_W2_UP;
+
+   int c1 = -1;
+   int c2 = -1;
+   int c3 = -1;
+   int c4 = -1;
+   int cend = -1;
+
+   bool have_w3 = false;
+   int  w3_c1 = -1;
+
+   int    w3_cand = -1;
+   double w3_cand_low = DBL_MAX;
+
+   bool   wick_active = false;
+   int    first_wick_idx = -1;
+   double body_break_level = 0.0;
+   bool   break_achieved = false;
+   int    body_break_idx = -1;
+
+   while(idx < n)
+   {
+      if(state == TRGSTMT_BOOT_SEARCH_W2_UP)
+      {
+         bool found = false;
+
+         for(int i = idx; i < n; ++i)
+         {
+            if(insideHL[i])
+               continue;
+
+            int i2 = -1;
+            int i3 = -1;
+            int i4 = -1;
+
+            if(!CheckWave2_FromIndex_LocalOnly(rates,
+                                               insideHL,
+                                               bodyLowEff,
+                                               bodyHighEff,
+                                               n,
+                                               i,
+                                               i2,
+                                               i3,
+                                               i4))
+            {
+               continue;
+            }
+
+            c1   = i;
+            c2   = i2;
+            c3   = i3;
+            c4   = i4;
+            cend = (c4 >= 0 ? c4 : c3);
+
+            if(rates[c1].time < effective_start || rates[c1].time > to_time)
+            {
+               idx = cend + 1;
+               continue;
+            }
+
+            have_w3 = false;
+            w3_c1   = -1;
+
+            w3_cand     = -1;
+            w3_cand_low = DBL_MAX;
+
+            wick_active    = false;
+            first_wick_idx = -1;
+            body_break_level = rates[c1].high;
+            break_achieved   = false;
+            body_break_idx   = -1;
+
+            idx   = cend;
+            state = TRGSTMT_BOOT_WAIT_CONFIRM_UP;
+            found = true;
+            break;
+         }
+
+         if(!found)
+            break;
+      }
+      else
+      {
+         bool progressed = false;
+
+         for(int j = idx; j < n; ++j)
+         {
+            if(insideHL[j])
+               continue;
+
+            if(!break_achieved)
+            {
+               if(rates[j].high > body_break_level)
+               {
+                  if(rates[j].close > body_break_level)
+                  {
+                     break_achieved = true;
+                     body_break_idx = j;
+                  }
+                  else
+                  {
+                     body_break_level = rates[j].high;
+
+                     if(first_wick_idx < 0)
+                     {
+                        first_wick_idx = j;
+                        wick_active    = true;
+
+                        int anchor_c1 = __TRGSTM_Boot_LeftmostMinLow_ExInside(rates,
+                                                                              insideHL,
+                                                                              cend,
+                                                                              first_wick_idx);
+                        have_w3 = false;
+                        w3_c1   = anchor_c1;
+                        w3_cand = -1;
+                        w3_cand_low = DBL_MAX;
+                     }
+                  }
+               }
+            }
+
+            int rewind_idx = -1;
+            if(ChainInv_PreBody_WickWindow_UP_OnBar(rates,
+                                                    insideHL,
+                                                    n,
+                                                    j,
+                                                    break_achieved,
+                                                    wick_active,
+                                                    first_wick_idx,
+                                                    w3_c1,
+                                                    w3_cand,
+                                                    rewind_idx))
+            {
+               idx       = rewind_idx;
+               state     = TRGSTMT_BOOT_SEARCH_W2_UP;
+               progressed = true;
+               break;
+            }
+
+            if(!wick_active && !break_achieved)
+            {
+               int c1_eff = (w3_c1 >= 0 ? w3_c1 : w3_cand);
+               if(c1_eff >= 0 && rates[j].low < rates[c1_eff].low)
+               {
+                  have_w3 = false;
+                  w3_c1 = -1;
+                  w3_cand = j;
+                  w3_cand_low = rates[j].low;
+                  continue;
+               }
+            }
+
+            if(!wick_active)
+            {
+               if(j >= cend && (w3_cand < 0 || rates[j].low < w3_cand_low))
+               {
+                  w3_cand     = j;
+                  w3_cand_low = rates[j].low;
+                  have_w3     = false;
+               }
+            }
+
+            int start_idx = -1;
+            if(w3_c1 >= 0)
+               start_idx = w3_c1;
+            else if(w3_cand >= 0)
+               start_idx = w3_cand;
+
+            if(!have_w3 && start_idx >= 0 && !insideHL[start_idx])
+            {
+               int a2  = -1;
+               int a3  = -1;
+               int a4  = -1;
+               int w3e = -1;
+
+               if(CheckWave3CountOnly_Local(rates,
+                                            insideHL,
+                                            bodyLowEff,
+                                            bodyHighEff,
+                                            n,
+                                            start_idx,
+                                            a2,
+                                            a3,
+                                            a4,
+                                            w3e))
+               {
+                  have_w3 = true;
+                  if(w3_c1 < 0)
+                     w3_c1 = start_idx;
+               }
+            }
+
+            if(break_achieved && !have_w3)
+            {
+               int c1_eff = (w3_c1 >= 0 ? w3_c1 : w3_cand);
+               if(c1_eff >= 0 && rates[j].low < rates[c1_eff].low)
+               {
+                  idx       = (body_break_idx >= 0 ? body_break_idx : j);
+                  state     = TRGSTMT_BOOT_SEARCH_W2_UP;
+                  progressed = true;
+                  break;
+               }
+            }
+
+            if(have_w3 && break_achieved)
+            {
+               int out_idx = (body_break_idx >= 0 ? body_break_idx : j);
+               out_body_break_time = rates[out_idx].time;
+               return true;
+            }
+         }
+
+         if(!progressed)
+            break;
+      }
+   }
+
+   return false;
+}
+
+inline bool __TRGSTM_Boot_FindFirstPair_DOWN(const string          sym,
+                                             const ENUM_TIMEFRAMES tf,
+                                             const datetime        from_time,
+                                             const datetime        to_time,
+                                             datetime             &out_body_break_time)
+{
+   out_body_break_time = 0;
+
+   int tfsec = PeriodSeconds(tf);
+   if(tfsec <= 0)
+      tfsec = 60;
+
+   datetime effective_start = from_time;
+   datetime from_adj = from_time - (datetime)(tfsec * 10);
+   if(from_adj < 0)
+      from_adj = 0;
+
+   MqlRates rates[];
+   int n = LoadRatesRange(sym, tf, from_adj, to_time, rates);
+   if(n <= 0)
+      return false;
+
+   double bodyLowEff[];
+   double bodyHighEff[];
+   BuildEffectiveBodies(rates, n, bodyLowEff, bodyHighEff);
+
+   bool insideHL[];
+   BuildInsideClusterFlagsHL(rates, n, insideHL);
+
+   int first_eff = 0;
+   while(first_eff < n && rates[first_eff].time < effective_start)
+      first_eff++;
+
+   int idx = MathMax(0, first_eff - 2);
+
+   enum TRGSTMTBootStateDN
+   {
+      TRGSTMT_BOOT_SEARCH_W2_DN = 0,
+      TRGSTMT_BOOT_WAIT_CONFIRM_DN = 1
+   };
+
+   TRGSTMTBootStateDN state = TRGSTMT_BOOT_SEARCH_W2_DN;
+
+   int c1 = -1;
+   int c2 = -1;
+   int c3 = -1;
+   int c4 = -1;
+   int cend = -1;
+
+   bool have_w3 = false;
+   int  w3_c1 = -1;
+
+   int    w3_cand = -1;
+   double w3_cand_high = -DBL_MAX;
+
+   bool   wick_active = false;
+   int    first_wick_idx = -1;
+   double body_break_level = 0.0;
+   bool   break_achieved = false;
+   int    body_break_idx = -1;
+
+   while(idx < n)
+   {
+      if(state == TRGSTMT_BOOT_SEARCH_W2_DN)
+      {
+         bool found = false;
+
+         for(int i = idx; i < n; ++i)
+         {
+            if(insideHL[i])
+               continue;
+
+            int i2 = -1;
+            int i3 = -1;
+            int i4 = -1;
+
+            if(!CheckWave2_FromIndex_LocalOnly_Down(rates,
+                                                    insideHL,
+                                                    bodyLowEff,
+                                                    bodyHighEff,
+                                                    n,
+                                                    i,
+                                                    i2,
+                                                    i3,
+                                                    i4))
+            {
+               continue;
+            }
+
+            c1   = i;
+            c2   = i2;
+            c3   = i3;
+            c4   = i4;
+            cend = (c4 >= 0 ? c4 : c3);
+
+            if(rates[c1].time < effective_start || rates[c1].time > to_time)
+            {
+               idx = cend + 1;
+               continue;
+            }
+
+            have_w3 = false;
+            w3_c1   = -1;
+
+            w3_cand      = -1;
+            w3_cand_high = -DBL_MAX;
+
+            wick_active    = false;
+            first_wick_idx = -1;
+            body_break_level = rates[c1].low;
+            break_achieved   = false;
+            body_break_idx   = -1;
+
+            idx   = cend;
+            state = TRGSTMT_BOOT_WAIT_CONFIRM_DN;
+            found = true;
+            break;
+         }
+
+         if(!found)
+            break;
+      }
+      else
+      {
+         bool progressed = false;
+
+         for(int j = idx; j < n; ++j)
+         {
+            if(insideHL[j])
+               continue;
+
+            if(!break_achieved)
+            {
+               if(rates[j].low < body_break_level)
+               {
+                  if(rates[j].close < body_break_level)
+                  {
+                     break_achieved = true;
+                     body_break_idx = j;
+                  }
+                  else
+                  {
+                     body_break_level = rates[j].low;
+
+                     if(first_wick_idx < 0)
+                     {
+                        first_wick_idx = j;
+                        wick_active    = true;
+
+                        int anchor_c1 = __TRGSTM_Boot_LeftmostMaxHigh_ExInside(rates,
+                                                                               insideHL,
+                                                                               cend,
+                                                                               first_wick_idx);
+                        have_w3 = false;
+                        w3_c1   = anchor_c1;
+                        w3_cand = -1;
+                        w3_cand_high = -DBL_MAX;
+                     }
+                  }
+               }
+            }
+
+            int rewind_idx = -1;
+            if(ChainInv_PreBody_WickWindow_DN_OnBar(rates,
+                                                    insideHL,
+                                                    n,
+                                                    j,
+                                                    break_achieved,
+                                                    wick_active,
+                                                    first_wick_idx,
+                                                    w3_c1,
+                                                    w3_cand,
+                                                    rewind_idx))
+            {
+               idx       = rewind_idx;
+               state     = TRGSTMT_BOOT_SEARCH_W2_DN;
+               progressed = true;
+               break;
+            }
+
+            if(!wick_active && !break_achieved)
+            {
+               int c1_eff = (w3_c1 >= 0 ? w3_c1 : w3_cand);
+               if(c1_eff >= 0 && rates[j].high > rates[c1_eff].high)
+               {
+                  have_w3 = false;
+                  w3_c1 = -1;
+                  w3_cand = j;
+                  w3_cand_high = rates[j].high;
+                  continue;
+               }
+            }
+
+            if(!wick_active)
+            {
+               if(j >= cend && (w3_cand < 0 || rates[j].high > w3_cand_high))
+               {
+                  w3_cand      = j;
+                  w3_cand_high = rates[j].high;
+                  have_w3      = false;
+               }
+            }
+
+            int start_idx = -1;
+            if(w3_c1 >= 0)
+               start_idx = w3_c1;
+            else if(w3_cand >= 0)
+               start_idx = w3_cand;
+
+            if(!have_w3 && start_idx >= 0 && !insideHL[start_idx])
+            {
+               int a2  = -1;
+               int a3  = -1;
+               int a4  = -1;
+               int w3e = -1;
+
+               if(CheckWave3CountOnly_Local_Down(rates,
+                                                 insideHL,
+                                                 bodyLowEff,
+                                                 bodyHighEff,
+                                                 n,
+                                                 start_idx,
+                                                 a2,
+                                                 a3,
+                                                 a4,
+                                                 w3e))
+               {
+                  have_w3 = true;
+                  if(w3_c1 < 0)
+                     w3_c1 = start_idx;
+               }
+            }
+
+            if(break_achieved && !have_w3)
+            {
+               int c1_eff = (w3_c1 >= 0 ? w3_c1 : w3_cand);
+               if(c1_eff >= 0 && rates[j].high > rates[c1_eff].high)
+               {
+                  idx       = (body_break_idx >= 0 ? body_break_idx : j);
+                  state     = TRGSTMT_BOOT_SEARCH_W2_DN;
+                  progressed = true;
+                  break;
+               }
+            }
+
+            if(have_w3 && break_achieved)
+            {
+               int out_idx = (body_break_idx >= 0 ? body_break_idx : j);
+               out_body_break_time = rates[out_idx].time;
+               return true;
+            }
+         }
+
+         if(!progressed)
+            break;
+      }
+   }
+
+   return false;
+}
+
+inline TriggerStatementBootResult __TRGSTM_BootstrapDetect(const string          sym,
+                                                           const ENUM_TIMEFRAMES tf,
+                                                           const datetime        scan_from,
+                                                           const datetime        scan_to)
+{
+   TriggerStatementBootResult out;
+   out.ok            = false;
+   out.mode          = InpDirection;
+   out.complete_time = 0;
+
+   datetime up_t = 0;
+   datetime dn_t = 0;
+
+   bool up_ok = __TRGSTM_Boot_FindFirstPair_UP(sym, tf, scan_from, scan_to, up_t);
+   bool dn_ok = __TRGSTM_Boot_FindFirstPair_DOWN(sym, tf, scan_from, scan_to, dn_t);
+
+   if(!up_ok && !dn_ok)
+      return out;
+
+   out.ok = true;
+
+   if(up_ok && !dn_ok)
+   {
+      out.mode          = DIR_UP;
+      out.complete_time = up_t;
+      return out;
+   }
+
+   if(!up_ok && dn_ok)
+   {
+      out.mode          = DIR_DOWN;
+      out.complete_time = dn_t;
+      return out;
+   }
+
+   if(up_t <= dn_t)
+   {
+      out.mode          = DIR_UP;
+      out.complete_time = up_t;
+   }
+   else
+   {
+      out.mode          = DIR_DOWN;
+      out.complete_time = dn_t;
+   }
+
+   return out;
+}
+
+inline int __TRGSTM_CompareModeEvent(const TriggerStatementModeEvent &a,
+                                     const TriggerStatementModeEvent &b)
+{
+   if(a.t < b.t) return -1;
+   if(a.t > b.t) return 1;
+
+   if(a.ns < b.ns) return -1;
+   if(a.ns > b.ns) return 1;
+
+   if((int)a.dir < (int)b.dir) return -1;
+   if((int)a.dir > (int)b.dir) return 1;
+
+   return 0;
+}
+
+inline void __TRGSTM_SortModeEvents(TriggerStatementModeEvent &events[])
+{
+   int n = ArraySize(events);
+   if(n <= 1)
+      return;
+
+   for(int i = 0; i < n - 1; ++i)
+   {
+      int best = i;
+      for(int j = i + 1; j < n; ++j)
+      {
+         if(__TRGSTM_CompareModeEvent(events[j], events[best]) < 0)
+            best = j;
+      }
+
+      if(best != i)
+      {
+         TriggerStatementModeEvent tmp = events[i];
+         events[i] = events[best];
+         events[best] = tmp;
+      }
+   }
+}
+
+inline bool __TRGSTM_ModeEventSame(const TriggerStatementModeEvent &a,
+                                   const TriggerStatementModeEvent &b)
+{
+   return (a.t == b.t && a.ns == b.ns && a.dir == b.dir);
+}
+
+inline bool __TRGSTM_ParseMarkerNSTail(const string full_name,
+                                       int         &scan_id,
+                                       int         &ns,
+                                       string      &tail)
+{
+   scan_id = -1;
+   ns      = -1;
+   tail    = "";
+
+   int len = StringLen(full_name);
+   if(len < 6)
+      return false;
+
+   if(StringGetCharacter(full_name, 0) != 'S')
+      return false;
+
+   int p1 = StringFind(full_name, "_");
+   if(p1 <= 1)
+      return false;
+
+   string scan_text = StringSubstr(full_name, 1, p1 - 1);
+   scan_id = (int)StringToInteger(scan_text);
+   if(scan_id <= 0)
+      return false;
+
+   int p2 = StringFind(full_name, "_", p1 + 1);
+   if(p2 < 0)
+      return false;
+
+   string ns_text = StringSubstr(full_name, p1 + 1, p2 - p1 - 1);
+   if(ns_text == "MAJ")
+      ns = TRGSTMT_NS_MAJ;
+   else if(ns_text == "MIN")
+      ns = TRGSTMT_NS_MIN;
+   else
+      return false;
+
+   tail = StringSubstr(full_name, p2 + 1);
+   if(tail == "")
+      return false;
+
+   return true;
+}
+
+inline int __TRGSTM_CollectMTCMarkerEvents(const datetime scan_from,
+                                           const datetime scan_to,
+                                           TriggerStatementModeEvent &out[])
+{
+   ArrayResize(out, 0);
+
+   int total = ObjectsTotal(0);
+   for(int i = 0; i < total; ++i)
+   {
+      string on = ObjectName(0, i);
+      if(on == "")
+         continue;
+
+      if((ENUM_OBJECT)ObjectGetInteger(0, on, OBJPROP_TYPE) != OBJ_VLINE)
+         continue;
+
+      int scan_id = -1;
+      int ns      = -1;
+      string tail = "";
+
+      if(!__TRGSTM_ParseMarkerNSTail(on, scan_id, ns, tail))
+         continue;
+
+      if(scan_id > g_scan_id)
+         continue;
+
+      Direction dir;
+      bool is_mtc = false;
+
+      if(StringFind(tail, "MTC_U_") == 0)
+      {
+         dir = DIR_UP;
+         is_mtc = true;
+      }
+      else if(StringFind(tail, "MTC_D_") == 0)
+      {
+         dir = DIR_DOWN;
+         is_mtc = true;
+      }
+
+      if(!is_mtc)
+         continue;
+
+      datetime t = (datetime)ObjectGetInteger(0, on, OBJPROP_TIME);
+      if(scan_from > 0 && t < scan_from)
+         continue;
+      if(scan_to > 0 && t > scan_to)
+         continue;
+
+      int pos = ArraySize(out);
+      ArrayResize(out, pos + 1);
+      out[pos].t   = t;
+      out[pos].dir = dir;
+      out[pos].ns  = ns;
+   }
+
+   __TRGSTM_SortModeEvents(out);
+
+   int n = ArraySize(out);
+   if(n <= 1)
+      return n;
+
+   int wr = 1;
+   for(int i = 1; i < n; ++i)
+   {
+      if(__TRGSTM_ModeEventSame(out[i], out[wr - 1]))
+         continue;
+
+      out[wr] = out[i];
+      wr++;
+   }
+
+   ArrayResize(out, wr);
+   return wr;
+}
+
+inline void __TRGSTM_AppendTrendWindow(TriggerStatementTrendWindow &out[],
+                                       const datetime               start_time,
+                                       const datetime               end_time,
+                                       const Direction              dir,
+                                       const string                 tag)
+{
+   if(start_time <= 0 && end_time <= 0)
+      return;
+   if(end_time > 0 && end_time < start_time)
+      return;
+
+   int pos = ArraySize(out);
+   ArrayResize(out, pos + 1);
+
+   out[pos].start_time = start_time;
+   out[pos].end_time   = end_time;
+   out[pos].dir        = dir;
+   out[pos].tag        = tag;
+}
+
+inline int __TRGSTM_CompareTrendWindow(const TriggerStatementTrendWindow &a,
+                                       const TriggerStatementTrendWindow &b)
+{
+   if(a.start_time < b.start_time) return -1;
+   if(a.start_time > b.start_time) return 1;
+
+   if(a.end_time < b.end_time) return -1;
+   if(a.end_time > b.end_time) return 1;
+
+   if((int)a.dir < (int)b.dir) return -1;
+   if((int)a.dir > (int)b.dir) return 1;
+
+   return 0;
+}
+
+inline void __TRGSTM_SortTrendWindows(TriggerStatementTrendWindow &windows[])
+{
+   int n = ArraySize(windows);
+   if(n <= 1)
+      return;
+
+   for(int i = 0; i < n - 1; ++i)
+   {
+      int best = i;
+      for(int j = i + 1; j < n; ++j)
+      {
+         if(__TRGSTM_CompareTrendWindow(windows[j], windows[best]) < 0)
+            best = j;
+      }
+
+      if(best != i)
+      {
+         TriggerStatementTrendWindow tmp = windows[i];
+         windows[i] = windows[best];
+         windows[best] = tmp;
+      }
+   }
+}
+
+inline int __TRGSTM_BuildMajorTrendWindows(const datetime                  scan_from,
+                                           const datetime                  scan_to,
+                                           const int                       tfsec,
+                                           const TriggerStatementBootResult &boot,
+                                           const TriggerStatementModeEvent &events[],
+                                           TriggerStatementTrendWindow     &out[])
+{
+   ArrayResize(out, 0);
+
+   datetime start_time = scan_from;
+   Direction cur_dir   = InpDirection;
+
+   if(boot.ok && boot.complete_time > 0)
+   {
+      cur_dir = boot.mode;
+      start_time = boot.complete_time + (datetime)tfsec;
+   }
+
+   if(start_time < 0)
+      start_time = 0;
+
+   if(scan_to > 0 && start_time > scan_to)
+      return 0;
+
+   datetime cursor = start_time;
+   int total = ArraySize(events);
+
+   for(int i = 0; i < total; ++i)
+   {
+      TriggerStatementModeEvent evt = events[i];
+      if(evt.ns != TRGSTMT_NS_MAJ)
+         continue;
+      if(evt.t < start_time)
+         continue;
+      if(scan_to > 0 && evt.t > scan_to)
+         continue;
+
+      __TRGSTM_AppendTrendWindow(out,
+                                 cursor,
+                                 evt.t - 1,
+                                 cur_dir,
+                                 "MAJ");
+
+      cur_dir = evt.dir;
+      cursor  = evt.t;
+   }
+
+   __TRGSTM_AppendTrendWindow(out,
+                              cursor,
+                              scan_to,
+                              cur_dir,
+                              "MAJ");
+
+   __TRGSTM_SortTrendWindows(out);
+   return ArraySize(out);
+}
+
+inline int __TRGSTM_BuildMinorTrendWindows(const datetime                  scan_to,
+                                           const TriggerStatementModeEvent &events[],
+                                           TriggerStatementTrendWindow     &out[])
+{
+   ArrayResize(out, 0);
+
+   int session_count = FSMS_SW_Session_Count();
+   for(int si = 0; si < session_count; ++si)
+   {
+      FSMS_SW_MinorSession s;
+      if(!FSMS_SW_Session_Get(si, s))
+         continue;
+      if(!s.used)
+         continue;
+      if(s.starter_time <= 0)
+         continue;
+
+      datetime session_end = 0;
+      if(s.open)
+         session_end = scan_to;
+      else
+         session_end = (s.off_time > 0 ? (s.off_time - 1) : 0);
+
+      if(session_end <= 0)
+         continue;
+      if(session_end < s.starter_time)
+         continue;
+
+      Direction cur_dir = s.dir;
+      datetime  cursor  = s.starter_time;
+
+      int total = ArraySize(events);
+      for(int i = 0; i < total; ++i)
+      {
+         TriggerStatementModeEvent evt = events[i];
+         if(evt.ns != TRGSTMT_NS_MIN)
+            continue;
+         if(evt.t < s.starter_time)
+            continue;
+         if(evt.t > session_end)
+            continue;
+
+         __TRGSTM_AppendTrendWindow(out,
+                                    cursor,
+                                    evt.t - 1,
+                                    cur_dir,
+                                    s.tag);
+
+         cur_dir = evt.dir;
+         cursor  = evt.t;
+      }
+
+      __TRGSTM_AppendTrendWindow(out,
+                                 cursor,
+                                 session_end,
+                                 cur_dir,
+                                 s.tag);
+   }
+
+   __TRGSTM_SortTrendWindows(out);
+   return ArraySize(out);
+}
+
+inline bool __TRGSTM_TimeInsideTrendWindow(const TriggerStatementTrendWindow &w,
+                                           const datetime                    t)
+{
+   if(t < w.start_time)
+      return false;
+   if(w.end_time > 0 && t > w.end_time)
+      return false;
+   return true;
+}
+
+inline bool __TRGSTM_FindActiveTrend(const TriggerStatementTrendWindow &windows[],
+                                     const datetime                    t,
+                                     Direction                        &dir,
+                                     string                           &tag)
+{
+   dir = DIR_UP;
+   tag = "";
+
+   bool found = false;
+   datetime best_start = 0;
+
+   int total = ArraySize(windows);
+   for(int i = 0; i < total; ++i)
+   {
+      if(!__TRGSTM_TimeInsideTrendWindow(windows[i], t))
+         continue;
+
+      if(!found || windows[i].start_time >= best_start)
+      {
+         found      = true;
+         best_start = windows[i].start_time;
+         dir        = windows[i].dir;
+         tag        = windows[i].tag;
+      }
+   }
+
+   return found;
+}
+
+inline string __TRGSTM_BuildTrendSlotText(const bool      active,
+                                          const Direction dir,
+                                          const string    tag,
+                                          const string    prefix)
+{
+   if(!active)
+      return (prefix + "_NONE");
+
+   string text = prefix + "_" + __TRGSTM_DirName(dir);
+   if(tag != "")
+      text += ("#" + tag);
+
+   return text;
+}
+
+inline string __TRGSTM_BuildTrendSkipNote(const Direction trg_dir,
+                                          const bool      major_active,
+                                          const Direction major_dir,
+                                          const string    major_tag,
+                                          const bool      minor_active,
+                                          const Direction minor_dir,
+                                          const string    minor_tag)
+{
+   string note = "SKIPPED_M15_TREND_FILTER";
+   note = __TRGSTM_AppendNote(note, "TRG_" + __TRGSTM_DirName(trg_dir));
+   note = __TRGSTM_AppendNote(note, __TRGSTM_BuildTrendSlotText(major_active, major_dir, major_tag, "MAJ"));
+   note = __TRGSTM_AppendNote(note, __TRGSTM_BuildTrendSlotText(minor_active, minor_dir, minor_tag, "MIN"));
+   return note;
+}
+
+inline string __TRGSTM_BuildTrendMatchNote(const Direction trg_dir,
+                                           const bool      major_match,
+                                           const Direction major_dir,
+                                           const string    major_tag,
+                                           const bool      minor_match,
+                                           const Direction minor_dir,
+                                           const string    minor_tag)
+{
+   string note = "";
+
+   if(major_match && minor_match)
+      note = "M15_TREND_MATCH_BOTH";
+   else if(major_match)
+      note = "M15_TREND_MATCH_MAJOR";
+   else if(minor_match)
+      note = "M15_TREND_MATCH_MINOR";
+
+   note = __TRGSTM_AppendNote(note, "TRG_" + __TRGSTM_DirName(trg_dir));
+
+   if(major_match)
+      note = __TRGSTM_AppendNote(note, __TRGSTM_BuildTrendSlotText(true, major_dir, major_tag, "MAJ"));
+   if(minor_match)
+      note = __TRGSTM_AppendNote(note, __TRGSTM_BuildTrendSlotText(true, minor_dir, minor_tag, "MIN"));
+
+   return note;
 }
 
 inline bool __TRGSTM_LoadRates(const string          sym,
@@ -493,14 +1768,14 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
       risk_percent = 1.0;
 
    TriggerSLTPRecord records[];
-   int filtered_count = __TRGSTM_CollectRecords(use_sym, scan_from, scan_to, records);
+   int raw_valid_triggers = __TRGSTM_CollectRecords(use_sym, scan_from, scan_to, records);
 
    int tfsec = PeriodSeconds(tf);
    if(tfsec <= 0)
       tfsec = 60;
 
    datetime load_from = scan_from;
-   if(filtered_count > 0)
+   if(raw_valid_triggers > 0)
    {
       load_from = records[0].hit_time - (datetime)(tfsec * 2);
       if(load_from < 0)
@@ -513,80 +1788,271 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
 
    MqlRates rates[];
    bool have_rates = false;
-   if(filtered_count > 0)
+   if(raw_valid_triggers > 0)
       have_rates = __TRGSTM_LoadRates(use_sym, tf, load_from, use_scan_to, rates);
 
+   double risk_money = initial_capital * (risk_percent / 100.0);
+
    TriggerStatementTrade trades[];
-   ArrayResize(trades, filtered_count);
-   for(int i = 0; i < filtered_count; ++i)
+   ArrayResize(trades, raw_valid_triggers);
+   for(int i = 0; i < raw_valid_triggers; ++i)
    {
       __TRGSTM_ClearTrade(trades[i]);
+      trades[i].valid     = true;
+      trades[i].raw_index = (i + 1);
+      trades[i].rec       = records[i];
+
       if(have_rates)
-         __TRGSTM_EvaluateTrade(records[i], rates, ArraySize(rates), use_scan_to, trades[i]);
+      {
+         bool eval_ok = __TRGSTM_EvaluateTrade(records[i], rates, ArraySize(rates), use_scan_to, trades[i]);
+         trades[i].valid     = true;
+         trades[i].raw_index = (i + 1);
+         trades[i].rec       = records[i];
+
+         if(!eval_ok)
+            trades[i].rec = records[i];
+      }
       else
       {
-         trades[i].valid = true;
-         trades[i].rec   = records[i];
-         trades[i].note  = "NO_RATE_DATA";
+         trades[i].note = "NO_RATE_DATA";
       }
    }
 
-   double risk_money = initial_capital * (risk_percent / 100.0);
+   TriggerStatementStartEvent start_events[];
+   int start_count = __TRGSTM_CollectStartEvents(use_sym, use_scan_to, start_events);
+
+   TriggerStatementModeEvent mtc_events[];
+   int mtc_count = __TRGSTM_CollectMTCMarkerEvents(scan_from, use_scan_to, mtc_events);
+
+   TriggerStatementBootResult major_boot = __TRGSTM_BootstrapDetect(use_sym, tf, scan_from, use_scan_to);
+
+   TriggerStatementTrendWindow major_windows[];
+   TriggerStatementTrendWindow minor_windows[];
+
+   int major_window_count = __TRGSTM_BuildMajorTrendWindows(scan_from,
+                                                            use_scan_to,
+                                                            tfsec,
+                                                            major_boot,
+                                                            mtc_events,
+                                                            major_windows);
+
+   int minor_window_count = __TRGSTM_BuildMinorTrendWindows(use_scan_to,
+                                                            mtc_events,
+                                                            minor_windows);
+
+   int minor_session_count = FSMS_SW_Session_Count();
+
+   datetime major_resume_from = scan_from;
+   if(major_boot.ok && major_boot.complete_time > 0)
+   {
+      major_resume_from = major_boot.complete_time + (datetime)tfsec;
+   }
+
+   string major_seed_text = "";
+   if(major_boot.ok && major_boot.complete_time > 0)
+   {
+      major_seed_text = "BOOTSTRAP_" + __TRGSTM_DirName(major_boot.mode)
+                      + " @ " + __TRGSTM_SafeTime(major_boot.complete_time)
+                      + " | ActiveFrom=" + __TRGSTM_SafeTime(major_resume_from);
+   }
+   else
+   {
+      major_seed_text = "FALLBACK_" + __TRGSTM_DirName(InpDirection)
+                      + " | ActiveFrom=" + __TRGSTM_SafeTime(scan_from);
+   }
 
    double equity             = initial_capital;
    double peak_balance       = initial_capital;
    double max_drawdown_money = 0.0;
    double max_drawdown_pct   = 0.0;
 
-   int    closed_trades = 0;
-   int    wins          = 0;
-   int    losses        = 0;
-   int    open_trades   = 0;
-   int    ambiguous_losses = 0;
-   int    trigger_bar_ambiguous = 0;
+   int executed_trades         = 0;
+   int ignored_valid_triggers  = 0;
+   int skipped_active_trade    = 0;
+   int skipped_lockout         = 0;
+   int skipped_trend_filter    = 0;
+   int skipped_hypo_wins       = 0;
+   int skipped_hypo_losses     = 0;
+   int skipped_hypo_open       = 0;
 
-   int    buy_total  = 0;
-   int    sell_total = 0;
-   int    buy_wins   = 0;
-   int    sell_wins  = 0;
-   int    buy_losses = 0;
-   int    sell_losses= 0;
+   int closed_trades = 0;
+   int wins          = 0;
+   int losses        = 0;
+   int open_trades   = 0;
+   int ambiguous_losses      = 0;
+   int trigger_bar_ambiguous = 0;
 
-   int    current_win_streak  = 0;
-   int    current_loss_streak = 0;
-   int    max_win_streak      = 0;
-   int    max_loss_streak     = 0;
+   int buy_total   = 0;
+   int sell_total  = 0;
+   int buy_wins    = 0;
+   int sell_wins   = 0;
+   int buy_losses  = 0;
+   int sell_losses = 0;
+
+   int current_win_streak  = 0;
+   int current_loss_streak = 0;
+   int max_win_streak      = 0;
+   int max_loss_streak     = 0;
+
+   int gate_loss_streak    = 0;
+   int lockout_activations = 0;
+   int lockout_releases    = 0;
+
+   int exec_trend_major_only = 0;
+   int exec_trend_minor_only = 0;
+   int exec_trend_both       = 0;
 
    double gross_profit = 0.0;
    double gross_loss   = 0.0;
    double net_profit   = 0.0;
    double total_r      = 0.0;
 
-   double sum_win_money = 0.0;
+   double sum_win_money  = 0.0;
    double sum_loss_money = 0.0;
-   double sum_win_r = 0.0;
-   double sum_loss_r = 0.0;
+   double sum_win_r      = 0.0;
+   double sum_loss_r     = 0.0;
 
-   double best_trade_money = -DBL_MAX;
+   double best_trade_money  = -DBL_MAX;
    double worst_trade_money = DBL_MAX;
-   double best_trade_r = -DBL_MAX;
-   double worst_trade_r = DBL_MAX;
-   int    best_trade_index = -1;
-   int    worst_trade_index = -1;
+   double best_trade_r      = -DBL_MAX;
+   double worst_trade_r     = DBL_MAX;
+   int    best_trade_exec_index  = -1;
+   int    worst_trade_exec_index = -1;
 
    double min_risk_pips = DBL_MAX;
    double max_risk_pips = 0.0;
    double sum_risk_pips = 0.0;
 
    double total_open_float_money = 0.0;
-   double total_open_float_r = 0.0;
+   double total_open_float_r     = 0.0;
 
-   for(int i = 0; i < filtered_count; ++i)
+   bool     active_trade_open  = false;
+   datetime active_trade_until = 0;
+
+   bool     lockout_active   = false;
+   datetime lockout_ref_time = 0;
+   int      next_start_index = 0;
+
+   for(int i = 0; i < raw_valid_triggers; ++i)
    {
-      if(trades[i].rec.dir == DIR_UP)
-         ++buy_total;
+      datetime unlock_on_time = __TRGSTM_AdvanceStartEvents(start_events,
+                                                            start_count,
+                                                            next_start_index,
+                                                            trades[i].rec.hit_time,
+                                                            lockout_active,
+                                                            lockout_ref_time,
+                                                            gate_loss_streak,
+                                                            lockout_releases);
+
+      trades[i].unlock_on_time = unlock_on_time;
+
+      if(active_trade_open)
+      {
+         if(active_trade_until > 0 && trades[i].rec.hit_time > active_trade_until)
+         {
+            active_trade_open  = false;
+            active_trade_until = 0;
+         }
+      }
+
+      if(active_trade_open)
+      {
+         __TRGSTM_SetSkip(trades[i],
+                          TRGSTMT_SKIP_ACTIVE_TRADE,
+                          equity,
+                          __TRGSTM_AppendNote(trades[i].note, "SKIPPED_ACTIVE_TRADE_ALREADY_OPEN"));
+         ignored_valid_triggers++;
+         skipped_active_trade++;
+         __TRGSTM_BumpHypotheticalCounters(trades[i],
+                                           skipped_hypo_wins,
+                                           skipped_hypo_losses,
+                                           skipped_hypo_open);
+         continue;
+      }
+
+      if(lockout_active)
+      {
+         __TRGSTM_SetSkip(trades[i],
+                          TRGSTMT_SKIP_LOCKOUT,
+                          equity,
+                          __TRGSTM_AppendNote(trades[i].note, "SKIPPED_WAITING_NEW_4H_SIGNAL_ON_AFTER_4_LOSSES"));
+         ignored_valid_triggers++;
+         skipped_lockout++;
+         __TRGSTM_BumpHypotheticalCounters(trades[i],
+                                           skipped_hypo_wins,
+                                           skipped_hypo_losses,
+                                           skipped_hypo_open);
+         continue;
+      }
+
+      Direction major_dir = DIR_UP;
+      Direction minor_dir = DIR_UP;
+      string    major_tag = "";
+      string    minor_tag = "";
+
+      bool major_active = __TRGSTM_FindActiveTrend(major_windows,
+                                                   trades[i].rec.hit_time,
+                                                   major_dir,
+                                                   major_tag);
+
+      bool minor_active = __TRGSTM_FindActiveTrend(minor_windows,
+                                                   trades[i].rec.hit_time,
+                                                   minor_dir,
+                                                   minor_tag);
+
+      bool major_match = (major_active && major_dir == trades[i].rec.dir);
+      bool minor_match = (minor_active && minor_dir == trades[i].rec.dir);
+
+      if(!major_match && !minor_match)
+      {
+         __TRGSTM_SetSkip(trades[i],
+                          TRGSTMT_SKIP_TREND_FILTER,
+                          equity,
+                          __TRGSTM_AppendNote(trades[i].note,
+                                              __TRGSTM_BuildTrendSkipNote(trades[i].rec.dir,
+                                                                          major_active,
+                                                                          major_dir,
+                                                                          major_tag,
+                                                                          minor_active,
+                                                                          minor_dir,
+                                                                          minor_tag)));
+         ignored_valid_triggers++;
+         skipped_trend_filter++;
+         __TRGSTM_BumpHypotheticalCounters(trades[i],
+                                           skipped_hypo_wins,
+                                           skipped_hypo_losses,
+                                           skipped_hypo_open);
+         continue;
+      }
+
+      if(major_match && minor_match)
+         exec_trend_both++;
+      else if(major_match)
+         exec_trend_major_only++;
       else
-         ++sell_total;
+         exec_trend_minor_only++;
+
+      trades[i].taken       = true;
+      trades[i].exec_index  = (executed_trades + 1);
+      trades[i].skip_reason = TRGSTMT_SKIP_NONE;
+      executed_trades++;
+
+      trades[i].note = __TRGSTM_AppendNote(trades[i].note,
+                                           __TRGSTM_BuildTrendMatchNote(trades[i].rec.dir,
+                                                                        major_match,
+                                                                        major_dir,
+                                                                        major_tag,
+                                                                        minor_match,
+                                                                        minor_dir,
+                                                                        minor_tag));
+
+      if(trades[i].unlock_on_time > 0)
+         trades[i].note = __TRGSTM_AppendNote(trades[i].note, "UNLOCKED_BY_NEW_4H_SIGNAL_ON");
+
+      if(trades[i].rec.dir == DIR_UP)
+         buy_total++;
+      else
+         sell_total++;
 
       if(trades[i].rec.risk_pips < min_risk_pips)
          min_risk_pips = trades[i].rec.risk_pips;
@@ -594,9 +2060,9 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
          max_risk_pips = trades[i].rec.risk_pips;
       sum_risk_pips += trades[i].rec.risk_pips;
 
-      if(trades[i].result_status == TRGSTMT_RESULT_WIN || trades[i].result_status == TRGSTMT_RESULT_LOSS)
+      if(__TRGSTM_IsClosedStatus(trades[i].result_status))
       {
-         ++closed_trades;
+         closed_trades++;
          trades[i].pnl_money    = (trades[i].result_r * risk_money);
          trades[i].equity_after = (equity + trades[i].pnl_money);
          equity                 = trades[i].equity_after;
@@ -619,7 +2085,7 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
 
          if(trades[i].result_status == TRGSTMT_RESULT_WIN)
          {
-            ++wins;
+            wins++;
             gross_profit += trades[i].pnl_money;
             sum_win_money += trades[i].pnl_money;
             sum_win_r     += trades[i].result_r;
@@ -630,13 +2096,15 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
             trades[i].streak_after = current_win_streak;
 
             if(trades[i].rec.dir == DIR_UP)
-               ++buy_wins;
+               buy_wins++;
             else
-               ++sell_wins;
+               sell_wins++;
+
+            gate_loss_streak = 0;
          }
          else
          {
-            ++losses;
+            losses++;
             gross_loss += MathAbs(trades[i].pnl_money);
             sum_loss_money += MathAbs(trades[i].pnl_money);
             sum_loss_r     += MathAbs(trades[i].result_r);
@@ -647,40 +2115,73 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
             trades[i].streak_after = -current_loss_streak;
 
             if(trades[i].rec.dir == DIR_UP)
-               ++buy_losses;
+               buy_losses++;
             else
-               ++sell_losses;
+               sell_losses++;
 
             if(trades[i].ambiguous)
-               ++ambiguous_losses;
+               ambiguous_losses++;
             if(trades[i].trigger_bar_ambiguous)
-               ++trigger_bar_ambiguous;
+               trigger_bar_ambiguous++;
+
+            gate_loss_streak++;
+            if(gate_loss_streak >= TRGSTMT_LOCK_AFTER_LOSSES)
+            {
+               lockout_active    = true;
+               lockout_ref_time  = (trades[i].exit_time > 0 ? trades[i].exit_time : trades[i].rec.hit_time);
+               lockout_activations++;
+               trades[i].note = __TRGSTM_AppendNote(trades[i].note, "LOCKOUT_ARMED_AFTER_4_CONSEC_LOSSES");
+            }
          }
 
          if(trades[i].pnl_money > best_trade_money)
          {
-            best_trade_money = trades[i].pnl_money;
-            best_trade_r     = trades[i].result_r;
-            best_trade_index = i;
+            best_trade_money      = trades[i].pnl_money;
+            best_trade_r          = trades[i].result_r;
+            best_trade_exec_index = trades[i].exec_index;
          }
+
          if(trades[i].pnl_money < worst_trade_money)
          {
-            worst_trade_money = trades[i].pnl_money;
-            worst_trade_r     = trades[i].result_r;
-            worst_trade_index = i;
+            worst_trade_money      = trades[i].pnl_money;
+            worst_trade_r          = trades[i].result_r;
+            worst_trade_exec_index = trades[i].exec_index;
          }
+
+         active_trade_open = true;
+         if(trades[i].exit_time > 0)
+            active_trade_until = trades[i].exit_time;
+         else
+            active_trade_until = trades[i].rec.hit_time;
       }
       else
       {
-         ++open_trades;
+         open_trades++;
          trades[i].floating_money = (trades[i].floating_r * risk_money);
          trades[i].equity_after   = equity;
          total_open_float_money += trades[i].floating_money;
          total_open_float_r     += trades[i].floating_r;
+
+         active_trade_open  = true;
+         active_trade_until = use_scan_to;
       }
    }
 
-   if(filtered_count <= 0)
+   if(lockout_active)
+   {
+      __TRGSTM_AdvanceStartEvents(start_events,
+                                  start_count,
+                                  next_start_index,
+                                  use_scan_to,
+                                  lockout_active,
+                                  lockout_ref_time,
+                                  gate_loss_streak,
+                                  lockout_releases);
+   }
+
+   bool lockout_active_at_end = lockout_active;
+
+   if(executed_trades <= 0)
    {
       min_risk_pips = 0.0;
       max_risk_pips = 0.0;
@@ -690,20 +2191,28 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
       min_risk_pips = 0.0;
    }
 
-   double win_rate      = 0.0;
-   double loss_rate     = 0.0;
-   double profit_factor = 0.0;
-   double avg_win_money = 0.0;
-   double avg_loss_money= 0.0;
-   double avg_win_r     = 0.0;
-   double avg_loss_r    = 0.0;
-   double expectancy_money = 0.0;
-   double expectancy_r     = 0.0;
-   double payoff_ratio     = 0.0;
-   double recovery_factor  = 0.0;
-   double avg_risk_pips    = 0.0;
-   double return_pct       = 0.0;
+   double execution_rate     = 0.0;
+   double ignored_rate       = 0.0;
+   double win_rate           = 0.0;
+   double loss_rate          = 0.0;
+   double profit_factor      = 0.0;
+   double avg_win_money      = 0.0;
+   double avg_loss_money     = 0.0;
+   double avg_win_r          = 0.0;
+   double avg_loss_r         = 0.0;
+   double expectancy_money   = 0.0;
+   double expectancy_r       = 0.0;
+   double payoff_ratio       = 0.0;
+   double recovery_factor    = 0.0;
+   double avg_risk_pips      = 0.0;
+   double return_pct         = 0.0;
    double balance_plus_float = (equity + total_open_float_money);
+
+   if(raw_valid_triggers > 0)
+   {
+      execution_rate = ((double)executed_trades / (double)raw_valid_triggers) * 100.0;
+      ignored_rate   = ((double)ignored_valid_triggers / (double)raw_valid_triggers) * 100.0;
+   }
 
    if(closed_trades > 0)
    {
@@ -712,24 +2221,31 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
       expectancy_money = (net_profit / (double)closed_trades);
       expectancy_r     = (total_r / (double)closed_trades);
    }
+
    if(losses > 0)
    {
       avg_loss_money = (sum_loss_money / (double)losses);
       avg_loss_r     = (sum_loss_r / (double)losses);
    }
+
    if(wins > 0)
    {
       avg_win_money = (sum_win_money / (double)wins);
       avg_win_r     = (sum_win_r / (double)wins);
    }
+
    if(gross_loss > 0.0)
       profit_factor = (gross_profit / gross_loss);
+
    if(avg_loss_money > 0.0)
       payoff_ratio = (avg_win_money / avg_loss_money);
+
    if(max_drawdown_money > 0.0)
       recovery_factor = (net_profit / max_drawdown_money);
-   if(filtered_count > 0)
-      avg_risk_pips = (sum_risk_pips / (double)filtered_count);
+
+   if(executed_trades > 0)
+      avg_risk_pips = (sum_risk_pips / (double)executed_trades);
+
    if(initial_capital > 0.0)
       return_pct = (net_profit / initial_capital) * 100.0;
 
@@ -742,7 +2258,7 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
       g_trgstmt_last_write_ok = false;
       g_trgstmt_last_scan_from = scan_from;
       g_trgstmt_last_scan_to   = use_scan_to;
-      g_trgstmt_last_records   = filtered_count;
+      g_trgstmt_last_records   = raw_valid_triggers;
 
       if(InpDebugPrints)
          Print("[TRG-STATEMENT] FileOpen failed | path=", g_trgstmt_last_fullpath,
@@ -755,9 +2271,21 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    g_trgstmt_last_write_ok = true;
    g_trgstmt_last_scan_from = scan_from;
    g_trgstmt_last_scan_to   = use_scan_to;
-   g_trgstmt_last_records   = filtered_count;
+   g_trgstmt_last_records   = raw_valid_triggers;
 
    int digits = __TRGSL_DigitsOf(use_sym);
+
+   string best_trade_text = "n/a";
+   if(best_trade_exec_index > 0)
+      best_trade_text = ("#" + IntegerToString(best_trade_exec_index)
+                      + " | " + __TRGSTM_Money(best_trade_money)
+                      + " | " + DoubleToString(best_trade_r, 2) + "R");
+
+   string worst_trade_text = "n/a";
+   if(worst_trade_exec_index > 0)
+      worst_trade_text = ("#" + IntegerToString(worst_trade_exec_index)
+                       + " | " + __TRGSTM_Money(worst_trade_money)
+                       + " | " + DoubleToString(worst_trade_r, 2) + "R");
 
    __TRGSTM_WriteLine(handle, "WaveBot Trigger Statement");
    __TRGSTM_WriteLine(handle, "============================================================");
@@ -769,19 +2297,34 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "Initial Capital        : " + __TRGSTM_Money(initial_capital));
    __TRGSTM_WriteLine(handle, "Fixed Risk Per Trade   : " + __TRGSTM_Pct(risk_percent) + " = " + __TRGSTM_Money(risk_money));
    __TRGSTM_WriteLine(handle, "SL/TP Source           : TriggerSLTP.mqh valid triggers only");
-   __TRGSTM_WriteLine(handle, "Execution Model        : Entry at breakout level, TP/SL touch-based, same-bar ambiguity resolved conservatively in favor of SL");
+   __TRGSTM_WriteLine(handle, "Execution Model        : Single active trade only | entry at breakout level | touch-based TP/SL | conservative same-bar ambiguity = SL | M15 trend alignment required");
+   __TRGSTM_WriteLine(handle, "Protection Rule        : After 4 consecutive executed losses, trading is locked until a new 4H signal on arrives");
+   __TRGSTM_WriteLine(handle, "Trend Filter           : Trigger direction must align with active M15 major trend or active M15 minor trend");
+   __TRGSTM_WriteLine(handle, "Trend Seed (Major)     : " + major_seed_text);
+   __TRGSTM_WriteLine(handle, "Trend Windows MAJ/MIN  : " + IntegerToString(major_window_count) + " / " + IntegerToString(minor_window_count));
+   __TRGSTM_WriteLine(handle, "Minor Sessions Seen    : " + IntegerToString(minor_session_count));
+   __TRGSTM_WriteLine(handle, "MTC Marker Events      : " + IntegerToString(mtc_count));
+   __TRGSTM_WriteLine(handle, "Bridge Source          : Trigger.mqh / WB15 bridge start events");
    __TRGSTM_WriteLine(handle, "Output Path            : " + g_trgstmt_last_fullpath);
    __TRGSTM_WriteLine(handle, "");
 
    __TRGSTM_WriteLine(handle, "SUMMARY");
    __TRGSTM_WriteLine(handle, "------------------------------------------------------------");
-   __TRGSTM_WriteLine(handle, "Valid Triggers         : " + IntegerToString(filtered_count));
+   __TRGSTM_WriteLine(handle, "Raw Valid Triggers     : " + IntegerToString(raw_valid_triggers));
+   __TRGSTM_WriteLine(handle, "Executed Trades        : " + IntegerToString(executed_trades));
+   __TRGSTM_WriteLine(handle, "Execution Rate         : " + __TRGSTM_Pct(execution_rate));
+   __TRGSTM_WriteLine(handle, "Ignored Valid Triggers : " + IntegerToString(ignored_valid_triggers) + " | " + __TRGSTM_Pct(ignored_rate));
+   __TRGSTM_WriteLine(handle, "Ignored: Active Trade  : " + IntegerToString(skipped_active_trade));
+   __TRGSTM_WriteLine(handle, "Ignored: 4L Lockout    : " + IntegerToString(skipped_lockout));
+   __TRGSTM_WriteLine(handle, "Ignored: Trend Filter  : " + IntegerToString(skipped_trend_filter));
+   __TRGSTM_WriteLine(handle, "Skipped Hypo W/L/O     : " + IntegerToString(skipped_hypo_wins) + " / " + IntegerToString(skipped_hypo_losses) + " / " + IntegerToString(skipped_hypo_open));
+   __TRGSTM_WriteLine(handle, "Trend Match MAJ/MIN/B  : " + IntegerToString(exec_trend_major_only) + " / " + IntegerToString(exec_trend_minor_only) + " / " + IntegerToString(exec_trend_both));
    __TRGSTM_WriteLine(handle, "Closed Trades          : " + IntegerToString(closed_trades));
    __TRGSTM_WriteLine(handle, "Open Trades            : " + IntegerToString(open_trades));
    __TRGSTM_WriteLine(handle, "Wins / Losses          : " + IntegerToString(wins) + " / " + IntegerToString(losses));
    __TRGSTM_WriteLine(handle, "Win Rate / Loss Rate   : " + __TRGSTM_Pct(win_rate) + " / " + __TRGSTM_Pct(loss_rate));
-   __TRGSTM_WriteLine(handle, "Bull Trades W/L        : " + IntegerToString(buy_total) + " | " + IntegerToString(buy_wins) + " / " + IntegerToString(buy_losses));
-   __TRGSTM_WriteLine(handle, "Bear Trades W/L        : " + IntegerToString(sell_total) + " | " + IntegerToString(sell_wins) + " / " + IntegerToString(sell_losses));
+   __TRGSTM_WriteLine(handle, "Bull Exec Trades W/L   : " + IntegerToString(buy_total) + " | " + IntegerToString(buy_wins) + " / " + IntegerToString(buy_losses));
+   __TRGSTM_WriteLine(handle, "Bear Exec Trades W/L   : " + IntegerToString(sell_total) + " | " + IntegerToString(sell_wins) + " / " + IntegerToString(sell_losses));
    __TRGSTM_WriteLine(handle, "Gross Profit           : " + __TRGSTM_Money(gross_profit));
    __TRGSTM_WriteLine(handle, "Gross Loss             : " + __TRGSTM_Money(gross_loss));
    __TRGSTM_WriteLine(handle, "Net Profit             : " + __TRGSTM_Money(net_profit));
@@ -792,10 +2335,14 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "Expectancy / Trade     : " + __TRGSTM_Money(expectancy_money) + " | " + DoubleToString(expectancy_r, 2) + "R");
    __TRGSTM_WriteLine(handle, "Average Win            : " + __TRGSTM_Money(avg_win_money) + " | " + DoubleToString(avg_win_r, 2) + "R");
    __TRGSTM_WriteLine(handle, "Average Loss           : " + __TRGSTM_Money(avg_loss_money) + " | -" + DoubleToString(avg_loss_r, 2) + "R");
-   __TRGSTM_WriteLine(handle, "Best Trade             : " + (best_trade_index >= 0 ? (__TRGSTM_Money(best_trade_money) + " | " + DoubleToString(best_trade_r, 2) + "R") : "n/a"));
-   __TRGSTM_WriteLine(handle, "Worst Trade            : " + (worst_trade_index >= 0 ? (__TRGSTM_Money(worst_trade_money) + " | " + DoubleToString(worst_trade_r, 2) + "R") : "n/a"));
+   __TRGSTM_WriteLine(handle, "Best Trade             : " + best_trade_text);
+   __TRGSTM_WriteLine(handle, "Worst Trade            : " + worst_trade_text);
    __TRGSTM_WriteLine(handle, "Max Win Streak         : " + IntegerToString(max_win_streak));
    __TRGSTM_WriteLine(handle, "Max Loss Streak        : " + IntegerToString(max_loss_streak));
+   __TRGSTM_WriteLine(handle, "4L Lock Threshold      : " + IntegerToString(TRGSTMT_LOCK_AFTER_LOSSES));
+   __TRGSTM_WriteLine(handle, "Lockout Activations    : " + IntegerToString(lockout_activations));
+   __TRGSTM_WriteLine(handle, "Lockout Releases       : " + IntegerToString(lockout_releases));
+   __TRGSTM_WriteLine(handle, "Lockout Active At End  : " + (lockout_active_at_end ? "YES" : "NO"));
    __TRGSTM_WriteLine(handle, "Max Drawdown           : " + __TRGSTM_Money(max_drawdown_money) + " | " + __TRGSTM_Pct(max_drawdown_pct));
    __TRGSTM_WriteLine(handle, "Balance (Closed)       : " + __TRGSTM_Money(equity));
    __TRGSTM_WriteLine(handle, "Open Floating P/L      : " + __TRGSTM_Money(total_open_float_money) + " | " + DoubleToString(total_open_float_r, 2) + "R");
@@ -806,52 +2353,84 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "Target Model           : 3R fixed from TriggerSLTP.mqh");
    __TRGSTM_WriteLine(handle, "");
 
-   __TRGSTM_WriteLine(handle, "TRADE LIST");
+   __TRGSTM_WriteLine(handle, "EXECUTED TRADE LIST");
    __TRGSTM_WriteLine(handle, "------------------------------------------------------------");
 
-   if(filtered_count <= 0)
+   if(executed_trades <= 0)
    {
-      __TRGSTM_WriteLine(handle, "No valid TriggerSLTP trades were found inside the selected scan window.");
+      __TRGSTM_WriteLine(handle, "No executable trades were taken under the single-trade, 4-loss-lock, and M15 trend-alignment rules.");
    }
    else
    {
-      for(int i = 0; i < filtered_count; ++i)
+      for(int i = 0; i < raw_valid_triggers; ++i)
       {
-         TriggerStatementTrade stmt_trade = trades[i];
-         string serial_tag = (stmt_trade.rec.dir == DIR_UP ? "U" : "D") + IntegerToString(stmt_trade.rec.serial);
-         string result_tag = __TRGSTM_StatusName(stmt_trade.result_status);
-         string r_tag = "0.00R";
-         string money_tag = __TRGSTM_Money(0.0);
+         if(!trades[i].taken)
+            continue;
 
-         if(stmt_trade.result_status == TRGSTMT_RESULT_OPEN)
-         {
-            r_tag = DoubleToString(stmt_trade.floating_r, 2) + "R";
-            money_tag = __TRGSTM_Money(stmt_trade.floating_money);
-         }
-         else
-         {
-            r_tag = DoubleToString(stmt_trade.result_r, 2) + "R";
-            money_tag = __TRGSTM_Money(stmt_trade.pnl_money);
-         }
+         string serial_tag = (trades[i].rec.dir == DIR_UP ? "U" : "D") + IntegerToString(trades[i].rec.serial);
+         string result_tag = __TRGSTM_StatusName(trades[i].result_status);
+         string r_tag      = DoubleToString(__TRGSTM_EffectiveR(trades[i]), 2) + "R";
+         string money_tag  = __TRGSTM_Money(__TRGSTM_EffectiveMoneyByRisk(trades[i], risk_money));
 
-         string line = "#" + IntegerToString(i + 1)
+         string line = "#" + IntegerToString(trades[i].exec_index)
+                     + " | Raw#=" + IntegerToString(trades[i].raw_index)
                      + " | Serial=" + serial_tag
-                     + " | Dir=" + __TRGSTM_DirName(stmt_trade.rec.dir)
-                     + " | Type=" + IntegerToString(stmt_trade.rec.type_id)
-                     + " | EntryTime=" + __TRGSTM_SafeTime(stmt_trade.rec.hit_time)
-                     + " | Entry=" + DoubleToString(stmt_trade.rec.breakout_level, digits)
-                     + " | SL=" + DoubleToString(stmt_trade.rec.sl_level, digits)
-                     + " | TP=" + DoubleToString(stmt_trade.rec.tp_level, digits)
-                     + " | Risk=" + DoubleToString(stmt_trade.rec.risk_pips, 1) + " pip"
+                     + " | Dir=" + __TRGSTM_DirName(trades[i].rec.dir)
+                     + " | Type=" + IntegerToString(trades[i].rec.type_id)
+                     + " | EntryTime=" + __TRGSTM_SafeTime(trades[i].rec.hit_time)
+                     + " | Entry=" + DoubleToString(trades[i].rec.breakout_level, digits)
+                     + " | SL=" + DoubleToString(trades[i].rec.sl_level, digits)
+                     + " | TP=" + DoubleToString(trades[i].rec.tp_level, digits)
+                     + " | Risk=" + DoubleToString(trades[i].rec.risk_pips, 1) + " pip"
                      + " | Result=" + result_tag
-                     + " | ExitTime=" + __TRGSTM_SafeTime(stmt_trade.exit_time)
-                     + " | Exit/Mark=" + DoubleToString(stmt_trade.exit_price, digits)
+                     + " | ExitTime=" + __TRGSTM_SafeTime(trades[i].exit_time)
+                     + " | Exit/Mark=" + DoubleToString(trades[i].exit_price, digits)
                      + " | R=" + r_tag
                      + " | P/L=" + money_tag
-                     + " | Equity=" + __TRGSTM_Money(stmt_trade.equity_after)
-                     + " | Streak=" + __TRGSTM_StreakText(stmt_trade.streak_after)
-                     + " | BarsHeld=" + IntegerToString(stmt_trade.bars_held)
-                     + " | Note=" + stmt_trade.note;
+                     + " | Equity=" + __TRGSTM_Money(trades[i].equity_after)
+                     + " | Streak=" + __TRGSTM_StreakText(trades[i].streak_after)
+                     + " | BarsHeld=" + IntegerToString(trades[i].bars_held);
+
+         if(trades[i].unlock_on_time > 0)
+            line += " | UnlockOn=" + __TRGSTM_SafeTime(trades[i].unlock_on_time);
+
+         line += " | Note=" + trades[i].note;
+         __TRGSTM_WriteLine(handle, line);
+      }
+   }
+
+   __TRGSTM_WriteLine(handle, "");
+   __TRGSTM_WriteLine(handle, "IGNORED VALID TRIGGERS");
+   __TRGSTM_WriteLine(handle, "------------------------------------------------------------");
+
+   if(ignored_valid_triggers <= 0)
+   {
+      __TRGSTM_WriteLine(handle, "No valid triggers were ignored by the execution model.");
+   }
+   else
+   {
+      for(int i = 0; i < raw_valid_triggers; ++i)
+      {
+         if(trades[i].taken)
+            continue;
+
+         string serial_tag = (trades[i].rec.dir == DIR_UP ? "U" : "D") + IntegerToString(trades[i].rec.serial);
+         string hypo_result = __TRGSTM_StatusName(trades[i].result_status);
+         string hypo_r      = DoubleToString(__TRGSTM_EffectiveR(trades[i]), 2) + "R";
+         string hypo_money  = __TRGSTM_Money(__TRGSTM_EffectiveMoneyByRisk(trades[i], risk_money));
+
+         string line = "Raw#=" + IntegerToString(trades[i].raw_index)
+                     + " | Serial=" + serial_tag
+                     + " | Dir=" + __TRGSTM_DirName(trades[i].rec.dir)
+                     + " | Type=" + IntegerToString(trades[i].rec.type_id)
+                     + " | EntryTime=" + __TRGSTM_SafeTime(trades[i].rec.hit_time)
+                     + " | Entry=" + DoubleToString(trades[i].rec.breakout_level, digits)
+                     + " | SkipReason=" + __TRGSTM_SkipReasonName(trades[i].skip_reason)
+                     + " | WouldHave=" + hypo_result
+                     + " | WouldHaveR=" + hypo_r
+                     + " | WouldHaveP/L=" + hypo_money
+                     + " | Exit/Mark=" + DoubleToString(trades[i].exit_price, digits)
+                     + " | Note=" + trades[i].note;
 
          __TRGSTM_WriteLine(handle, line);
       }
@@ -860,10 +2439,13 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "");
    __TRGSTM_WriteLine(handle, "USAGE NOTES");
    __TRGSTM_WriteLine(handle, "------------------------------------------------------------");
-   __TRGSTM_WriteLine(handle, "1) This statement only includes valid TriggerSLTP trades inside the selected scan window.");
-   __TRGSTM_WriteLine(handle, "2) Risk per trade is fixed on initial capital, not compounded trade-by-trade.");
-   __TRGSTM_WriteLine(handle, "3) Ambiguous same-bar outcomes are counted conservatively as SL to avoid optimistic bias.");
-   __TRGSTM_WriteLine(handle, "4) OPEN trades remain unclosed at scan end and are shown separately with mark-to-market P/L.");
+   __TRGSTM_WriteLine(handle, "1) This statement first collects all valid TriggerSLTP triggers inside the scan window, then applies the execution model.");
+   __TRGSTM_WriteLine(handle, "2) Only one trade can be active at a time; all later valid triggers are ignored until that trade reaches WIN, LOSS, or remains OPEN at scan end.");
+   __TRGSTM_WriteLine(handle, "3) After 4 consecutive executed losses, new entries are blocked until a fresh 4H signal on is received from the H4->worker bridge.");
+   __TRGSTM_WriteLine(handle, "4) A valid trigger is converted to a trade only when its direction matches the active M15 major trend or an active M15 minor trend at trigger time.");
+   __TRGSTM_WriteLine(handle, "5) Skipped valid triggers are listed separately together with their hypothetical outcome so you can inspect missed opportunities.");
+   __TRGSTM_WriteLine(handle, "6) Risk per executed trade is fixed on initial capital, not compounded trade-by-trade.");
+   __TRGSTM_WriteLine(handle, "7) Ambiguous same-bar outcomes are counted conservatively as SL to avoid optimistic bias.");
 
    FileFlush(handle);
    FileClose(handle);
@@ -871,13 +2453,20 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    if(InpDebugPrints)
    {
       Print("[TRG-STATEMENT] Written | path=", g_trgstmt_last_fullpath,
-            " | filtered_records=", filtered_count,
+            " | raw_valid=", raw_valid_triggers,
+            " | executed=", executed_trades,
+            " | ignored=", ignored_valid_triggers,
+            " | trend_skips=", skipped_trend_filter,
+            " | major_windows=", major_window_count,
+            " | minor_windows=", minor_window_count,
             " | closed=", closed_trades,
             " | open=", open_trades,
-            " | net=", __TRGSTM_Money(net_profit));
+            " | net=", __TRGSTM_Money(net_profit),
+            " | lockouts=", lockout_activations);
    }
 
    return true;
 }
+
 
 #endif // WAVEBOT_TRIGGER_STATEMENT_MQH
