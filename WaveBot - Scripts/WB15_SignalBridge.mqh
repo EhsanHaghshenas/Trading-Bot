@@ -456,19 +456,27 @@ inline void WB15_PublishStartHWX(const string sym,
                                  const datetime h4_open_time,
                                  const double level)
 {
+   const int ns = __WB15_NS_FromMarkers();
+   if(ns != WB15_NS_NONE)
+      TriggerM15SignalGate_RecordExact(sym, WB15_KIND_START_HWX, ns, dir, h4_open_time);
+
    datetime te = 0;
    if(!__WB15_FindFirstHWXIntrabarTime(sym, dir, h4_open_time, level, te))
       te = __WB15_StableM15IntrabarTime(h4_open_time);
 
    if(te <= 0) return;
 
-   WB15_MasterPushEvent(sym, WB15_KIND_START_HWX, __WB15_NS_FromMarkers(), dir, te);
+   WB15_MasterPushEvent(sym, WB15_KIND_START_HWX, ns, dir, te);
 }
 
 // Legacy fallback overload (kept for compatibility)
 inline void WB15_PublishStartHWX(const string sym, const Direction dir, const datetime t)
 {
-   WB15_MasterPushEvent(sym, WB15_KIND_START_HWX, __WB15_NS_FromMarkers(), dir, t);
+   const int ns = __WB15_NS_FromMarkers();
+   if(ns != WB15_NS_NONE)
+      TriggerM15SignalGate_RecordExact(sym, WB15_KIND_START_HWX, ns, dir, t);
+
+   WB15_MasterPushEvent(sym, WB15_KIND_START_HWX, ns, dir, t);
 }
 
 // START (EXACT FORMATION MOMENT): HWBB
@@ -478,22 +486,30 @@ inline void WB15_PublishStartHWBB(const string sym,
                                   const double start_level,
                                   const datetime seed_h4_open_time)
 {
+   const int ns = __WB15_NS_FromMarkers();
+   if(ns != WB15_NS_NONE)
+      TriggerM15SignalGate_RecordExact(sym, WB15_KIND_START_HWBB, ns, dir, h4_open_time);
+
    datetime te = 0;
    if(!__WB15_FindFirstHWBBIntrabarTime(sym, dir, h4_open_time, start_level, seed_h4_open_time, te))
       te = __WB15_StableM15IntrabarTime(h4_open_time);
 
    if(te <= 0) return;
 
-   WB15_MasterPushEvent(sym, WB15_KIND_START_HWBB, __WB15_NS_FromMarkers(), dir, te);
+   WB15_MasterPushEvent(sym, WB15_KIND_START_HWBB, ns, dir, te);
 }
 
 // Legacy fallback overload (kept for compatibility)
 inline void WB15_PublishStartHWBB(const string sym, const Direction dir, const datetime t)
 {
+   const int ns = __WB15_NS_FromMarkers();
+   if(ns != WB15_NS_NONE)
+      TriggerM15SignalGate_RecordClose(sym, WB15_KIND_START_HWBB, ns, dir, t);
+
    const datetime te = __WB15_CloseBasedEventTimeOrZero(t);
    if(te <= 0) return;
 
-   WB15_MasterPushEvent(sym, WB15_KIND_START_HWBB, __WB15_NS_FromMarkers(), dir, te);
+   WB15_MasterPushEvent(sym, WB15_KIND_START_HWBB, ns, dir, te);
 }
 
 // START (ON H4 CLOSE): FSMS
@@ -503,6 +519,8 @@ inline void WB15_PublishStartFSMS_MAJONLY(const string sym, const Direction dir,
 {
    const int ns = __WB15_NS_FromMarkers();
    if(ns == WB15_NS_NONE) return;
+
+   TriggerM15SignalGate_RecordClose(sym, WB15_KIND_START_FSMS, ns, dir, t);
 
    const datetime te = __WB15_CloseBasedEventTimeOrZero(t);
    if(te <= 0) return;
@@ -517,33 +535,47 @@ inline void WB15_PublishStartGooz(const string sym,
                                   const double price_a,
                                   const double price_b)
 {
+   const int ns = __WB15_NS_FromMarkers();
+   if(ns != WB15_NS_NONE)
+      TriggerM15SignalGate_RecordExact(sym, WB15_KIND_START_GOOZBAGHALI, ns, dir, h4_open_time);
+
    datetime te = 0;
    if(!__WB15_FindFirstRangeTouchIntrabarTime(sym, h4_open_time, price_a, price_b, te))
       te = __WB15_StableM15IntrabarTime(h4_open_time);
 
    if(te <= 0) return;
 
-   WB15_MasterPushEvent(sym, WB15_KIND_START_GOOZBAGHALI, __WB15_NS_FromMarkers(), dir, te);
+   WB15_MasterPushEvent(sym, WB15_KIND_START_GOOZBAGHALI, ns, dir, te);
 }
 
 // Legacy fallback overload (kept for compatibility)
 inline void WB15_PublishStartGooz(const string sym, const Direction dir, const datetime t)
 {
-   WB15_MasterPushEvent(sym, WB15_KIND_START_GOOZBAGHALI, __WB15_NS_FromMarkers(), dir, t);
+   const int ns = __WB15_NS_FromMarkers();
+   if(ns != WB15_NS_NONE)
+      TriggerM15SignalGate_RecordExact(sym, WB15_KIND_START_GOOZBAGHALI, ns, dir, t);
+
+   WB15_MasterPushEvent(sym, WB15_KIND_START_GOOZBAGHALI, ns, dir, t);
 }
 
 // STOP (ON CLOSE): MTC must wait for H4 close
 inline void WB15_PublishStopMTC(const string sym, const Direction dir, const datetime t)
 {
+   const int ns = __WB15_NS_FromMarkers();
+   if(ns != WB15_NS_NONE)
+      TriggerM15SignalGate_RecordClose(sym, WB15_KIND_STOP_MTC, ns, dir, t);
+
    const datetime te = __WB15_CloseBasedEventTimeOrZero(t);
    if(te <= 0) return;
 
-   WB15_MasterPushEvent(sym, WB15_KIND_STOP_MTC, __WB15_NS_FromMarkers(), dir, te);
+   WB15_MasterPushEvent(sym, WB15_KIND_STOP_MTC, ns, dir, te);
 }
 
 // STOP (ON CLOSE, MAJ-only): MinorStarter must wait for H4 close
 inline void WB15_PublishStopMinorStarter(const string sym, const Direction dir, const datetime t)
 {
+   TriggerM15SignalGate_RecordClose(sym, WB15_KIND_STOP_MINORSTARTER, WB15_NS_MAJ, dir, t);
+
    const datetime te = __WB15_CloseBasedEventTimeOrZero(t);
    if(te <= 0) return;
 
@@ -555,6 +587,8 @@ inline void WB15_PublishStopMinorOffZone_MAJONLY(const string sym, const Directi
 {
    // Stop trigger: MAJ MinorOff breaks C1-W2 Minorzone boundary (used to stop MIN-start M15 sessions)
    if(Markers_GetNamespace() != "MAJ") return;
+
+   TriggerM15SignalGate_RecordClose(sym, WB15_KIND_STOP_MINOROFF_ZONE, WB15_NS_MAJ, dir, t);
 
    const datetime te = __WB15_CloseBasedEventTimeOrZero(t);
    if(te <= 0) return;
