@@ -20,7 +20,7 @@ input Direction         InpDirection           = DIR_DOWN;
 input bool              InpMostRecentOnly      = false;
 input bool              InpUseMonthsAgo        = false;
 input int               InpMonthsAgo           = 40;
-input datetime          InpScanFromDate        = D'2025.04.00 00:00';
+input datetime          InpScanFromDate        = D'2022.06.00 00:00';
 
 // --- ???? ????????? ????? ????? (???? ?????) ---
 input bool              InpRequireCloseBreakAboveW2H1 = true;
@@ -30,6 +30,12 @@ input bool              InpEnableHunterMarkers = true;
 
 input bool InpRunShadowBreakerOnce = false;  // ??? true ????? ?????? SB_RunOneShot ???? ??????
 
+// ===== Trigger statement (text report) =====
+input bool              InpEnableTriggerStatement          = true;
+input double            InpTriggerStatementInitialCapital  = 10000.0;
+input double            InpTriggerStatementRiskPercent     = 1.0;
+input string            InpTriggerStatementFileTag         = "WaveBot_TriggerStatement";
+
 // ===== Includes (??? ?? Inputs) =====
 #include <WaveBot/Utils.mqh>
 #include <WaveBot/Data.mqh>
@@ -37,6 +43,7 @@ input bool InpRunShadowBreakerOnce = false;  // ??? true ????? ?????? SB_RunOneS
 // NEW: Simple H4->M15 bridge (signals + candle counting)
 #include <WaveBot/WB15_SignalBridge.mqh>
 #include <WaveBot/Trigger.mqh>
+#include <WaveBot/TriggerStatement.mqh>
 #include <WaveBot/Wave2.mqh>
 #include <WaveBot/Wave3.mqh>
 #include <WaveBot/Wave2_Down.mqh>
@@ -54,6 +61,11 @@ bool g_once=false;
 
 // --- Unique scan namespace for all markers in a single run ---
 int g_scan_id = 0;
+
+// --- Trigger statement scan window snapshot ---
+datetime g_stmt_scan_start = 0;
+datetime g_stmt_scan_stop  = 0;
+bool     g_stmt_window_set = false;
 
 // --- NEW: Auto Master/Slave role based on chart timeframe (H4=Master, M15=Slave) ---
 enum WBRole { WBROLE_STANDALONE=0, WBROLE_MASTER_H4=1, WBROLE_SLAVE_M15=2 };
@@ -73,6 +85,8 @@ inline ENUM_TIMEFRAMES __WB_EffectiveTF()
    if(g_role == WBROLE_SLAVE_M15) return PERIOD_M15;
    return InpTF; // legacy standalone mode
 }
+
+void ResolveWindow(datetime &start, datetime &stop);
 
 inline void __WB_ApplyHiddenVisualPolicies()
 {
@@ -104,6 +118,49 @@ inline void __WB_DeleteAllM15NumberingObjects()
       if(kill)
          ObjectDelete(0, on);
    }
+}
+
+inline bool __WB_ShouldHandleTriggerStatement()
+{
+   if(!InpEnableTriggerStatement)
+      return false;
+
+   return ((ENUM_TIMEFRAMES)Period() == PERIOD_M15);
+}
+
+inline void __WB_RememberTriggerStatementWindow(const datetime start,
+                                                const datetime stop)
+{
+   g_stmt_scan_start = start;
+   g_stmt_scan_stop  = stop;
+   g_stmt_window_set = true;
+}
+
+inline void __WB_WriteTriggerStatementReport()
+{
+   if(!__WB_ShouldHandleTriggerStatement())
+      return;
+
+   datetime stmt_start = 0;
+   datetime stmt_stop  = 0;
+
+   if(g_stmt_window_set)
+   {
+      stmt_start = g_stmt_scan_start;
+      stmt_stop  = g_stmt_scan_stop;
+   }
+   else
+   {
+      ResolveWindow(stmt_start, stmt_stop);
+   }
+
+   TriggerStatement_WriteTextReport(InpSymbol,
+                                    (ENUM_TIMEFRAMES)Period(),
+                                    stmt_start,
+                                    stmt_stop,
+                                    InpTriggerStatementInitialCapital,
+                                    InpTriggerStatementRiskPercent,
+                                    InpTriggerStatementFileTag);
 }
 // ============================================================================
 // Minor session runner (Phase-1: Minor inside Major)
@@ -253,6 +310,10 @@ int OnInit()
    Markers_SetNamespace("MAJ");
    WBWM_Init();
    Trigger_ResetGlobals();
+   TriggerStatement_ResetGlobals();
+   g_stmt_scan_start = 0;
+   g_stmt_scan_stop  = 0;
+   g_stmt_window_set = false;
    __WB_ApplyHiddenVisualPolicies();
    __WB_DeleteAllM15NumberingObjects();
 
@@ -263,7 +324,17 @@ int OnInit()
    EventSetTimer(g_role == WBROLE_SLAVE_M15 ? 1 : 2);
    return(INIT_SUCCEEDED);
 }
-void OnDeinit(const int reason){ __WB_ApplyHiddenVisualPolicies(); __WB_DeleteAllM15NumberingObjects(); Trigger_ResetGlobals(); EventKillTimer(); }
+
+void OnDeinit(const int reason)
+{
+   __WB_ApplyHiddenVisualPolicies();
+   __WB_DeleteAllM15NumberingObjects();
+   __WB_WriteTriggerStatementReport();
+   Trigger_ResetGlobals();
+   TriggerStatement_ResetGlobals();
+   EventKillTimer();
+}
+
 void OnTick(){}
 
 // --- One-shot ShadowBreaker scan (migrated from old OnStart) ---
@@ -297,6 +368,7 @@ void OnTimer()
    // Major namespace (default world)
    Markers_SetNamespace("MAJ");
    __WB_ApplyHiddenVisualPolicies();
+   Trigger_OnTimer(InpSymbol);
 
    // --- optional one-shot ShadowBreaker run (replacement for old OnStart)
    if(InpRunShadowBreakerOnce && !g_sb_ran)
@@ -313,6 +385,7 @@ void OnTimer()
 
    datetime start=0, stop=0;
    ResolveWindow(start, stop);
+   __WB_RememberTriggerStatementWindow(start, stop);
 
    ENUM_TIMEFRAMES tf = __WB_EffectiveTF();
 
@@ -345,6 +418,8 @@ void OnTimer()
       API_RunScanSequential_W2W3_Hunter(InpSymbol, tf, resume_from, stop);
    else
       API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, tf, resume_from, stop);
+
+   __WB_WriteTriggerStatementReport();
 
    g_once=true;  // ?????? ???? ???? ??? ?? ??? ???? ????? (??? ???? ????? ???? ???)
 }

@@ -4,7 +4,7 @@
 #include <WaveBot/Types.mqh>
 #include <WaveBot/Markers.mqh>
 
-#define TRGSL_MAX_RISK_PIPS 20.0
+#define TRGSL_MAX_RISK_PIPS 25.0
 #define TRGSL_R_MULTIPLE    3.0
 #define TRGSL_FORWARD_BARS  4
 
@@ -307,7 +307,7 @@ inline void TriggerSLTP_OnTriggerFired(const string    sym,
                " trigger | breakout=", DoubleToString(level, __TRGSL_DigitsOf(use_sym)),
                " | src_idx=", src_idx,
                " | hit_idx=", hit_idx,
-               " | reason=risk>20pip_or_bad_range");
+               " | reason=risk>25pip_or_bad_range");
       }
       return;
    }
