@@ -1454,6 +1454,101 @@ inline int __TRGSTM_BuildMinorTrendWindows(const datetime                  scan_
    return ArraySize(out);
 }
 
+inline int __TRGSTM_BuildEligibleTrendEpochs(const TriggerStatementTrendWindow &major_windows[],
+                                             const TriggerStatementTrendWindow &minor_windows[],
+                                             TriggerStatementTrendWindow       &out[])
+{
+   ArrayResize(out, 0);
+
+   TriggerStatementTrendWindow combined[];
+   ArrayResize(combined, 0);
+
+   int major_total = ArraySize(major_windows);
+   for(int i = 0; i < major_total; ++i)
+   {
+      __TRGSTM_AppendTrendWindow(combined,
+                                 major_windows[i].start_time,
+                                 major_windows[i].end_time,
+                                 major_windows[i].dir,
+                                 major_windows[i].tag);
+   }
+
+   int minor_total = ArraySize(minor_windows);
+   for(int i = 0; i < minor_total; ++i)
+   {
+      __TRGSTM_AppendTrendWindow(combined,
+                                 minor_windows[i].start_time,
+                                 minor_windows[i].end_time,
+                                 minor_windows[i].dir,
+                                 minor_windows[i].tag);
+   }
+
+   __TRGSTM_SortTrendWindows(combined);
+
+   for(int d = 0; d < 2; ++d)
+   {
+      Direction epoch_dir = (d == 0 ? DIR_UP : DIR_DOWN);
+      bool     have_epoch = false;
+      datetime epoch_start = 0;
+      datetime epoch_end   = 0;
+
+      int total = ArraySize(combined);
+      for(int i = 0; i < total; ++i)
+      {
+         TriggerStatementTrendWindow w = combined[i];
+         if(w.dir != epoch_dir)
+            continue;
+         if(w.end_time > 0 && w.end_time < w.start_time)
+            continue;
+
+         if(!have_epoch)
+         {
+            have_epoch = true;
+            epoch_start = w.start_time;
+            epoch_end   = w.end_time;
+            continue;
+         }
+
+         bool merge = false;
+         if(epoch_end <= 0)
+            merge = true;
+         else if(w.start_time <= (epoch_end + 1))
+            merge = true;
+
+         if(merge)
+         {
+            if(epoch_end <= 0 || w.end_time <= 0)
+               epoch_end = 0;
+            else if(w.end_time > epoch_end)
+               epoch_end = w.end_time;
+         }
+         else
+         {
+            __TRGSTM_AppendTrendWindow(out,
+                                       epoch_start,
+                                       epoch_end,
+                                       epoch_dir,
+                                       "ELIG");
+
+            epoch_start = w.start_time;
+            epoch_end   = w.end_time;
+         }
+      }
+
+      if(have_epoch)
+      {
+         __TRGSTM_AppendTrendWindow(out,
+                                    epoch_start,
+                                    epoch_end,
+                                    epoch_dir,
+                                    "ELIG");
+      }
+   }
+
+   __TRGSTM_SortTrendWindows(out);
+   return ArraySize(out);
+}
+
 inline bool __TRGSTM_TimeInsideTrendWindow(const TriggerStatementTrendWindow &w,
                                            const datetime                    t)
 {
@@ -1548,6 +1643,60 @@ inline string __TRGSTM_BuildTrendMatchNote(const Direction trg_dir,
       note = __TRGSTM_AppendNote(note, __TRGSTM_BuildTrendSlotText(true, minor_dir, minor_tag, "MIN"));
 
    return note;
+}
+
+inline bool __TRGSTM_FindEligibleTrendEpochStart(const TriggerStatementTrendWindow &epochs[],
+                                                 const Direction                   dir,
+                                                 const datetime                    t,
+                                                 datetime                         &epoch_start)
+{
+   epoch_start = 0;
+
+   bool found = false;
+   datetime best_start = 0;
+
+   int total = ArraySize(epochs);
+   for(int i = 0; i < total; ++i)
+   {
+      if(epochs[i].dir != dir)
+         continue;
+      if(!__TRGSTM_TimeInsideTrendWindow(epochs[i], t))
+         continue;
+
+      if(!found || epochs[i].start_time >= best_start)
+      {
+         found       = true;
+         best_start  = epochs[i].start_time;
+         epoch_start = epochs[i].start_time;
+      }
+   }
+
+   return found;
+}
+
+inline bool __TRGSTM_ResetGateIfNewTrendCycle(const TriggerStatementTrendWindow &eligible_epochs[],
+                                              const Direction                   dir,
+                                              const datetime                    t,
+                                              bool                             &gate_cycle_set,
+                                              Direction                        &gate_cycle_dir,
+                                              datetime                         &gate_cycle_start,
+                                              int                              &gate_loss_streak)
+{
+   datetime epoch_start = 0;
+   if(!__TRGSTM_FindEligibleTrendEpochStart(eligible_epochs, dir, t, epoch_start))
+      return false;
+
+   bool had_cycle = gate_cycle_set;
+   bool new_cycle = (!gate_cycle_set || gate_cycle_dir != dir || gate_cycle_start != epoch_start);
+   if(!new_cycle)
+      return false;
+
+   gate_cycle_set   = true;
+   gate_cycle_dir   = dir;
+   gate_cycle_start = epoch_start;
+   gate_loss_streak = 0;
+
+   return had_cycle;
 }
 
 inline bool __TRGSTM_LoadRates(const string          sym,
@@ -1828,6 +1977,7 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
 
    TriggerStatementTrendWindow major_windows[];
    TriggerStatementTrendWindow minor_windows[];
+   TriggerStatementTrendWindow eligible_epochs[];
 
    int major_window_count = __TRGSTM_BuildMajorTrendWindows(scan_from,
                                                             use_scan_to,
@@ -1839,6 +1989,10 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    int minor_window_count = __TRGSTM_BuildMinorTrendWindows(use_scan_to,
                                                             mtc_events,
                                                             minor_windows);
+
+   int eligible_epoch_count = __TRGSTM_BuildEligibleTrendEpochs(major_windows,
+                                                                minor_windows,
+                                                                eligible_epochs);
 
    int minor_session_count = FSMS_SW_Session_Count();
 
@@ -1933,6 +2087,10 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    datetime lockout_ref_time = 0;
    int      next_start_index = 0;
 
+   bool      gate_cycle_set   = false;
+   Direction gate_cycle_dir   = DIR_UP;
+   datetime  gate_cycle_start = 0;
+
    for(int i = 0; i < raw_valid_triggers; ++i)
    {
       datetime unlock_on_time = __TRGSTM_AdvanceStartEvents(start_events,
@@ -1945,6 +2103,12 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
                                                             lockout_releases);
 
       trades[i].unlock_on_time = unlock_on_time;
+      if(unlock_on_time > 0)
+      {
+         gate_cycle_set   = false;
+         gate_cycle_dir   = DIR_UP;
+         gate_cycle_start = 0;
+      }
 
       if(active_trade_open)
       {
@@ -2031,6 +2195,19 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
          exec_trend_major_only++;
       else
          exec_trend_minor_only++;
+
+      bool gate_cycle_reset = __TRGSTM_ResetGateIfNewTrendCycle(eligible_epochs,
+                                                                trades[i].rec.dir,
+                                                                trades[i].rec.hit_time,
+                                                                gate_cycle_set,
+                                                                gate_cycle_dir,
+                                                                gate_cycle_start,
+                                                                gate_loss_streak);
+      if(gate_cycle_reset)
+      {
+         trades[i].note = __TRGSTM_AppendNote(trades[i].note,
+                                              "4L_COUNTER_RESET_NEW_M15_TREND_CYCLE");
+      }
 
       trades[i].taken       = true;
       trades[i].exec_index  = (executed_trades + 1);
@@ -2298,10 +2475,11 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "Fixed Risk Per Trade   : " + __TRGSTM_Pct(risk_percent) + " = " + __TRGSTM_Money(risk_money));
    __TRGSTM_WriteLine(handle, "SL/TP Source           : TriggerSLTP.mqh valid triggers only");
    __TRGSTM_WriteLine(handle, "Execution Model        : Single active trade only | entry at breakout level | touch-based TP/SL | conservative same-bar ambiguity = SL | M15 trend alignment required");
-   __TRGSTM_WriteLine(handle, "Protection Rule        : After 4 consecutive executed losses, trading is locked until a new 4H signal on arrives");
+   __TRGSTM_WriteLine(handle, "Protection Rule        : After 4 consecutive executed losses inside the same active M15-aligned trend cycle, trading is locked until a new 4H signal on arrives");
    __TRGSTM_WriteLine(handle, "Trend Filter           : Trigger direction must align with active M15 major trend or active M15 minor trend");
    __TRGSTM_WriteLine(handle, "Trend Seed (Major)     : " + major_seed_text);
    __TRGSTM_WriteLine(handle, "Trend Windows MAJ/MIN  : " + IntegerToString(major_window_count) + " / " + IntegerToString(minor_window_count));
+   __TRGSTM_WriteLine(handle, "Aligned Trend Cycles   : " + IntegerToString(eligible_epoch_count));
    __TRGSTM_WriteLine(handle, "Minor Sessions Seen    : " + IntegerToString(minor_session_count));
    __TRGSTM_WriteLine(handle, "MTC Marker Events      : " + IntegerToString(mtc_count));
    __TRGSTM_WriteLine(handle, "Bridge Source          : Trigger.mqh / WB15 bridge start events");
@@ -2441,11 +2619,12 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "------------------------------------------------------------");
    __TRGSTM_WriteLine(handle, "1) This statement first collects all valid TriggerSLTP triggers inside the scan window, then applies the execution model.");
    __TRGSTM_WriteLine(handle, "2) Only one trade can be active at a time; all later valid triggers are ignored until that trade reaches WIN, LOSS, or remains OPEN at scan end.");
-   __TRGSTM_WriteLine(handle, "3) After 4 consecutive executed losses, new entries are blocked until a fresh 4H signal on is received from the H4->worker bridge.");
-   __TRGSTM_WriteLine(handle, "4) A valid trigger is converted to a trade only when its direction matches the active M15 major trend or an active M15 minor trend at trigger time.");
-   __TRGSTM_WriteLine(handle, "5) Skipped valid triggers are listed separately together with their hypothetical outcome so you can inspect missed opportunities.");
-   __TRGSTM_WriteLine(handle, "6) Risk per executed trade is fixed on initial capital, not compounded trade-by-trade.");
-   __TRGSTM_WriteLine(handle, "7) Ambiguous same-bar outcomes are counted conservatively as SL to avoid optimistic bias.");
+   __TRGSTM_WriteLine(handle, "3) The 4-loss protection counter belongs to the current aligned M15 trend cycle; if that cycle ends and a fresh same-direction cycle appears later, the counter restarts from zero.");
+   __TRGSTM_WriteLine(handle, "4) After 4 consecutive executed losses inside the same aligned cycle, new entries are blocked until a fresh 4H signal on is received from the H4->worker bridge.");
+   __TRGSTM_WriteLine(handle, "5) A valid trigger is converted to a trade only when its direction matches the active M15 major trend or an active M15 minor trend at trigger time.");
+   __TRGSTM_WriteLine(handle, "6) Skipped valid triggers are listed separately together with their hypothetical outcome so you can inspect missed opportunities.");
+   __TRGSTM_WriteLine(handle, "7) Risk per executed trade is fixed on initial capital, not compounded trade-by-trade.");
+   __TRGSTM_WriteLine(handle, "8) Ambiguous same-bar outcomes are counted conservatively as SL to avoid optimistic bias.");
 
    FileFlush(handle);
    FileClose(handle);
