@@ -20,7 +20,7 @@ input Direction         InpDirection           = DIR_DOWN;
 input bool              InpMostRecentOnly      = false;
 input bool              InpUseMonthsAgo        = false;
 input int               InpMonthsAgo           = 40;
-input datetime          InpScanFromDate        = D'2022.06.00 00:00';
+input datetime          InpScanFromDate        = D'2025.04.00 00:00';
 
 // --- ???? ????????? ????? ????? (???? ?????) ---
 input bool              InpRequireCloseBreakAboveW2H1 = true;
@@ -113,6 +113,42 @@ inline void __WB_DeleteAllM15NumberingObjects()
          kill = true;
 
       if(!kill && StringFind(on, "MinorSeq_D_") >= 0)
+         kill = true;
+
+      if(!kill && StringFind(on, "w2_minor_") >= 0)
+         kill = true;
+
+      if(!kill && StringFind(on, "w3_minor_") >= 0)
+         kill = true;
+
+      if(!kill && StringFind(on, "FSMS_Minor_U_") >= 0)
+         kill = true;
+
+      if(!kill && StringFind(on, "FSMS_Minor_D_") >= 0)
+         kill = true;
+
+      if(!kill && StringFind(on, "MinorStarter_U_") >= 0)
+         kill = true;
+
+      if(!kill && StringFind(on, "MinorStarter_D_") >= 0)
+         kill = true;
+
+      if(!kill && StringFind(on, "MinorOff_U_") >= 0)
+         kill = true;
+
+      if(!kill && StringFind(on, "MinorOff_D_") >= 0)
+         kill = true;
+
+      if(!kill && StringFind(on, "C1_W2_MinorZone_U_") >= 0)
+         kill = true;
+
+      if(!kill && StringFind(on, "C1_W2_MinorZone_D_") >= 0)
+         kill = true;
+
+      if(!kill && StringFind(on, "C1_W3_MinorZone_U_") >= 0)
+         kill = true;
+
+      if(!kill && StringFind(on, "C1_W3_MinorZone_D_") >= 0)
          kill = true;
 
       if(kill)
@@ -360,10 +396,14 @@ void SB_RunOneShot()
 // --- OnTimer: ??????? ????? + ????? ??? ?? Mode ????? + ????? Minor sessions ---
 void OnTimer()
 {
-   // M15 keeps listening to the H4 bridge on every timer tick,
-   // but it also runs its own independent engine once on the M15 world.
+   // M15 keeps listening to the H4 bridge on every timer tick.
+   // Local MIN-world execution on the slave is disabled and any old
+   // local-minor artifacts are purged from the chart.
    if(g_role == WBROLE_SLAVE_M15)
+   {
       WB15_Slave_OnTimer(InpSymbol);
+      __WB_DeleteAllM15NumberingObjects();
+   }
 
    // Major namespace (default world)
    Markers_SetNamespace("MAJ");
@@ -389,17 +429,17 @@ void OnTimer()
 
    ENUM_TIMEFRAMES tf = __WB_EffectiveTF();
 
-   // 1) ?????????: ??????? ?????? ??? UP/DOWN ???? ??? ????? ??? ????????
+   // 1) بوت‌استرپ: تعیین جهت اولیه با اولین جفت کامل‌شده
    BootOutcome boot = Bootstrap_RaceDetect(InpSymbol, tf, start, stop);
 
    Direction mode_for_run = InpDirection;   // fallback
-   datetime  resume_from  = start;          // ??? ??? ???? ????? ?? ?????? ????
+   datetime  resume_from  = start;          // شروع اسکن اصلی در صورت نبود بوت‌استرپ
 
    if(boot.ok)
    {
       mode_for_run = boot.mode;
 
-      // ?? «???? ????? body-break» ????? ??? ?? ??????????? ??????? ?????? ?????
+      // از بعدِ کندل body-break اسکن اصلی ادامه پیدا می‌کند
       resume_from = boot.complete_time + PeriodSeconds(tf);
 
       if(InpDebugPrints)
@@ -413,7 +453,7 @@ void OnTimer()
          Print("[BOOT] No completed pair found in window. Fallback to input direction.");
    }
 
-   // 2) ????? Major scan ??? ?? Mode ????? (?? Fallback)
+   // 2) اجرای اسکن Major با Mode تعیین‌شده (یا Fallback)
    if(mode_for_run==DIR_UP)
       API_RunScanSequential_W2W3_Hunter(InpSymbol, tf, resume_from, stop);
    else
@@ -421,5 +461,5 @@ void OnTimer()
 
    __WB_WriteTriggerStatementReport();
 
-   g_once=true;  // ?????? ???? ???? ??? ?? ??? ???? ????? (??? ???? ????? ???? ???)
+   g_once=true;  // فقط یک‌بار اسکن کامل در هر اجرای EA
 }

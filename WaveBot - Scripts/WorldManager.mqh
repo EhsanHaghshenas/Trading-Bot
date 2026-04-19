@@ -14,7 +14,6 @@
 #include <WaveBot/SWGate.mqh>
 #include <WaveBot/ShadowBreaker.mqh>
 #include <WaveBot/W3ChainGuard.mqh>
-#include <WaveBot/FSMS_Lifecycle.mqh>
 #include <WaveBot/FSMS.mqh>
 #include <WaveBot/FSMS_SW.mqh>
 #include <WaveBot/StrongRange.mqh>
@@ -54,7 +53,6 @@ struct WBWorldContext
    W3CGContext           w3cg;
 
    FSMSContext           fsms;
-   FSMSLifecycleContext  fsms_lc;
    FSMS_SWContext        fsms_sw;
 
    StrongRangeContext    sr;
@@ -163,7 +161,6 @@ inline void WBWM_ContextInit(WBWorldContext &ctx)
    W3CG_ContextInit(ctx.w3cg);
 
    FSMS_ContextInit(ctx.fsms);
-   FSMSLC_ContextInit(ctx.fsms_lc);
    FSMS_SW_ContextInit(ctx.fsms_sw);
 
    SR_ContextInit(ctx.sr);
@@ -192,7 +189,6 @@ inline void WBWM_ContextExport(WBWorldContext &ctx)
    W3CG_ContextExport(ctx.w3cg);
 
    FSMS_ContextExport(ctx.fsms);
-   FSMSLC_ContextExport(ctx.fsms_lc);
    FSMS_SW_ContextExport(ctx.fsms_sw);
 
    SR_ContextExport(ctx.sr);
@@ -221,7 +217,6 @@ inline void WBWM_ContextImport(const WBWorldContext &ctx)
    W3CG_ContextImport(ctx.w3cg);
 
    FSMS_ContextImport(ctx.fsms);
-   FSMSLC_ContextImport(ctx.fsms_lc);
    FSMS_SW_ContextImport(ctx.fsms_sw);
 
    SR_ContextImport(ctx.sr);
@@ -498,6 +493,11 @@ inline void WBWM_ProcessMinorStarterEvents(const MqlRates &rates[],
    if(!g_wbwm_inited)
       WBWM_Init();
 
+   // روی چارت اسلیو M15 دیگر هیچ اجرای محلیِ MIN مجاز نیست.
+   // فقط مستر H4 می‌تواند دنیای مینور را اجرا و از طریق bridge به M15 سیگنال بدهد.
+   if((ENUM_TIMEFRAMES)Period() == PERIOD_M15)
+      return;
+
    // Only MAJ drives MIN (never run inside MIN)
    if(Markers_GetNamespace() != "MAJ")
       return;
@@ -525,19 +525,15 @@ inline void WBWM_ProcessMinorStarterEvents(const MqlRates &rates[],
       if(!s.used) continue;
       if(s.starter_time <= 0) continue;
 
-      latest_start     = s;
-      have_new_starter = true;
+      latest_start      = s;
+      have_new_starter  = true;
    }
 
-   // If a newer starter arrives while another MIN session is active,
+   // If a new starter arrived while another MIN session was active,
    // finalize/archive the previous MIN session BEFORE switching to the new one.
    if(have_new_starter)
    {
-      bool same_session = false;
-      if(g_wbwm_minor_active)
-         same_session = __WBWM_IsSameMinorSession(g_wbwm_minor_sess, latest_start);
-
-      if(g_wbwm_minor_active && !same_session)
+      if(g_wbwm_minor_active && !__WBWM_IsSameMinorSession(g_wbwm_minor_sess, latest_start))
       {
          FSMS_SW_MinorSession prev_closed = g_wbwm_minor_sess;
          FSMS_SW_MinorSession prev_saved;
@@ -560,43 +556,98 @@ inline void WBWM_ProcessMinorStarterEvents(const MqlRates &rates[],
          WBWM_MinorSession_Deactivate();
       }
 
-      if(!g_wbwm_minor_active || !same_session)
-         WBWM_MinorSession_Activate(latest_start);
+      WBWM_MinorSession_Activate(latest_start);
    }
 
-   // --- 2) If MIN is inactive, nothing else to do on this MAJ candle ---
-   if(!g_wbwm_minor_active)
+   // --- 2) If MIN is active: STOP immediately when MAJ session is closed (MinorOff) ---
+   if(g_wbwm_minor_active)
    {
+      // if the MAJ session is no longer open => finalize archive now and kill MIN logic
+      if(FSMS_SW_Session_FindOpen(g_wbwm_minor_sess.tag, g_wbwm_minor_sess.dir) < 0)
+      {
+         FSMS_SW_MinorSession closed_s = g_wbwm_minor_sess;
+         FSMS_SW_MinorSession saved_s;
+
+         if(FSMS_SW_Session_FindByTagDir(closed_s.tag, closed_s.dir, saved_s))
+            closed_s = saved_s;
+
+         WBWM_FinalizeMinorArchive(closed_s,
+                                   g_wbwm_minor_scan_id,
+                                   g_wbwm_minor_tag_suffix,
+                                   maj_scan_id,
+                                   major_to_time);
+
+         WBWM_ExpireMinorLineageInCurrentWorld(closed_s);
+         WBWM_MinorSession_Deactivate();
+
+         // hard safety: MAJ must remain MAJ
+         Markers_SetNamespace("MAJ");
+         g_scan_id = maj_scan_id;
+         return;
+      }
+
+      // --- 3) Run MIN step only up to THIS MAJ candle time ---
+      datetime step_to_time = maj_t;
+      if(major_to_time > 0 && step_to_time > major_to_time)
+         step_to_time = major_to_time;
+
+      if(step_to_time < g_wbwm_minor_sess.starter_time)
+         return;
+
+      // Export MAJ snapshot (so MAJ continues with no side effects)
+      WBWM_ContextExport(g_wbwm_major);
+
+      // Build a clean MIN world for this candle-step
+      WBWM_ContextInit(g_wbwm_minor);
+      g_wbwm_minor.markers_ns = "MIN";
+      g_wbwm_minor.scan_id    = g_wbwm_minor_scan_id;
+      WBWM_ContextImport(g_wbwm_minor);
+
+      // Clear previous MIN objects of THIS session (to avoid orphan objects during rescan)
+      WBWM_DeleteAllObjects_CurrentScan();
+
+      // Apply initial extLQ anchor for MIN logic (no draw)
+      __WBWM_ApplyMinorInitialExtLQ_NoDraw(g_wbwm_minor_sess);
+      FSMS_SW_RuntimeMinor_Set(g_wbwm_minor_sess);
+      Markers_SetPreviewMode(true);
+
+      // Run MIN scan up to current candle (NO bump scan id)
+      const ENUM_TIMEFRAMES runtime_tf = __WBWM_RuntimeTF();
+
+      if(g_wbwm_minor_sess.dir == DIR_UP)
+      {
+         API_RunScanSequential_W2W3_Hunter(InpSymbol, runtime_tf,
+                                          g_wbwm_minor_sess.starter_time,
+                                          step_to_time,
+                                          true,
+                                          g_wbwm_minor_sess.ext_init_price,
+                                          g_wbwm_minor_sess.ext_init_time,
+                                          g_wbwm_minor_tag_suffix,
+                                          false);
+      }
+      else
+      {
+         API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, runtime_tf,
+                                               g_wbwm_minor_sess.starter_time,
+                                               step_to_time,
+                                               true,
+                                               g_wbwm_minor_sess.ext_init_price,
+                                               g_wbwm_minor_sess.ext_init_time,
+                                               g_wbwm_minor_tag_suffix,
+                                               false);
+      }
+
+      FSMS_SW_RuntimeMinor_Clear();
+      WBWM_DeleteAllObjects_CurrentScan();
+      Markers_SetPreviewMode(false);
+
+      // Restore MAJ snapshot
+      WBWM_ContextImport(g_wbwm_major);
+
+      // HARD safety: force MAJ back (even if something leaked)
       Markers_SetNamespace("MAJ");
       g_scan_id = maj_scan_id;
-      return;
    }
-
-   // --- 3) Event-driven close: archive only when the MAJ session is closed ---
-   if(FSMS_SW_Session_FindOpen(g_wbwm_minor_sess.tag, g_wbwm_minor_sess.dir) >= 0)
-   {
-      Markers_SetNamespace("MAJ");
-      g_scan_id = maj_scan_id;
-      return;
-   }
-
-   FSMS_SW_MinorSession closed_s = g_wbwm_minor_sess;
-   FSMS_SW_MinorSession saved_s;
-
-   if(FSMS_SW_Session_FindByTagDir(closed_s.tag, closed_s.dir, saved_s))
-      closed_s = saved_s;
-
-   WBWM_FinalizeMinorArchive(closed_s,
-                             g_wbwm_minor_scan_id,
-                             g_wbwm_minor_tag_suffix,
-                             maj_scan_id,
-                             major_to_time);
-
-   WBWM_ExpireMinorLineageInCurrentWorld(closed_s);
-   WBWM_MinorSession_Deactivate();
-
-   Markers_SetNamespace("MAJ");
-   g_scan_id = maj_scan_id;
 }
 
 #endif // WAVEBOT_WORLDMANAGER_MQH

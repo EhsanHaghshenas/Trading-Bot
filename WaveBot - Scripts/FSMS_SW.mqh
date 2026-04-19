@@ -42,14 +42,19 @@ static double g_C1_W3_Minor_U_Value = 0.0;   // High C1_W3_Minor_U آخرین ج
 static double g_C1_W2_Minor_D_Value = 0.0;   // Low C1_W2_Minor_D آخرین جفت
 static double g_C1_W3_Minor_D_Value = 0.0;   // Low C1_W3_Minor_D آخرین جفت
 
+inline bool __FSMS_SW_ShouldRunMinorWorldOnThisChart()
+{
+   return ((ENUM_TIMEFRAMES)Period() != PERIOD_M15);
+}
+
 // --- NEW: Getters for FSMS–SW UP ---
-inline bool     FSMS_SW_UP_SeedActive()  { return g_fsms_sw_up_active;    }
+inline bool     FSMS_SW_UP_SeedActive()  { return (__FSMS_SW_ShouldRunMinorWorldOnThisChart() && g_fsms_sw_up_active); }
 inline double   FSMS_SW_UP_Level()       { return g_fsms_sw_up_level;     }
 inline int      FSMS_SW_UP_C1Index()     { return g_fsms_sw_up_c1_idx;    }
 inline datetime FSMS_SW_UP_SeedTime()    { return g_fsms_sw_up_seed_time; }
 
 // --- NEW: Getters for FSMS–SW DOWN ---
-inline bool     FSMS_SW_DN_SeedActive()  { return g_fsms_sw_dn_active;    }
+inline bool     FSMS_SW_DN_SeedActive()  { return (__FSMS_SW_ShouldRunMinorWorldOnThisChart() && g_fsms_sw_dn_active); }
 inline double   FSMS_SW_DN_Level()       { return g_fsms_sw_dn_level;     }
 inline int      FSMS_SW_DN_C1Index()     { return g_fsms_sw_dn_c1_idx;    }
 inline datetime FSMS_SW_DN_SeedTime()    { return g_fsms_sw_dn_seed_time; }
@@ -574,7 +579,9 @@ inline datetime FSMS_SW_MinorLog_TimeAt(const int index)
 // چاپ لیست w2_minor در انتهای اسکن (در API.mqh / API_Down.mqh استفاده می‌شود)
 inline void FSMS_SW_MinorLog_Dump()
 {
+   if(!__FSMS_SW_ShouldRunMinorWorldOnThisChart()) return;
    if(!InpDebugPrints) return;
+
    int cnt = FSMS_SW_MinorLog_Count();
    if(cnt <= 0)
    {
@@ -599,6 +606,9 @@ inline void FSMS_SW_MinorLog_Dump()
 // + رسم کندل "minor starter" (کندل W3 مینور که C1_W2 مینور را با بدنه می‌شکند)
 inline void FSMS_SW_RecordMinorPair_DN(const MqlRates &rates[], const int n, const __SW_OppCtx &S)
 {
+   if(!__FSMS_SW_ShouldRunMinorWorldOnThisChart())
+      return;
+
    if(Markers_GetNamespace() == "MIN")
       return;
 
@@ -709,6 +719,9 @@ inline void FSMS_SW_RecordMinorPair_DN(const MqlRates &rates[], const int n, con
 // + رسم کندل "minor starter" (کندل W3 مینور که C1_W2 مینور را با بدنه می‌شکند)
 inline void FSMS_SW_RecordMinorPair_UP(const MqlRates &rates[], const int n, const __SW_OppCtx &S)
 {
+   if(!__FSMS_SW_ShouldRunMinorWorldOnThisChart())
+      return;
+
    if(Markers_GetNamespace() == "MIN")
       return;
 
@@ -1070,6 +1083,7 @@ inline void FSMS_SW_UP_ActivateSeed(const MqlRates &rates[], const int n,
                                     const int sameDirW3_Index,
                                     const datetime fsms_fire_time)
 {
+   if(!__FSMS_SW_ShouldRunMinorWorldOnThisChart()) return;
    if(sameDirC1_Index < 0 || sameDirC1_Index >= n || fsms_fire_time<=0) return;
 
    g_fsms_sw_up_active    = true;
@@ -1099,6 +1113,7 @@ inline void FSMS_SW_DN_ActivateSeed(const MqlRates &rates[], const int n,
                                     const int sameDirW3_Index,
                                     const datetime fsms_fire_time)
 {
+   if(!__FSMS_SW_ShouldRunMinorWorldOnThisChart()) return;
    if(sameDirC1_Index < 0 || sameDirC1_Index >= n || fsms_fire_time<=0) return;
 
    g_fsms_sw_dn_active    = true;
@@ -1609,6 +1624,12 @@ inline void FSMS_SW_DrawMinorSequenceArchive(const MqlRates &rates[],
 
 inline void FSMS_SW_CheckMinorOff(const MqlRates &rates[], const int n, const int upto_j)
 {
+   if(!__FSMS_SW_ShouldRunMinorWorldOnThisChart())
+   {
+      g_minor_off_last_j = upto_j;
+      return;
+   }
+
    if(!g_minor_starter_u_active && !g_minor_starter_d_active)
    {
       g_minor_off_last_j = upto_j;
@@ -1994,6 +2015,12 @@ inline void FSMS_SW_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
                              const double &bodyLowEff[], const double &bodyHighEff[],
                              const int n, const int upto_j)
 {
+   if(!__FSMS_SW_ShouldRunMinorWorldOnThisChart())
+   {
+      g_minor_off_last_j = upto_j;
+      return;
+   }
+
    // ابطال فوری با HWX یا HWBB پس از FSMS
    if(g_fsms_sw_up_active)
    {
@@ -2015,7 +2042,8 @@ inline void FSMS_SW_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
    // پایش «جفت خلاف‌جهت دوم»
    if(g_fsms_sw_up_active)   __SW_Scan_DN_After_FSMS_U(rates, insideHL, bodyLowEff, bodyHighEff, n, upto_j);
    if(g_fsms_sw_dn_active)   __SW_Scan_UP_After_FSMS_D(rates, insideHL, bodyLowEff, bodyHighEff, n, upto_j);
-      // --- NEW: پایش MinorOff بعد از MinorStarter (مستقل از فعال بودن FSMS–SW)
+
+   // --- NEW: پایش MinorOff بعد از MinorStarter (مستقل از فعال بودن FSMS–SW)
    FSMS_SW_CheckMinorOff(rates, n, upto_j);
 }
 
