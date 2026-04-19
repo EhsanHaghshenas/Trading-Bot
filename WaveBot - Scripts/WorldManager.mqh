@@ -26,8 +26,8 @@ inline ENUM_TIMEFRAMES __WBWM_RuntimeTF()
    ENUM_TIMEFRAMES tf = InpTF;
    ENUM_TIMEFRAMES chart_tf = (ENUM_TIMEFRAMES)Period();
 
-   if(chart_tf == PERIOD_H4)      tf = PERIOD_H4;
-   else if(chart_tf == PERIOD_M15) tf = PERIOD_M15;
+   if(chart_tf == PERIOD_M15)     tf = PERIOD_M15;
+   else if(chart_tf == PERIOD_M1) tf = PERIOD_M1;
 
    return tf;
 }
@@ -493,9 +493,9 @@ inline void WBWM_ProcessMinorStarterEvents(const MqlRates &rates[],
    if(!g_wbwm_inited)
       WBWM_Init();
 
-   // روی چارت اسلیو M15 دیگر هیچ اجرای محلیِ MIN مجاز نیست.
-   // فقط مستر H4 می‌تواند دنیای مینور را اجرا و از طریق bridge به M15 سیگنال بدهد.
-   if((ENUM_TIMEFRAMES)Period() == PERIOD_M15)
+   // روی چارت اسلیو M1 دیگر هیچ اجرای محلیِ MIN مجاز نیست.
+   // فقط مستر M15 می‌تواند دنیای مینور را اجرا و از طریق bridge به M1 سیگنال بدهد.
+   if((ENUM_TIMEFRAMES)Period() == PERIOD_M1)
       return;
 
    // Only MAJ drives MIN (never run inside MIN)

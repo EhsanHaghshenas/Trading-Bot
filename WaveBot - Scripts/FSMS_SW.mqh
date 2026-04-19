@@ -44,7 +44,7 @@ static double g_C1_W3_Minor_D_Value = 0.0;   // Low C1_W3_Minor_D آخرین ج�
 
 inline bool __FSMS_SW_ShouldRunMinorWorldOnThisChart()
 {
-   return ((ENUM_TIMEFRAMES)Period() != PERIOD_M15);
+   return ((ENUM_TIMEFRAMES)Period() != PERIOD_M1);
 }
 
 // --- NEW: Getters for FSMS–SW UP ---
@@ -1594,8 +1594,8 @@ inline void FSMS_SW_DrawMinorSequenceArchive(const MqlRates &rates[],
                                              const int starter_idx,
                                              const int off_idx)
 {
-   // On the M15 chart no candle numbering should be shown anymore.
-   if((ENUM_TIMEFRAMES)Period() == PERIOD_M15) return;
+   // On the M1 chart no candle numbering should be shown anymore.
+   if((ENUM_TIMEFRAMES)Period() == PERIOD_M1) return;
 
    if(!InpDrawMarkers) return;
    if(starter_idx < 0 || starter_idx >= n) return;

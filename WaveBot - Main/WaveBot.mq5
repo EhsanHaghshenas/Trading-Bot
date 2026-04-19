@@ -7,7 +7,7 @@ CTrade trade;
 
 // ===== Inputs =====
 input string            InpSymbol              = "EURUSD";
-input ENUM_TIMEFRAMES   InpTF                  = PERIOD_H4;
+input ENUM_TIMEFRAMES   InpTF                  = PERIOD_M15;
 input int               InpLookbackBars        = 20000;
 input int               InpMaxBarsInWave       = 1000;
 input bool              InpDrawMarkers         = true;
@@ -20,7 +20,7 @@ input Direction         InpDirection           = DIR_DOWN;
 input bool              InpMostRecentOnly      = false;
 input bool              InpUseMonthsAgo        = false;
 input int               InpMonthsAgo           = 40;
-input datetime          InpScanFromDate        = D'2025.04.00 00:00';
+input datetime          InpScanFromDate        = D'2026.01.00 00:00';
 
 // --- ???? ????????? ????? ????? (???? ?????) ---
 input bool              InpRequireCloseBreakAboveW2H1 = true;
@@ -40,7 +40,7 @@ input string            InpTriggerStatementFileTag         = "WaveBot_TriggerSta
 #include <WaveBot/Utils.mqh>
 #include <WaveBot/Data.mqh>
 #include <WaveBot/Markers.mqh>
-// NEW: Simple H4->M15 bridge (signals + candle counting)
+// NEW: Simple M15->M1 bridge (signals + candle counting)
 #include <WaveBot/WB15_SignalBridge.mqh>
 #include <WaveBot/Trigger.mqh>
 #include <WaveBot/TriggerStatement.mqh>
@@ -67,22 +67,22 @@ datetime g_stmt_scan_start = 0;
 datetime g_stmt_scan_stop  = 0;
 bool     g_stmt_window_set = false;
 
-// --- NEW: Auto Master/Slave role based on chart timeframe (H4=Master, M15=Slave) ---
-enum WBRole { WBROLE_STANDALONE=0, WBROLE_MASTER_H4=1, WBROLE_SLAVE_M15=2 };
+// --- NEW: Auto Master/Slave role based on chart timeframe (M15=Master, M1=Slave) ---
+enum WBRole { WBROLE_STANDALONE=0, WBROLE_MASTER_M15=1, WBROLE_SLAVE_M1=2 };
 WBRole g_role = WBROLE_STANDALONE;
 
 inline WBRole __WB_DetectRole()
 {
    ENUM_TIMEFRAMES tf = (ENUM_TIMEFRAMES)Period();
-   if(tf == PERIOD_H4)  return WBROLE_MASTER_H4;
-   if(tf == PERIOD_M15) return WBROLE_SLAVE_M15;
+   if(tf == PERIOD_M15) return WBROLE_MASTER_M15;
+   if(tf == PERIOD_M1)  return WBROLE_SLAVE_M1;
    return WBROLE_STANDALONE;
 }
 
 inline ENUM_TIMEFRAMES __WB_EffectiveTF()
 {
-   if(g_role == WBROLE_MASTER_H4)  return PERIOD_H4;
-   if(g_role == WBROLE_SLAVE_M15) return PERIOD_M15;
+   if(g_role == WBROLE_MASTER_M15) return PERIOD_M15;
+   if(g_role == WBROLE_SLAVE_M1)   return PERIOD_M1;
    return InpTF; // legacy standalone mode
 }
 
@@ -97,7 +97,7 @@ inline void __WB_ApplyHiddenVisualPolicies()
 
 inline void __WB_DeleteAllM15NumberingObjects()
 {
-   if((ENUM_TIMEFRAMES)Period() != PERIOD_M15) return;
+   if((ENUM_TIMEFRAMES)Period() != PERIOD_M1) return;
 
    for(int i = ObjectsTotal(0) - 1; i >= 0; --i)
    {
@@ -161,7 +161,7 @@ inline bool __WB_ShouldHandleTriggerStatement()
    if(!InpEnableTriggerStatement)
       return false;
 
-   return ((ENUM_TIMEFRAMES)Period() == PERIOD_M15);
+   return ((ENUM_TIMEFRAMES)Period() == PERIOD_M1);
 }
 
 inline void __WB_RememberTriggerStatementWindow(const datetime start,
@@ -353,11 +353,11 @@ int OnInit()
    __WB_ApplyHiddenVisualPolicies();
    __WB_DeleteAllM15NumberingObjects();
 
-   // M15 Slave: start in idle mode and wait for Master signals
-   if(g_role == WBROLE_SLAVE_M15)
+   // M1 Slave: start in idle mode and wait for Master signals
+   if(g_role == WBROLE_SLAVE_M1)
       WB15_SlaveInit();
 
-   EventSetTimer(g_role == WBROLE_SLAVE_M15 ? 1 : 2);
+   EventSetTimer(g_role == WBROLE_SLAVE_M1 ? 1 : 2);
    return(INIT_SUCCEEDED);
 }
 
@@ -396,10 +396,10 @@ void SB_RunOneShot()
 // --- OnTimer: ??????? ????? + ????? ??? ?? Mode ????? + ????? Minor sessions ---
 void OnTimer()
 {
-   // M15 keeps listening to the H4 bridge on every timer tick.
+   // M1 keeps listening to the M15 bridge on every timer tick.
    // Local MIN-world execution on the slave is disabled and any old
    // local-minor artifacts are purged from the chart.
-   if(g_role == WBROLE_SLAVE_M15)
+   if(g_role == WBROLE_SLAVE_M1)
    {
       WB15_Slave_OnTimer(InpSymbol);
       __WB_DeleteAllM15NumberingObjects();
@@ -419,8 +419,8 @@ void OnTimer()
 
    if(g_once) return;
 
-   // MASTER (H4): start a fresh run for the M15 bridge (streamed signals)
-   if(g_role == WBROLE_MASTER_H4)
+   // MASTER (M15): start a fresh run for the M1 bridge (streamed signals)
+   if(g_role == WBROLE_MASTER_M15)
       WB15_MasterBegin(InpSymbol);
 
    datetime start=0, stop=0;

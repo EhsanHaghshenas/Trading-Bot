@@ -3,8 +3,8 @@
 
 // ============================================================================
 // WB15_SignalBridge.mqh
-// Simple live bridge H4 -> M15 using Terminal Global Variables.
-// H4 publishes START/STOP signals; M15 draws ON/OFF markers as an overlay.
+// Simple live bridge M15 -> M1 using Terminal Global Variables.
+// M15 publishes START/STOP signals; M1 draws ON/OFF markers as an overlay.
 // ============================================================================
 
 // NOTE: This module is intentionally standalone (no extra includes).
@@ -30,7 +30,7 @@ enum WB15_KIND
    WB15_KIND_STOP_MINOROFF_ZONE = 12
 };
 
-// ---- Internal state (M15) ----
+// ---- Internal state (M1) ----
 struct WB15ActiveState
 {
    bool      active;
@@ -42,7 +42,7 @@ struct WB15ActiveState
    double    run_id;
 
    // Legacy counting fields are kept only for compatibility.
-   // Candle numbering is enabled on the M15 chart.
+   // Candle numbering is enabled on the M1 chart.
    datetime  start_bar_time;
    datetime  last_count_bar_time;
    int       count;
@@ -89,12 +89,12 @@ inline string __WB15_KeyC(const string sym, const int seq)
 
 inline bool __WB15_IsMaster()
 {
-   return ((ENUM_TIMEFRAMES)Period() == PERIOD_H4);
+   return ((ENUM_TIMEFRAMES)Period() == PERIOD_M15);
 }
 
 inline bool __WB15_IsSlave()
 {
-   return ((ENUM_TIMEFRAMES)Period() == PERIOD_M15);
+   return ((ENUM_TIMEFRAMES)Period() == PERIOD_M1);
 }
 
 inline int __WB15_NS_FromMarkers()
@@ -121,7 +121,7 @@ inline Direction __WB15_Opposite(const Direction d)
    return (d == DIR_UP ? DIR_DOWN : DIR_UP);
 }
 // ============================================================================
-// SLAVE (M15): display helpers (signal type text)
+// SLAVE (M1): display helpers (signal type text)
 // ============================================================================
 
 inline string __WB15_NSLabel(const int ns)
@@ -185,8 +185,8 @@ inline void WB15_MasterPushEvent(const string sym,
    if(t <= 0) return;
 
    // MIN world is executed by WorldManager in preview mode.
-   // We still must publish bridge events there, otherwise M15 never sees
-   // MIN-origin 4H signal on/off windows in real time.
+   // We still must publish bridge events there, otherwise M1 never sees
+   // MIN-origin M15 signal on/off windows in real time.
    if(Markers_IsPreviewMode() && ns != WB15_NS_MIN)
       return;
 
@@ -214,23 +214,24 @@ inline void WB15_MasterPushEvent(const string sym,
 // Convenience wrappers (called from signal detection points)
 
 // --------------------------------------------------------------------------
-// Time-mapping rule (H4 -> M15):
+// Time-mapping rule (M15 -> M1):
 //  - HWX / HWBB / GOOZBAGHALI:
-//      publish on the FIRST M15 candle inside the H4 bar where the event
+//      publish on the FIRST M1 candle inside the M15 bar where the event
 //      really forms. The published timestamp is a stable point INSIDE that
-//      M15 candle (bar_open + 1 second), so the slave resolves the same
+//      M1 candle (bar_open + 1 second), so the slave resolves the same
 //      live candle deterministically.
 //  - FSMS / MTC / MinorStarter / MinorOff-zone:
-//      publish ONLY after the H4 candle closes,
-//      and their timestamp is the H4 CLOSE time (open time of next H4 bar).
+//      publish ONLY after the M15 candle closes,
+//      and their timestamp is the M15 CLOSE time (open time of next M15 bar).
 // --------------------------------------------------------------------------
 
 inline datetime __WB15_H4_CloseTime(const datetime h4_open_time)
 {
    if(h4_open_time <= 0) return 0;
 
-   int sec = PeriodSeconds(PERIOD_H4);
-   if(sec <= 0) sec = 14400; // safety fallback: 4H = 14400 seconds
+   // legacy helper name kept; close time now belongs to the M15 master bar
+   int sec = PeriodSeconds(PERIOD_M15);
+   if(sec <= 0) sec = 900; // safety fallback: 15M = 900 seconds
 
    return (h4_open_time + (datetime)sec);
 }
@@ -240,7 +241,7 @@ inline datetime __WB15_CloseBasedEventTimeOrZero(const datetime h4_open_time)
    const datetime close_time = __WB15_H4_CloseTime(h4_open_time);
    if(close_time <= 0) return 0;
 
-   // Wait for candle close (prevents early display on M15)
+   // Wait for candle close (prevents early display on M1)
    if(TimeCurrent() < close_time) return 0;
 
    return close_time;
@@ -250,8 +251,8 @@ inline datetime __WB15_StableM15IntrabarTime(const datetime m15_bar_open_time)
 {
    if(m15_bar_open_time <= 0) return 0;
 
-   int sec = PeriodSeconds(PERIOD_M15);
-   if(sec <= 0) sec = 900; // safety fallback: 15M = 900 seconds
+   int sec = PeriodSeconds(PERIOD_M1);
+   if(sec <= 0) sec = 60; // safety fallback: 1M = 60 seconds
 
    datetime t = m15_bar_open_time + 1;
    if(t >= (m15_bar_open_time + (datetime)sec))
@@ -295,7 +296,7 @@ inline int __WB15_LoadIntrabarM15(const string sym,
    if(from_time <= 0) return 0;
    if(to_time < from_time) return 0;
 
-   int copied = CopyRates(sym, PERIOD_M15, from_time, to_time, bars);
+   int copied = CopyRates(sym, PERIOD_M1, from_time, to_time, bars);
    if(copied <= 0) return 0;
 
    ArraySetAsSeries(bars, false);
@@ -351,7 +352,7 @@ inline bool __WB15_FindFirstHWBBIntrabarTime(const string sym,
 
    datetime min_event_time = h4_open_time;
 
-   // If HWBB happens inside the very same H4 bar as the seed Hunter,
+   // If HWBB happens inside the very same M15 bar as the seed Hunter,
    // do not allow a time earlier than the real HWX formation moment.
    if(seed_h4_open_time > 0 && seed_h4_open_time == h4_open_time)
    {
@@ -512,7 +513,7 @@ inline void WB15_PublishStartHWBB(const string sym, const Direction dir, const d
    WB15_MasterPushEvent(sym, WB15_KIND_START_HWBB, ns, dir, te);
 }
 
-// START (ON H4 CLOSE): FSMS
+// START (ON M15 CLOSE): FSMS
 // NOTE: legacy function name is kept to avoid touching the wider codebase.
 // It now publishes in BOTH MAJ and MIN namespaces, based on the active world.
 inline void WB15_PublishStartFSMS_MAJONLY(const string sym, const Direction dir, const datetime t)
@@ -558,7 +559,7 @@ inline void WB15_PublishStartGooz(const string sym, const Direction dir, const d
    WB15_MasterPushEvent(sym, WB15_KIND_START_GOOZBAGHALI, ns, dir, t);
 }
 
-// STOP (ON CLOSE): MTC must wait for H4 close
+// STOP (ON CLOSE): MTC must wait for M15 close
 inline void WB15_PublishStopMTC(const string sym, const Direction dir, const datetime t)
 {
    const int ns = __WB15_NS_FromMarkers();
@@ -571,7 +572,7 @@ inline void WB15_PublishStopMTC(const string sym, const Direction dir, const dat
    WB15_MasterPushEvent(sym, WB15_KIND_STOP_MTC, ns, dir, te);
 }
 
-// STOP (ON CLOSE, MAJ-only): MinorStarter must wait for H4 close
+// STOP (ON CLOSE, MAJ-only): MinorStarter must wait for M15 close
 inline void WB15_PublishStopMinorStarter(const string sym, const Direction dir, const datetime t)
 {
    TriggerM15SignalGate_RecordClose(sym, WB15_KIND_STOP_MINORSTARTER, WB15_NS_MAJ, dir, t);
@@ -582,10 +583,10 @@ inline void WB15_PublishStopMinorStarter(const string sym, const Direction dir, 
    WB15_MasterPushEvent(sym, WB15_KIND_STOP_MINORSTARTER, WB15_NS_MAJ, dir, te);
 }
 
-// STOP (ON CLOSE, MAJ-only): MinorOff zone must wait for H4 close
+// STOP (ON CLOSE, MAJ-only): MinorOff zone must wait for M15 close
 inline void WB15_PublishStopMinorOffZone_MAJONLY(const string sym, const Direction dir, const datetime t)
 {
-   // Stop trigger: MAJ MinorOff breaks C1-W2 Minorzone boundary (used to stop MIN-start M15 sessions)
+   // Stop trigger: MAJ MinorOff breaks C1-W2 Minorzone boundary (used to stop MIN-start M1 sessions)
    if(Markers_GetNamespace() != "MAJ") return;
 
    TriggerM15SignalGate_RecordClose(sym, WB15_KIND_STOP_MINOROFF_ZONE, WB15_NS_MAJ, dir, t);
@@ -598,15 +599,15 @@ inline void WB15_PublishStopMinorOffZone_MAJONLY(const string sym, const Directi
 
 
 // ============================================================================
-// SLAVE (M15): drawing helpers
+// SLAVE (M1): drawing helpers
 // ============================================================================
 
 inline bool __WB15_GetBarHL(const string sym, const datetime t, double &hi, double &lo)
 {
-   int sh = iBarShift(sym, PERIOD_M15, t, false);
+   int sh = iBarShift(sym, PERIOD_M1, t, false);
    if(sh < 0) return false;
    MqlRates rr[1];
-   if(CopyRates(sym, PERIOD_M15, sh, 1, rr) != 1) return false;
+   if(CopyRates(sym, PERIOD_M1, sh, 1, rr) != 1) return false;
    hi = rr[0].high;
    lo = rr[0].low;
    return true;
@@ -659,7 +660,7 @@ inline void __WB15_DrawSignalMarker(const string sym,
    double span = hi - lo;
    if(span <= 0.0) span = 10.0 * _Point;
 
-   // BIGGER vertical distance from candles (for clarity on M15)
+   // BIGGER vertical distance from candles (for clarity on M1)
    double pad = span * 0.60;
    if(pad < 8.0 * _Point) pad = 8.0 * _Point;
 
@@ -677,7 +678,7 @@ inline void __WB15_DrawSignalMarker(const string sym,
       string hname = vname + "_TXT_H";
       string tname = vname + "_TXT_T";
 
-      __WB15_DrawTextUnique(hname, t, y, "4H Signal on", clrBlue, 10);
+      __WB15_DrawTextUnique(hname, t, y, "15M Signal on", clrBlue, 10);
 
       // Put type line under the main label (lower price), but keep it far from candles
       double gap = pad * 0.30;
@@ -689,28 +690,28 @@ inline void __WB15_DrawSignalMarker(const string sym,
    else
    {
       string tname = vname + "_TXT";
-      __WB15_DrawTextUnique(tname, t, y, "4H Signal off", clrBlue, 10);
+      __WB15_DrawTextUnique(tname, t, y, "15M Signal off", clrBlue, 10);
    }
 }
 
 // ============================================================================
-// SLAVE (M15): live candle-by-candle numbering helpers
+// SLAVE (M1): live candle-by-candle numbering helpers
 // (Uses the same bar-mapping logic as minor-range starter/ender numbering:
-//  resolve event time -> M15 bar by iBarShift(..., false) then iTime(...))
+//  resolve event time -> M1 bar by iBarShift(..., false) then iTime(...))
 // ============================================================================
 
 inline bool __WB15_ResolveM15BarTime(const string sym, const datetime t, datetime &bar_time)
 {
-   int sh = iBarShift(sym, PERIOD_M15, t, false);
+   int sh = iBarShift(sym, PERIOD_M1, t, false);
    if(sh < 0) return false;
-   bar_time = iTime(sym, PERIOD_M15, sh);
+   bar_time = iTime(sym, PERIOD_M1, sh);
    return (bar_time > 0);
 }
 
 inline int __WB15_BarShiftM15Safe(const string sym, const datetime bar_time)
 {
-   int sh = iBarShift(sym, PERIOD_M15, bar_time, true);
-   if(sh < 0) sh = iBarShift(sym, PERIOD_M15, bar_time, false);
+   int sh = iBarShift(sym, PERIOD_M1, bar_time, true);
+   if(sh < 0) sh = iBarShift(sym, PERIOD_M1, bar_time, false);
    return sh;
 }
 
@@ -788,7 +789,7 @@ inline int __WB15_CountBarsExclusiveM15(const string sym, const datetime start_b
 }
 
 // Advance the live counter forward (no look-ahead).
-// - If until_exclusive_bar_time == 0: count forward up to the last CLOSED M15 candle.
+// - If until_exclusive_bar_time == 0: count forward up to the last CLOSED M1 candle.
 // - If until_exclusive_bar_time  > 0: count forward, but do NOT count the candle whose open time == until_exclusive_bar_time
 //   (i.e., stop before OFF candle).
 inline void __WB15_LiveCountAdvance(const string sym, const datetime until_exclusive_bar_time)
@@ -798,7 +799,7 @@ inline void __WB15_LiveCountAdvance(const string sym, const datetime until_exclu
    if(g_wb15_state.start_bar_time <= 0) return;
 
    // Only closed candles are eligible for numbering
-   datetime last_closed_time = iTime(sym, PERIOD_M15, 1);
+   datetime last_closed_time = iTime(sym, PERIOD_M1, 1);
    if(last_closed_time <= 0) return;
 
    datetime cur = g_wb15_state.last_count_bar_time;
@@ -812,7 +813,7 @@ inline void __WB15_LiveCountAdvance(const string sym, const datetime until_exclu
       int next_sh = sh - 1;
       if(next_sh < 1) break; // do not number current (forming) candle
 
-      datetime next_time = iTime(sym, PERIOD_M15, next_sh);
+      datetime next_time = iTime(sym, PERIOD_M1, next_sh);
       if(next_time <= 0) break;
 
       // Safety: should never exceed the last closed candle, but keep guard
@@ -863,7 +864,7 @@ inline void __WB15_DrawCountSequence(const string sym,
    // Candle order: from older (start) towards newer (stop)
    for(int sh = sh_start - 1; sh >= sh_stop + 1; --sh)
    {
-      datetime bt = iTime(sym, PERIOD_M15, sh);
+      datetime bt = iTime(sym, PERIOD_M1, sh);
       if(bt <= 0) continue;
 
       num++;
@@ -872,7 +873,7 @@ inline void __WB15_DrawCountSequence(const string sym,
 }
 
 // ============================================================================
-// SLAVE (M15): match rules + OnTimer
+// SLAVE (M1): match rules + OnTimer
 // ============================================================================
 
 inline bool __WB15_IsStartKind(const int kind)
@@ -891,7 +892,7 @@ inline bool __WB15_ShouldStop(const WB15ActiveState &st, const int stop_kind, co
    if(!__WB15_IsStopKind(stop_kind)) return false;
 
    // Simplified rule:
-   //   any 4H signal off closes the current M15 trigger window,
+   //   any M15 signal off closes the current M1 trigger window,
    //   as long as the stop direction is the opposite of the active signal direction.
    // Namespace and signal type no longer participate in stop matching.
    if(stop_dir != __WB15_Opposite(st.start_dir))
@@ -904,7 +905,7 @@ inline bool __WB15_ShouldAutoStopOnNewStart(const WB15ActiveState &st,
                                             const int new_kind,
                                             const int new_ns)
 {
-   // A fresh 4H signal on simply restarts the active window from its own candle.
+   // A fresh M15 signal on simply restarts the active window from its own candle.
    // We no longer synthesize a pseudo-off when a new start arrives.
    if(!st.active) return false;
    if(new_kind <= 0) return false;
@@ -964,7 +965,7 @@ inline void WB15_Slave_OnTimer(const string sym)
    if(GlobalVariableCheck(kPrc)) processed = (int)GlobalVariableGet(kPrc);
    int seq = (int)GlobalVariableGet(kSeq);
 
-   // 1) Process new H4 events (ON/OFF markers)
+   // 1) Process new M15 events (ON/OFF markers)
    if(seq > processed)
    {
       for(int i = processed + 1; i <= seq; ++i)
@@ -984,12 +985,12 @@ inline void WB15_Slave_OnTimer(const string sym)
 
          if(__WB15_IsStartKind(kind))
          {
-            // Resolve ON candle open time on M15
+            // Resolve ON candle open time on M1
             datetime on_bar_time = 0;
             if(!__WB15_ResolveM15BarTime(sym, t, on_bar_time))
                on_bar_time = t;
 
-            // FSMS lifecycle mirror on M15:
+            // FSMS lifecycle mirror on M1:
             // a fresh HWX/HWBB start closes the currently active FSMS session first.
             if(__WB15_ShouldAutoStopOnNewStart(g_wb15_state, kind, ns))
             {
@@ -1053,7 +1054,7 @@ inline void WB15_Slave_OnTimer(const string sym)
             {
                if(__WB15_CountsEnabled())
                {
-                  // Resolve OFF candle open time on M15
+                  // Resolve OFF candle open time on M1
                   datetime off_bar_time = 0;
                   if(__WB15_ResolveM15BarTime(sym, t, off_bar_time))
                   {
@@ -1080,7 +1081,7 @@ inline void WB15_Slave_OnTimer(const string sym)
       GlobalVariableSet(kPrc, (double)seq);
    }
 
-   // 2) Keep candle numbering advancing live on M15 while the session is active.
+   // 2) Keep candle numbering advancing live on M1 while the session is active.
    if(__WB15_CountsEnabled() && g_wb15_state.active)
       __WB15_LiveCountAdvance(sym, 0);
 }

@@ -9,12 +9,12 @@
 // ============================================================================
 // Trigger.mqh
 //
-// Independent trigger engine driven only by the H4 -> worker bridge and the
+// Independent trigger engine driven only by the M15 -> worker bridge and the
 // raw worker-TF candles.
 //
 // Current rules implemented:
-//   - Trigger starts from the worker candle that receives 4H signal on.
-//   - Trigger stops immediately on the worker candle that receives 4H signal off.
+//   - Trigger starts from the worker candle that receives M15 signal on.
+//   - Trigger stops immediately on the worker candle that receives M15 signal off.
 //   - The engine is completely independent from the normal wave/candle scan.
 //   - Every worker candle is processed, even if it is an inside bar or ignored
 //     by the normal engine.
@@ -134,7 +134,7 @@ static string       g_trigger_symbol = "";
 inline bool __TRG_IsWorkerTF()
 {
    ENUM_TIMEFRAMES tf = (ENUM_TIMEFRAMES)Period();
-   return (tf == PERIOD_M15 || tf == PERIOD_M1);
+   return (tf == PERIOD_M1);
 }
 
 inline bool __TRG_IsMajorWorld()
@@ -611,7 +611,7 @@ inline bool __TRG_ShouldAutoStopOnNewStart(const TriggerStartSession &sess,
                                            const int new_kind,
                                            const int new_ns)
 {
-   // Simplified lifecycle: a fresh 4H signal on replaces the previous window.
+   // Simplified lifecycle: a fresh M15 signal on replaces the previous window.
    // No synthetic stop is generated on start.
    if(!sess.active) return false;
    if(new_kind <= 0) return false;
@@ -628,7 +628,7 @@ inline bool __TRG_SessionMatchesStop(const TriggerStartSession &sess,
    if(!__TRG_IsStopKind(stop_kind)) return false;
 
    // Simplified rule:
-   //   any 4H signal off closes the active trigger window,
+   //   any M15 signal off closes the active trigger window,
    //   provided that its direction is the opposite of the active signal direction.
    // Namespace and signal kind no longer affect stop matching.
    if(stop_dir != __WB15_Opposite(sess.dir))
@@ -730,7 +730,7 @@ inline void __TRG_ApplyWindowAt(const datetime bar_time)
       if(__TRG_IsStartKind(evt.kind))
       {
          // Simplified lifecycle:
-         // every new 4H signal on replaces the previously active window,
+         // every new M15 signal on replaces the previously active window,
          // regardless of type or namespace.
          for(int s=0; s<session_count; ++s)
             sessions[s].active = false;

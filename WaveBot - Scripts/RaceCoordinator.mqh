@@ -23,8 +23,8 @@ inline ENUM_TIMEFRAMES __Race_RuntimeTF()
    ENUM_TIMEFRAMES tf = InpTF;
    ENUM_TIMEFRAMES chart_tf = (ENUM_TIMEFRAMES)Period();
 
-   if(chart_tf == PERIOD_H4)      tf = PERIOD_H4;
-   else if(chart_tf == PERIOD_M15) tf = PERIOD_M15;
+   if(chart_tf == PERIOD_M15)     tf = PERIOD_M15;
+   else if(chart_tf == PERIOD_M1) tf = PERIOD_M1;
 
    return tf;
 }
@@ -1067,7 +1067,7 @@ inline void Race_DrawW2W3_MTC_Down(const MqlRates &rates[], const int n, const R
    if(S.bodyBreakIdx >= 0 && S.bodyBreakIdx < n && InpDrawMarkers)
       MarkV("MTC_DN_BB_"+tag, rates[S.bodyBreakIdx].time, clrRed);
 
-   // NEW (H4->M15 bridge): MTC is a STOP trigger (use body-break candle time)
+   // NEW (M15->M1 bridge): MTC is a STOP trigger (use body-break candle time)
    if(S.bodyBreakIdx >= 0 && S.bodyBreakIdx < n)
       WB15_PublishStopMTC(InpSymbol, DIR_DOWN, rates[S.bodyBreakIdx].time);
 
@@ -1125,7 +1125,7 @@ inline void Race_DrawW2W3_MTC_Up(const MqlRates &rates[], const int n, const Rac
    if(S.bodyBreakIdx >= 0 && S.bodyBreakIdx < n && InpDrawMarkers)
       MarkV("MTC_UP_BB_"+tag, rates[S.bodyBreakIdx].time, clrBlue);
 
-   // NEW (H4->M15 bridge): MTC is a STOP trigger (use body-break candle time)
+   // NEW (M15->M1 bridge): MTC is a STOP trigger (use body-break candle time)
    if(S.bodyBreakIdx >= 0 && S.bodyBreakIdx < n)
       WB15_PublishStopMTC(InpSymbol, DIR_UP, rates[S.bodyBreakIdx].time);
 
@@ -1189,7 +1189,7 @@ inline void Race_DrawMTCOnly_Down_ByRef(const MqlRates &rates[],
    if(bodyIdx >= 0 && bodyIdx < n && InpDrawMarkers)
       MarkV("MTC_DN_BB_"+tag, rates[bodyIdx].time, clrRed);
 
-   // NEW (H4->M15 bridge): MTC is a STOP trigger (special-case)
+   // NEW (M15->M1 bridge): MTC is a STOP trigger (special-case)
    if(bodyIdx >= 0 && bodyIdx < n)
       WB15_PublishStopMTC(InpSymbol, DIR_DOWN, rates[bodyIdx].time);
 
@@ -1242,7 +1242,7 @@ inline void Race_DrawMTCOnly_Up_ByRef(const MqlRates &rates[],
    if(bodyIdx >= 0 && bodyIdx < n && InpDrawMarkers)
       MarkV("MTC_UP_BB_"+tag, rates[bodyIdx].time, clrBlue);
 
-   // NEW (H4->M15 bridge): MTC is a STOP trigger (special-case)
+   // NEW (M15->M1 bridge): MTC is a STOP trigger (special-case)
    if(bodyIdx >= 0 && bodyIdx < n)
       WB15_PublishStopMTC(InpSymbol, DIR_UP, rates[bodyIdx].time);
 

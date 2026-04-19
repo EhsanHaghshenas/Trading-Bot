@@ -37,7 +37,7 @@ inline bool __TRGM15_ShouldRecord(const string sym)
    if(sym == "")
       return false;
 
-   if((ENUM_TIMEFRAMES)Period() != PERIOD_M15)
+   if((ENUM_TIMEFRAMES)Period() != PERIOD_M1)
       return false;
 
    return true;
@@ -94,9 +94,9 @@ inline datetime __TRGM15_M15CloseActivationTime(const datetime bar_open_time)
    if(bar_open_time <= 0)
       return 0;
 
-   int sec = PeriodSeconds(PERIOD_M15);
+   int sec = PeriodSeconds(PERIOD_M1);
    if(sec <= 0)
-      sec = 900;
+      sec = 60;
 
    return (bar_open_time + (datetime)sec);
 }
