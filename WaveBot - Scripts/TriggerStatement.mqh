@@ -100,6 +100,15 @@ static datetime g_trgstmt_last_scan_from = 0;
 static datetime g_trgstmt_last_scan_to   = 0;
 static int      g_trgstmt_last_records   = 0;
 
+static bool            g_trgstmt_live_enabled         = false;
+static bool            g_trgstmt_live_busy            = false;
+static string          g_trgstmt_live_symbol          = "";
+static ENUM_TIMEFRAMES g_trgstmt_live_tf              = PERIOD_CURRENT;
+static datetime        g_trgstmt_live_scan_from       = 0;
+static double          g_trgstmt_live_initial_capital = 0.0;
+static double          g_trgstmt_live_risk_percent    = 0.0;
+static string          g_trgstmt_live_file_tag        = "";
+
 inline void __TRGSTM_ClearTrade(TriggerStatementTrade &stmt_trade)
 {
    stmt_trade.valid                  = false;
@@ -132,6 +141,76 @@ inline void TriggerStatement_ResetGlobals()
    g_trgstmt_last_scan_from = 0;
    g_trgstmt_last_scan_to   = 0;
    g_trgstmt_last_records   = 0;
+
+   g_trgstmt_live_enabled         = false;
+   g_trgstmt_live_busy            = false;
+   g_trgstmt_live_symbol          = "";
+   g_trgstmt_live_tf              = PERIOD_CURRENT;
+   g_trgstmt_live_scan_from       = 0;
+   g_trgstmt_live_initial_capital = 0.0;
+   g_trgstmt_live_risk_percent    = 0.0;
+   g_trgstmt_live_file_tag        = "";
+}
+
+bool TriggerStatement_WriteTextReport(const string          sym,
+                                      const ENUM_TIMEFRAMES tf,
+                                      const datetime        scan_from,
+                                      const datetime        scan_to,
+                                      const double          initial_capital_input,
+                                      const double          risk_percent_input,
+                                      const string          file_tag);
+
+inline bool TriggerStatement_LiveEnabled()
+{
+   return g_trgstmt_live_enabled;
+}
+
+inline void TriggerStatement_LiveConfigure(const string          sym,
+                                           const ENUM_TIMEFRAMES tf,
+                                           const datetime        scan_from,
+                                           const double          initial_capital_input,
+                                           const double          risk_percent_input,
+                                           const string          file_tag)
+{
+   string use_sym = sym;
+   if(use_sym == "")
+      use_sym = _Symbol;
+
+   g_trgstmt_live_enabled         = true;
+   g_trgstmt_live_busy            = false;
+   g_trgstmt_live_symbol          = use_sym;
+   g_trgstmt_live_tf              = tf;
+   g_trgstmt_live_scan_from       = scan_from;
+   g_trgstmt_live_initial_capital = initial_capital_input;
+   g_trgstmt_live_risk_percent    = risk_percent_input;
+   g_trgstmt_live_file_tag        = file_tag;
+}
+
+inline bool TriggerStatement_LiveRefreshNow()
+{
+   if(!g_trgstmt_live_enabled)
+      return false;
+
+   if(g_trgstmt_live_busy)
+      return false;
+
+   g_trgstmt_live_busy = true;
+
+   bool ok = TriggerStatement_WriteTextReport(g_trgstmt_live_symbol,
+                                              g_trgstmt_live_tf,
+                                              g_trgstmt_live_scan_from,
+                                              TimeCurrent(),
+                                              g_trgstmt_live_initial_capital,
+                                              g_trgstmt_live_risk_percent,
+                                              g_trgstmt_live_file_tag);
+
+   g_trgstmt_live_busy = false;
+   return ok;
+}
+
+inline void TriggerStatement_OnNewTrigger()
+{
+   TriggerStatement_LiveRefreshNow();
 }
 
 inline string TriggerStatement_LastFileName() { return g_trgstmt_last_filename; }
@@ -3079,3 +3158,4 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
 
 
 #endif // WAVEBOT_TRIGGER_STATEMENT_MQH
+

@@ -1,10 +1,12 @@
-﻿#ifndef WAVEBOT_TRIGGER_MQH
+#ifndef WAVEBOT_TRIGGER_MQH
 #define WAVEBOT_TRIGGER_MQH
 
 #include <WaveBot/Types.mqh>
 #include <WaveBot/Markers.mqh>
 #include <WaveBot/WB15_SignalBridge.mqh>
 #include <WaveBot/TriggerSLTP.mqh>
+
+void TriggerStatement_OnNewTrigger();
 
 // ============================================================================
 // Trigger.mqh
@@ -1110,6 +1112,7 @@ inline void __TRG_FireTrigger(const int       type_id,
                            level);
 
    __TRG_RestartAfterHit(rates, n, hit_idx);
+   TriggerStatement_OnNewTrigger();
 }
 
 inline int __TRG_BullHandlePhase4Break(const MqlRates &rates[],

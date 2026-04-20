@@ -190,6 +190,9 @@ inline void __WB_WriteTriggerStatementReport()
       ResolveWindow(stmt_start, stmt_stop);
    }
 
+   if(stmt_stop <= 0 || stmt_stop < TimeCurrent())
+      stmt_stop = TimeCurrent();
+
    TriggerStatement_WriteTextReport(InpSymbol,
                                     (ENUM_TIMEFRAMES)Period(),
                                     stmt_start,
@@ -197,6 +200,26 @@ inline void __WB_WriteTriggerStatementReport()
                                     InpTriggerStatementInitialCapital,
                                     InpTriggerStatementRiskPercent,
                                     InpTriggerStatementFileTag);
+}
+
+inline void __WB_EnsureLiveTriggerStatementFile()
+{
+   if(!__WB_ShouldHandleTriggerStatement())
+      return;
+
+   datetime stmt_start = 0;
+   datetime stmt_stop  = 0;
+   ResolveWindow(stmt_start, stmt_stop);
+   __WB_RememberTriggerStatementWindow(stmt_start, stmt_stop);
+
+   TriggerStatement_LiveConfigure(InpSymbol,
+                                  (ENUM_TIMEFRAMES)Period(),
+                                  stmt_start,
+                                  InpTriggerStatementInitialCapital,
+                                  InpTriggerStatementRiskPercent,
+                                  InpTriggerStatementFileTag);
+
+   TriggerStatement_LiveRefreshNow();
 }
 // ============================================================================
 // Minor session runner (Phase-1: Minor inside Major)
@@ -352,6 +375,7 @@ int OnInit()
    g_stmt_window_set = false;
    __WB_ApplyHiddenVisualPolicies();
    __WB_DeleteAllM15NumberingObjects();
+   __WB_EnsureLiveTriggerStatementFile();
 
    // M1 Slave: start in idle mode and wait for Master signals
    if(g_role == WBROLE_SLAVE_M1)
@@ -463,3 +487,4 @@ void OnTimer()
 
    g_once=true;  // فقط یک‌بار اسکن کامل در هر اجرای EA
 }
+
