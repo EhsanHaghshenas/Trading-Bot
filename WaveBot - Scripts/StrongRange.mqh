@@ -210,7 +210,7 @@ inline void SR_OnBar_DOWN(const MqlRates &rates[], const int n, const int j, con
    }
 
    // 2) SW معمولی نزولی
-   if(SW_DOWN_SeedActive())
+   if(SWGate_DN_IsOpen() && SW_DOWN_SeedActive() && SW_DOWN_SeedTime() >= SWGate_DN_W2Time())
    {
       const datetime seed_t = SW_DOWN_SeedTime();
       if(rates[j].time >= seed_t && g_sr_sw_dn_drawn_seed != seed_t)

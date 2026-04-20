@@ -47,14 +47,19 @@ inline bool __FSMS_SW_ShouldRunMinorWorldOnThisChart()
    return ((ENUM_TIMEFRAMES)Period() != PERIOD_M1);
 }
 
+inline bool __FSMS_SW_ShouldRunCoreLogicOnThisChart()
+{
+   return true;
+}
+
 // --- NEW: Getters for FSMS–SW UP ---
-inline bool     FSMS_SW_UP_SeedActive()  { return (__FSMS_SW_ShouldRunMinorWorldOnThisChart() && g_fsms_sw_up_active); }
+inline bool     FSMS_SW_UP_SeedActive()  { return (__FSMS_SW_ShouldRunCoreLogicOnThisChart() && g_fsms_sw_up_active); }
 inline double   FSMS_SW_UP_Level()       { return g_fsms_sw_up_level;     }
 inline int      FSMS_SW_UP_C1Index()     { return g_fsms_sw_up_c1_idx;    }
 inline datetime FSMS_SW_UP_SeedTime()    { return g_fsms_sw_up_seed_time; }
 
 // --- NEW: Getters for FSMS–SW DOWN ---
-inline bool     FSMS_SW_DN_SeedActive()  { return (__FSMS_SW_ShouldRunMinorWorldOnThisChart() && g_fsms_sw_dn_active); }
+inline bool     FSMS_SW_DN_SeedActive()  { return (__FSMS_SW_ShouldRunCoreLogicOnThisChart() && g_fsms_sw_dn_active); }
 inline double   FSMS_SW_DN_Level()       { return g_fsms_sw_dn_level;     }
 inline int      FSMS_SW_DN_C1Index()     { return g_fsms_sw_dn_c1_idx;    }
 inline datetime FSMS_SW_DN_SeedTime()    { return g_fsms_sw_dn_seed_time; }
@@ -832,6 +837,7 @@ inline void FSMS_SW_RecordMinorPair_UP(const MqlRates &rates[], const int n, con
 // همچنین، جهت مخالف (DOWN) را همزمان Disarm می‌کنیم تا از ساخت FSMS_Minor_D متضاد جلوگیری شود.
 inline void FSMS_SW_ConvertFSMS_U_ToMinor(const MqlRates &rates[], const int n)
 {
+   if(!__FSMS_SW_ShouldRunMinorWorldOnThisChart()) return;
    if(g_fsms_sw_up_seed_time <= 0) return;
 
    const datetime fsms_t = g_fsms_sw_up_seed_time;
@@ -926,6 +932,7 @@ inline void FSMS_SW_ConvertFSMS_U_ToMinor(const MqlRates &rates[], const int n)
 // همچنین جهت مخالف (UP) را Disarm می‌کنیم تا Minor_U متضاد ساخته نشود.
 inline void FSMS_SW_ConvertFSMS_D_ToMinor(const MqlRates &rates[], const int n)
 {
+   if(!__FSMS_SW_ShouldRunMinorWorldOnThisChart()) return;
    if(g_fsms_sw_dn_seed_time <= 0) return;
 
    const datetime fsms_t = g_fsms_sw_dn_seed_time;
@@ -1083,7 +1090,6 @@ inline void FSMS_SW_UP_ActivateSeed(const MqlRates &rates[], const int n,
                                     const int sameDirW3_Index,
                                     const datetime fsms_fire_time)
 {
-   if(!__FSMS_SW_ShouldRunMinorWorldOnThisChart()) return;
    if(sameDirC1_Index < 0 || sameDirC1_Index >= n || fsms_fire_time<=0) return;
 
    g_fsms_sw_up_active    = true;
@@ -1113,7 +1119,6 @@ inline void FSMS_SW_DN_ActivateSeed(const MqlRates &rates[], const int n,
                                     const int sameDirW3_Index,
                                     const datetime fsms_fire_time)
 {
-   if(!__FSMS_SW_ShouldRunMinorWorldOnThisChart()) return;
    if(sameDirC1_Index < 0 || sameDirC1_Index >= n || fsms_fire_time<=0) return;
 
    g_fsms_sw_dn_active    = true;
@@ -2015,11 +2020,7 @@ inline void FSMS_SW_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
                              const double &bodyLowEff[], const double &bodyHighEff[],
                              const int n, const int upto_j)
 {
-   if(!__FSMS_SW_ShouldRunMinorWorldOnThisChart())
-   {
-      g_minor_off_last_j = upto_j;
-      return;
-   }
+   // هسته‌ی FSMS-SW باید روی M1 هم فعال بماند؛ فقط شاخه‌ی local-minor محدود می‌شود.
 
    // ابطال فوری با HWX یا HWBB پس از FSMS
    if(g_fsms_sw_up_active)
@@ -2043,8 +2044,11 @@ inline void FSMS_SW_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
    if(g_fsms_sw_up_active)   __SW_Scan_DN_After_FSMS_U(rates, insideHL, bodyLowEff, bodyHighEff, n, upto_j);
    if(g_fsms_sw_dn_active)   __SW_Scan_UP_After_FSMS_D(rates, insideHL, bodyLowEff, bodyHighEff, n, upto_j);
 
-   // --- NEW: پایش MinorOff بعد از MinorStarter (مستقل از فعال بودن FSMS–SW)
-   FSMS_SW_CheckMinorOff(rates, n, upto_j);
+   // --- NEW: پایش MinorOff بعد از MinorStarter (فقط روی چارتی که local-minor مجاز است)
+   if(__FSMS_SW_ShouldRunMinorWorldOnThisChart())
+      FSMS_SW_CheckMinorOff(rates, n, upto_j);
+   else
+      g_minor_off_last_j = upto_j;
 }
 
 #endif // WAVEBOT_FSMS_SW_MQH

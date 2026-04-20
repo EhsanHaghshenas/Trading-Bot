@@ -17,6 +17,7 @@
 #include <WaveBot/SR_Gate.mqh>     // NEW: SR direction gating after MTC
 #include <WaveBot/Hunter.mqh>      // for SW_UP_ClearSeed()
 #include <WaveBot/Hunter_Down.mqh> // for SW_DOWN_ClearSeed()
+#include <WaveBot/FSMS_SW.mqh>   // for FSMS_SW_DisarmAll()
 
 inline ENUM_TIMEFRAMES __Race_RuntimeTF()
 {
@@ -493,6 +494,15 @@ inline void Race_MarkWin_B(const Direction mode, const datetime t)
    MarkV( (mode==DIR_UP ? "MTC_D_" : "MTC_U_") + tag, t, (mode==DIR_UP?clrFireBrick:clrLime) );
 }
 
+inline void __Race_ClearRegimeArtifacts()
+{
+   // هیچ seed یا guard قدیمی نباید بعد از رجیم‌چنج در ادامه‌ی موتور اثر بگذارد.
+   SW_UP_ClearSeed();
+   SW_DOWN_ClearSeed();
+   SWGate_ResetGlobals();
+   FSMS_SW_DisarmAll();
+}
+
 //--------------------------- ???? ?????? ?? HWBB ------------------------------
 inline void Race_Start_UP(const MqlRates &rates[], const int n, const int hwbb_idx)
 {
@@ -792,8 +802,7 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
 
                   // Fail-safe cleanup (in case ref was missing)
                   SR_AllowOnly(DIR_DOWN);
-                  SW_UP_ClearSeed();
-                  SWGate_ResetGlobals();
+                  __Race_ClearRegimeArtifacts();
 
                   if(__prev_mode==DIR_UP)
                      API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, runtime_tf, __from, __to,
@@ -1018,8 +1027,7 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
                   Race_InternalClearAll();
 
                   SR_AllowOnly(DIR_UP);
-                  SW_DOWN_ClearSeed();
-                  SWGate_ResetGlobals();
+                  __Race_ClearRegimeArtifacts();
 
                   if(__prev_mode==DIR_DOWN)
                      API_RunScanSequential_W2W3_Hunter(InpSymbol, runtime_tf, __from, __to,
@@ -1098,8 +1106,7 @@ inline void Race_DrawW2W3_MTC_Down(const MqlRates &rates[], const int n, const R
 
    // --- IMPORTANT cleanup after MTC
    SR_AllowOnly(DIR_DOWN);
-   SW_UP_ClearSeed();
-   SWGate_ResetGlobals();
+   __Race_ClearRegimeArtifacts();
 }
 
 
@@ -1155,8 +1162,7 @@ inline void Race_DrawW2W3_MTC_Up(const MqlRates &rates[], const int n, const Rac
    }
 
    SR_AllowOnly(DIR_UP);
-   SW_DOWN_ClearSeed();
-   SWGate_ResetGlobals();
+   __Race_ClearRegimeArtifacts();
 }
 
 
@@ -1222,8 +1228,7 @@ inline void Race_DrawMTCOnly_Down_ByRef(const MqlRates &rates[],
    }
 
    SR_AllowOnly(DIR_DOWN);
-   SW_UP_ClearSeed();
-   SWGate_ResetGlobals();
+   __Race_ClearRegimeArtifacts();
 }
 
 inline void Race_DrawMTCOnly_Down(const MqlRates &rates[], const int n, const int bodyIdx)
@@ -1275,8 +1280,7 @@ inline void Race_DrawMTCOnly_Up_ByRef(const MqlRates &rates[],
    }
 
    SR_AllowOnly(DIR_UP);
-   SW_DOWN_ClearSeed();
-   SWGate_ResetGlobals();
+   __Race_ClearRegimeArtifacts();
 }
 
 inline void Race_DrawMTCOnly_Up(const MqlRates &rates[], const int n, const int bodyIdx)
@@ -1303,7 +1307,7 @@ inline void Race_SpecialRefBreak_MTC_Down(const MqlRates &rates[], const int n, 
    Race_RequestAbortCurrentAPIScan();
    Race_InternalClearAll();
    SR_AllowOnly(DIR_DOWN);
-   SW_UP_ClearSeed();
+   __Race_ClearRegimeArtifacts();
 
    // 3) launch اسکن DOWN از همین کندل
    __Race_LaunchSpecialDirectionScan(DIR_DOWN, rates, n, bt);
@@ -1325,7 +1329,7 @@ inline void Race_SpecialRefBreak_MTC_Up(const MqlRates &rates[], const int n, co
    Race_RequestAbortCurrentAPIScan();
    Race_InternalClearAll();
    SR_AllowOnly(DIR_UP);
-   SW_DOWN_ClearSeed();
+   __Race_ClearRegimeArtifacts();
 
    __Race_LaunchSpecialDirectionScan(DIR_UP, rates, n, bt);
 }
@@ -1352,7 +1356,7 @@ inline void Race_SpecialRefBreak_ActiveRef_MTC_Down(const MqlRates &rates[], con
    Race_RequestAbortCurrentAPIScan();
    Race_InternalClearAll();
    SR_AllowOnly(DIR_DOWN);
-   SW_UP_ClearSeed();
+   __Race_ClearRegimeArtifacts();
 
    __Race_LaunchSpecialDirectionScan(DIR_DOWN, rates, n, bt);
 }
@@ -1375,7 +1379,7 @@ inline void Race_SpecialRefBreak_ActiveRef_MTC_Up(const MqlRates &rates[], const
    Race_RequestAbortCurrentAPIScan();
    Race_InternalClearAll();
    SR_AllowOnly(DIR_UP);
-   SW_DOWN_ClearSeed();
+   __Race_ClearRegimeArtifacts();
 
    __Race_LaunchSpecialDirectionScan(DIR_UP, rates, n, bt);
 }

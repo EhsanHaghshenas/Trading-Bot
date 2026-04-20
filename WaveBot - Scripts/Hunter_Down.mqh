@@ -149,7 +149,13 @@ inline void SW_DOWN_ActivateSeed(const MqlRates &rates[], const int n,
 inline bool     SW_DOWN_SeedActive()      { return g_sw_seed_d_active; }
 inline double   SW_DOWN_Level()           { return g_sw_seed_d_level;  }
 inline datetime SW_DOWN_SeedTime()        { return g_sw_seed_d_xtime;  }
-inline void     SW_DOWN_ClearSeed()       { g_sw_seed_d_active=false;  }
+inline void     SW_DOWN_ClearSeed()
+{
+   g_sw_seed_d_active = false;
+   g_sw_seed_d_c1     = -1;
+   g_sw_seed_d_xtime  = 0;
+   g_sw_seed_d_level  = 0.0;
+}
 
 // ثبت Hunter در لحظه‌ی «کراس»
 inline void Hunter_Down_TryMarkIfValid(const MqlRates &rates[], const int n,

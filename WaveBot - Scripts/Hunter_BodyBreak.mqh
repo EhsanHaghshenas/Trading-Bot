@@ -166,15 +166,28 @@ inline void HW_BB_UP_OnBar(const MqlRates &r, const MqlRates &rates[], const int
    if(g_bb_done_u) return;
 
    // arm only after a valid Hunter (we read seed time/level from SW_UP seed)
+   // HWBB فقط وقتی مجاز است که بذر Hunter متعلق به همین چرخه‌ی W2 و همین ext lq باشد.
+   if(!SWGate_UP_IsOpen())
+   {
+      g_bb_armed_u = false;
+      return;
+   }
+   if(!SW_UP_SeedActive())
+   {
+      g_bb_armed_u = false;
+      return;
+   }
+   if(SW_UP_SeedTime() < SWGate_UP_W2Time() || SW_UP_SeedTime() < g_bb_lq_time_u)
+   {
+      g_bb_armed_u = false;
+      return;
+   }
+
    if(!g_bb_armed_u)
    {
-      if(SW_UP_SeedActive() && SW_UP_SeedTime() >= g_bb_lq_time_u)
-      {
-         g_bb_armed_u      = true;
-         g_bb_level_u      = ExtLQ_Get();
-         g_bb_cross_time_u = SW_UP_SeedTime();
-      }
-      else return;
+      g_bb_armed_u      = true;
+      g_bb_level_u      = ExtLQ_Get();
+      g_bb_cross_time_u = SW_UP_SeedTime();
    }
 
    if(r.time < g_bb_cross_time_u) return;
@@ -239,15 +252,28 @@ inline void HW_BB_DOWN_OnBar(const MqlRates &r, const MqlRates &rates[], const i
    HW_BB_DOWN_ResetIfNewLQ();
    if(g_bb_done_d) return;
 
+   // HWBB فقط وقتی مجاز است که بذر Hunter متعلق به همین چرخه‌ی W2 و همین ext lq باشد.
+   if(!SWGate_DN_IsOpen())
+   {
+      g_bb_armed_d = false;
+      return;
+   }
+   if(!SW_DOWN_SeedActive())
+   {
+      g_bb_armed_d = false;
+      return;
+   }
+   if(SW_DOWN_SeedTime() < SWGate_DN_W2Time() || SW_DOWN_SeedTime() < g_bb_lq_time_d)
+   {
+      g_bb_armed_d = false;
+      return;
+   }
+
    if(!g_bb_armed_d)
    {
-      if(SW_DOWN_SeedActive() && SW_DOWN_SeedTime() >= g_bb_lq_time_d)
-      {
-         g_bb_armed_d      = true;
-         g_bb_level_d      = ExtLQ_Down_Get();
-         g_bb_cross_time_d = SW_DOWN_SeedTime();
-      }
-      else return;
+      g_bb_armed_d      = true;
+      g_bb_level_d      = ExtLQ_Down_Get();
+      g_bb_cross_time_d = SW_DOWN_SeedTime();
    }
 
    if(r.time < g_bb_cross_time_d) return;

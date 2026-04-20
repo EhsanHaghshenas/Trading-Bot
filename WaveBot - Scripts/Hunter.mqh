@@ -150,7 +150,13 @@ inline void SW_UP_ActivateSeed(const MqlRates &rates[], const int n,
 inline bool     SW_UP_SeedActive()      { return g_sw_seed_u_active; }
 inline double   SW_UP_Level()           { return g_sw_seed_u_level;  }
 inline datetime SW_UP_SeedTime()        { return g_sw_seed_u_xtime;  }
-inline void     SW_UP_ClearSeed()       { g_sw_seed_u_active=false;  }
+inline void     SW_UP_ClearSeed()
+{
+   g_sw_seed_u_active = false;
+   g_sw_seed_u_c1     = -1;
+   g_sw_seed_u_xtime  = 0;
+   g_sw_seed_u_level  = 0.0;
+}
 
 // تلاش برای نمایش Hunter فقط هنگام وقوع «کراس» و در صورت اعتبار
 inline void Hunter_TryMarkIfValid(const MqlRates &rates[], const int n,
