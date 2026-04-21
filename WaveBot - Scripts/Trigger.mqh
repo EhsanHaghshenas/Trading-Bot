@@ -6,7 +6,7 @@
 #include <WaveBot/WB15_SignalBridge.mqh>
 #include <WaveBot/TriggerSLTP.mqh>
 
-void TriggerStatement_OnNewTrigger();
+void TriggerStatement_OnNewTriggerAt(const datetime trigger_time);
 
 // ============================================================================
 // Trigger.mqh
@@ -34,8 +34,9 @@ void TriggerStatement_OnNewTrigger();
 // NOTE:
 //   This module runs in a hybrid mode.
 //   The existing Trigger_OnBarCandidate(...) hooks in API.mqh / API_Down.mqh
-//   are reused as a chronological feeder, and Trigger_OnTimer(...) also advances
-//   the worker-TF trigger state on closed candles so no live window is skipped.
+//   are reused as the synchronized feeder during the initial full M1 scan.
+//   After that first scan finishes, Trigger_OnTimer(...) keeps advancing the
+//   worker-TF trigger state on closed candles so no live window is skipped.
 // ============================================================================
 
 #define TRG_MAX_ACTIVE_SESSIONS  32
@@ -1112,7 +1113,7 @@ inline void __TRG_FireTrigger(const int       type_id,
                            level);
 
    __TRG_RestartAfterHit(rates, n, hit_idx);
-   TriggerStatement_OnNewTrigger();
+   TriggerStatement_OnNewTriggerAt(rates[hit_idx].time);
 }
 
 inline int __TRG_BullHandlePhase4Break(const MqlRates &rates[],

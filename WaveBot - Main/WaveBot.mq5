@@ -219,7 +219,11 @@ inline void __WB_EnsureLiveTriggerStatementFile()
                                   InpTriggerStatementRiskPercent,
                                   InpTriggerStatementFileTag);
 
-   TriggerStatement_LiveRefreshNow();
+   datetime initial_cutoff = stmt_start;
+   if(initial_cutoff <= 0)
+      initial_cutoff = (datetime)1;
+
+   TriggerStatement_LiveRefreshTo(initial_cutoff);
 }
 // ============================================================================
 // Minor session runner (Phase-1: Minor inside Major)
@@ -432,7 +436,15 @@ void OnTimer()
    // Major namespace (default world)
    Markers_SetNamespace("MAJ");
    __WB_ApplyHiddenVisualPolicies();
-   Trigger_OnTimer(InpSymbol);
+
+   // After the first full M1 scan is finished, the live trigger timer can
+   // advance on newly closed bars. During the initial historical scan we keep
+   // trigger -> trade evaluation fully synchronized with the normal wave scan.
+   if(g_once)
+   {
+      Trigger_OnTimer(InpSymbol);
+      return;
+   }
 
    // --- optional one-shot ShadowBreaker run (replacement for old OnStart)
    if(InpRunShadowBreakerOnce && !g_sb_ran)
@@ -440,8 +452,6 @@ void OnTimer()
       SB_RunOneShot();
       g_sb_ran = true;
    }
-
-   if(g_once) return;
 
    // MASTER (M15): start a fresh run for the M1 bridge (streamed signals)
    if(g_role == WBROLE_MASTER_M15)

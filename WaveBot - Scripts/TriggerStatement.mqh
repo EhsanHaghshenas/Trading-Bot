@@ -186,7 +186,7 @@ inline void TriggerStatement_LiveConfigure(const string          sym,
    g_trgstmt_live_file_tag        = file_tag;
 }
 
-inline bool TriggerStatement_LiveRefreshNow()
+inline bool TriggerStatement_LiveRefreshTo(const datetime scan_to)
 {
    if(!g_trgstmt_live_enabled)
       return false;
@@ -194,18 +194,40 @@ inline bool TriggerStatement_LiveRefreshNow()
    if(g_trgstmt_live_busy)
       return false;
 
+   datetime use_scan_to = scan_to;
+   if(use_scan_to <= 0)
+   {
+      if(g_trgstmt_live_scan_from > 0)
+         use_scan_to = g_trgstmt_live_scan_from;
+      else
+         use_scan_to = (datetime)1;
+   }
+
+   if(g_trgstmt_live_scan_from > 0 && use_scan_to < g_trgstmt_live_scan_from)
+      use_scan_to = g_trgstmt_live_scan_from;
+
    g_trgstmt_live_busy = true;
 
    bool ok = TriggerStatement_WriteTextReport(g_trgstmt_live_symbol,
                                               g_trgstmt_live_tf,
                                               g_trgstmt_live_scan_from,
-                                              TimeCurrent(),
+                                              use_scan_to,
                                               g_trgstmt_live_initial_capital,
                                               g_trgstmt_live_risk_percent,
                                               g_trgstmt_live_file_tag);
 
    g_trgstmt_live_busy = false;
    return ok;
+}
+
+inline bool TriggerStatement_LiveRefreshNow()
+{
+   return TriggerStatement_LiveRefreshTo(TimeCurrent());
+}
+
+inline void TriggerStatement_OnNewTriggerAt(const datetime trigger_time)
+{
+   TriggerStatement_LiveRefreshTo(trigger_time);
 }
 
 inline void TriggerStatement_OnNewTrigger()
@@ -3123,7 +3145,7 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "");
    __TRGSTM_WriteLine(handle, "USAGE NOTES");
    __TRGSTM_WriteLine(handle, "------------------------------------------------------------");
-   __TRGSTM_WriteLine(handle, "1) This statement first collects all valid TriggerSLTP triggers inside the scan window, then applies the execution model.");
+   __TRGSTM_WriteLine(handle, "1) This statement only evaluates triggers and state that already exist up to Scan To; in synchronized live updates, Scan To is the current trigger bar reached by the normal M1 scan.");
    __TRGSTM_WriteLine(handle, "2) Only one trade can be active at a time; all later valid triggers are ignored until that trade reaches WIN, LOSS, or remains OPEN at scan end.");
    __TRGSTM_WriteLine(handle, "3) The 4-loss protection counter belongs to the current aligned M1 trend cycle; if that cycle ends and a fresh same-direction cycle appears later, the counter restarts from zero.");
    __TRGSTM_WriteLine(handle, "4) After 4 consecutive executed losses inside the same aligned cycle, new entries are blocked until a fresh M15 signal on is received from the M15->worker bridge.");
