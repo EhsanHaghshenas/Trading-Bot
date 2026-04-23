@@ -1,3 +1,4 @@
+
 #ifndef WAVEBOT_TRIGGER_MQH
 #define WAVEBOT_TRIGGER_MQH
 
@@ -11,32 +12,24 @@ void TriggerStatement_OnNewTriggerAt(const datetime trigger_time);
 // ============================================================================
 // Trigger.mqh
 //
-// Independent trigger engine driven only by the M15 -> worker bridge and the
-// raw worker-TF candles.
+// Shared worker-TF trigger coordinator driven only by the imported M15->M1
+// bridge and the raw worker candles.
 //
-// Current rules implemented:
-//   - Trigger starts from the worker candle that receives M15 signal on.
-//   - Trigger stops immediately on the worker candle that receives M15 signal off.
-//   - The engine is completely independent from the normal wave/candle scan.
-//   - Every worker candle is processed, even if it is an inside bar or ignored
-//     by the normal engine.
-//   - The engine works step-by-step with a single 5-phase FSM per active window.
-//   - Type-1 and type-2 triggers are both detected inside the same active window.
-//   - Bullish side uses an initial floor (L). If that floor breaks, F is drawn
-//     on the breaker candle and the whole trigger FSM is restarted from there.
-//   - Bearish side is the exact mirror and uses an initial roof (H).
-//   - Candle labels:
-//        L / H = initial boundary candle
-//        1..5  = phase membership of that candle
-//        F     = reset candle that breaks the initial boundary
-//        T     = final trigger candle
+// Updated architecture:
+//   - Trigger type-1 and trigger type-2 now have completely separate search
+//     engines and completely separate internal FSM states.
+//   - Both engines run on every eligible worker candle inside the same active
+//     imported M15 signal window.
+//   - Both engines are visualized independently.
+//   - Trigger -> trade conversion remains shared and type-agnostic via the
+//     TriggerSLTP / TriggerStatement execution layers.
+//   - A completed trigger on one engine does not prevent the other engine from
+//     being evaluated on the same candle; global restart is applied only after
+//     both engines have finished processing that candle.
 //
-// NOTE:
-//   This module runs in a hybrid mode.
-//   The existing Trigger_OnBarCandidate(...) hooks in API.mqh / API_Down.mqh
-//   are reused as the synchronized feeder during the initial full M1 scan.
-//   After that first scan finishes, Trigger_OnTimer(...) keeps advancing the
-//   worker-TF trigger state on closed candles so no live window is skipped.
+// Visual conventions:
+//   - Type-1 => yellow dashed line / yellow T1 label.
+//   - Type-2 => blue dashed line / blue T2 label.
 // ============================================================================
 
 #define TRG_MAX_ACTIVE_SESSIONS  32
@@ -48,10 +41,13 @@ void TriggerStatement_OnNewTriggerAt(const datetime trigger_time);
 #define TRG_PHASE_4    4
 #define TRG_PHASE_5    5
 
+#define TRG_ENGINE_TYPE1 1
+#define TRG_ENGINE_TYPE2 2
+
 struct TriggerEvent
 {
-   datetime  t;         // raw bridge time
-   datetime  bar_time;  // effective worker-TF bar open time
+   datetime  t;
+   datetime  bar_time;
    Direction dir;
    int       kind;
    int       ns;
@@ -69,13 +65,11 @@ struct TriggerStartSession
    int       seq;
 };
 
-struct TriggerCore
+struct TriggerWindowCore
 {
-   // Bridge snapshot
    double        run_id;
    int           bridge_seq;
 
-   // Active H4-triggered window on worker TF
    bool          active;
    int           active_start_seq;
    int           active_start_kind;
@@ -84,17 +78,22 @@ struct TriggerCore
    datetime      active_start_time;
    datetime      active_start_bar_time;
 
-   // Mother boundary
+   datetime      last_processed_time;
+   int           last_processed_idx;
+
+   int           up_counter;
+   int           dn_counter;
+};
+
+struct TriggerEngineState
+{
    bool          mother_set;
-   double        mother_level;      // bullish: initial low | bearish: initial high
+   double        mother_level;
    int           mother_idx;
    datetime      mother_time;
 
-   // Five-phase FSM
    int           phase;
 
-   // Bullish: phase1 high, phase2 low, phase3 high, phase4 low
-   // Bearish: phase1 low,  phase2 high, phase3 low,  phase4 high
    double        phase1_level;
    int           phase1_idx;
 
@@ -107,29 +106,20 @@ struct TriggerCore
    double        phase4_level;
    int           phase4_idx;
 
-   // Current in-progress phase-2 build
-   // bullish: latest pullback low candidate before a new phase-3 is confirmed
-   // bearish: latest pullback high candidate before a new phase-3 is confirmed
    bool          phase2_build_active;
    double        phase2_build_level;
    int           phase2_build_idx;
 
-   // Type discrimination
-   bool          phase3_break1_seen;   // type-2 path if true
-   bool          phase4_break2_seen;   // phase-4 already broke phase-2 reference?
-
-   // Dedup / rewind shield
-   datetime      last_processed_time;
-   int           last_processed_idx;
-
-   // Marker counters
-   int           up_counter;
-   int           dn_counter;
+   bool          phase4_break2_seen;
 };
 
-static TriggerCore  g_trigger_ctx;
-static TriggerEvent g_trigger_events[];
-static string       g_trigger_symbol = "";
+static TriggerWindowCore  g_trigger_core;
+static TriggerEngineState g_trigger_type1;
+static TriggerEngineState g_trigger_type2;
+static TriggerEvent       g_trigger_events[];
+static string             g_trigger_symbol = "";
+static int                g_trigger_pending_restart_idx = -1;
+static datetime           g_trigger_pending_refresh_time = 0;
 
 // ----------------------------------------------------------------------------
 // Worker / bridge helpers
@@ -181,292 +171,12 @@ inline bool __TRG_IsBearCandle(const MqlRates &bar)
    return (bar.close < bar.open);
 }
 
-inline bool __TRG_IsInsideBar(const MqlRates &bar,
-                              const MqlRates &ref_bar)
-{
-   const double eps = __TRG_Eps();
-   return (bar.high <= (ref_bar.high + eps) &&
-           bar.low  >= (ref_bar.low  - eps));
-}
-
-inline void __TRG_GetBullTriggerTarget(int    &type_id,
-                                       double &target_level,
-                                       int    &target_idx)
-{
-   type_id      = 0;
-   target_level = 0.0;
-   target_idx   = -1;
-
-   if(g_trigger_ctx.phase3_idx < 0)
-      return;
-
-   if(g_trigger_ctx.phase3_break1_seen)
-   {
-      type_id      = 2;
-      target_level = g_trigger_ctx.phase3_level;
-      target_idx   = g_trigger_ctx.phase3_idx;
-      return;
-   }
-
-   if(!g_trigger_ctx.phase4_break2_seen)
-      return;
-   if(g_trigger_ctx.phase1_idx < 0)
-      return;
-
-   type_id      = 1;
-   target_level = g_trigger_ctx.phase1_level;
-   target_idx   = g_trigger_ctx.phase1_idx;
-}
-
-
-inline void __TRG_GetBearTriggerTarget(int    &type_id,
-                                       double &target_level,
-                                       int    &target_idx)
-{
-   type_id      = 0;
-   target_level = 0.0;
-   target_idx   = -1;
-
-   if(g_trigger_ctx.phase3_idx < 0)
-      return;
-
-   if(g_trigger_ctx.phase3_break1_seen)
-   {
-      type_id      = 2;
-      target_level = g_trigger_ctx.phase3_level;
-      target_idx   = g_trigger_ctx.phase3_idx;
-      return;
-   }
-
-   if(!g_trigger_ctx.phase4_break2_seen)
-      return;
-   if(g_trigger_ctx.phase1_idx < 0)
-      return;
-
-   type_id      = 1;
-   target_level = g_trigger_ctx.phase1_level;
-   target_idx   = g_trigger_ctx.phase1_idx;
-}
-
-
-inline bool __TRG_HasConfirmedPhase3()
-{
-   return (g_trigger_ctx.phase3_idx >= 0);
-}
-
-inline void __TRG_ClearPhase2Build()
-{
-   g_trigger_ctx.phase2_build_active = false;
-   g_trigger_ctx.phase2_build_level  = 0.0;
-   g_trigger_ctx.phase2_build_idx    = -1;
-}
-
-inline int __TRG_BullPhase3StartRefIdx()
-{
-   if(g_trigger_ctx.phase2_build_active && g_trigger_ctx.phase2_build_idx >= 0)
-      return g_trigger_ctx.phase2_build_idx;
-
-   return g_trigger_ctx.phase2_idx;
-}
-
-inline int __TRG_BearPhase3StartRefIdx()
-{
-   if(g_trigger_ctx.phase2_build_active && g_trigger_ctx.phase2_build_idx >= 0)
-      return g_trigger_ctx.phase2_build_idx;
-
-   return g_trigger_ctx.phase2_idx;
-}
-
-inline bool __TRG_BullCanStartType1Phase3(const MqlRates &rates[],
-                                          const int       n,
-                                          const int       bar_idx)
-{
-   if(n <= 0 || bar_idx < 0 || bar_idx >= n)
-      return false;
-
-   int ref_idx = __TRG_BullPhase3StartRefIdx();
-   if(ref_idx < 0 || ref_idx >= n)
-      return false;
-
-   if(__TRG_BreakAboveStrict(rates[bar_idx].high, g_trigger_ctx.phase1_level))
-      return false;
-
-   return __TRG_BreakAboveStrict(rates[bar_idx].high, rates[ref_idx].high);
-}
-
-inline bool __TRG_BearCanStartType1Phase3(const MqlRates &rates[],
-                                          const int       n,
-                                          const int       bar_idx)
-{
-   if(n <= 0 || bar_idx < 0 || bar_idx >= n)
-      return false;
-
-   int ref_idx = __TRG_BearPhase3StartRefIdx();
-   if(ref_idx < 0 || ref_idx >= n)
-      return false;
-
-   if(__TRG_BreakBelowStrict(rates[bar_idx].low, g_trigger_ctx.phase1_level))
-      return false;
-
-   return __TRG_BreakBelowStrict(rates[bar_idx].low, rates[ref_idx].low);
-}
-
-
-inline void __TRG_BeginBullPhase2Build(const int bar_idx,
-                                       const MqlRates &bar,
-                                       const bool sync_confirmed_phase2)
-{
-   g_trigger_ctx.phase = TRG_PHASE_2;
-   g_trigger_ctx.phase2_build_active = true;
-   g_trigger_ctx.phase2_build_level  = bar.low;
-   g_trigger_ctx.phase2_build_idx    = bar_idx;
-
-   if(sync_confirmed_phase2)
-   {
-      g_trigger_ctx.phase2_level = bar.low;
-      g_trigger_ctx.phase2_idx   = bar_idx;
-   }
-}
-
-inline void __TRG_BeginBearPhase2Build(const int bar_idx,
-                                       const MqlRates &bar,
-                                       const bool sync_confirmed_phase2)
-{
-   g_trigger_ctx.phase = TRG_PHASE_2;
-   g_trigger_ctx.phase2_build_active = true;
-   g_trigger_ctx.phase2_build_level  = bar.high;
-   g_trigger_ctx.phase2_build_idx    = bar_idx;
-
-   if(sync_confirmed_phase2)
-   {
-      g_trigger_ctx.phase2_level = bar.high;
-      g_trigger_ctx.phase2_idx   = bar_idx;
-   }
-}
-
-inline void __TRG_UpdateBullPhase2Build(const int bar_idx,
-                                        const MqlRates &bar,
-                                        const bool sync_confirmed_phase2)
-{
-   if(!g_trigger_ctx.phase2_build_active)
-   {
-      __TRG_BeginBullPhase2Build(bar_idx, bar, sync_confirmed_phase2);
-      return;
-   }
-
-   if(bar.low < g_trigger_ctx.phase2_build_level)
-   {
-      g_trigger_ctx.phase2_build_level = bar.low;
-      g_trigger_ctx.phase2_build_idx   = bar_idx;
-
-      if(sync_confirmed_phase2)
-      {
-         g_trigger_ctx.phase2_level = bar.low;
-         g_trigger_ctx.phase2_idx   = bar_idx;
-      }
-   }
-}
-
-inline void __TRG_UpdateBearPhase2Build(const int bar_idx,
-                                        const MqlRates &bar,
-                                        const bool sync_confirmed_phase2)
-{
-   if(!g_trigger_ctx.phase2_build_active)
-   {
-      __TRG_BeginBearPhase2Build(bar_idx, bar, sync_confirmed_phase2);
-      return;
-   }
-
-   if(bar.high > g_trigger_ctx.phase2_build_level)
-   {
-      g_trigger_ctx.phase2_build_level = bar.high;
-      g_trigger_ctx.phase2_build_idx   = bar_idx;
-
-      if(sync_confirmed_phase2)
-      {
-         g_trigger_ctx.phase2_level = bar.high;
-         g_trigger_ctx.phase2_idx   = bar_idx;
-      }
-   }
-}
-
-inline void __TRG_CommitPhase2Build()
-{
-   if(!g_trigger_ctx.phase2_build_active)
-      return;
-
-   g_trigger_ctx.phase2_level = g_trigger_ctx.phase2_build_level;
-   g_trigger_ctx.phase2_idx   = g_trigger_ctx.phase2_build_idx;
-}
-
-inline void __TRG_SetBullPhase2Latest(const int bar_idx,
-                                      const MqlRates &bar)
-{
-   g_trigger_ctx.phase = TRG_PHASE_2;
-   __TRG_UpdateBullPhase2Build(bar_idx, bar, true);
-}
-
-inline void __TRG_SetBearPhase2Latest(const int bar_idx,
-                                      const MqlRates &bar)
-{
-   g_trigger_ctx.phase = TRG_PHASE_2;
-   __TRG_UpdateBearPhase2Build(bar_idx, bar, true);
-}
-
-inline void __TRG_SetBullPhase2Candidate(const int bar_idx,
-                                         const MqlRates &bar)
-{
-   g_trigger_ctx.phase = TRG_PHASE_2;
-   __TRG_UpdateBullPhase2Build(bar_idx, bar, false);
-}
-
-inline void __TRG_SetBearPhase2Candidate(const int bar_idx,
-                                         const MqlRates &bar)
-{
-   g_trigger_ctx.phase = TRG_PHASE_2;
-   __TRG_UpdateBearPhase2Build(bar_idx, bar, false);
-}
-
-inline void __TRG_SetBullPhase3Latest(const int        bar_idx,
-                                      const MqlRates &bar,
-                                      const bool       broke_phase1)
-{
-   if(g_trigger_ctx.phase2_build_active)
-      __TRG_CommitPhase2Build();
-
-   g_trigger_ctx.phase = TRG_PHASE_3;
-   g_trigger_ctx.phase3_level = bar.high;
-   g_trigger_ctx.phase3_idx   = bar_idx;
-
-   g_trigger_ctx.phase3_break1_seen = broke_phase1;
-   g_trigger_ctx.phase4_break2_seen = false;
-   __TRG_ClearPhase2Build();
-}
-
-
-inline void __TRG_SetBearPhase3Latest(const int        bar_idx,
-                                      const MqlRates &bar,
-                                      const bool       broke_phase1)
-{
-   if(g_trigger_ctx.phase2_build_active)
-      __TRG_CommitPhase2Build();
-
-   g_trigger_ctx.phase = TRG_PHASE_3;
-   g_trigger_ctx.phase3_level = bar.low;
-   g_trigger_ctx.phase3_idx   = bar_idx;
-
-   g_trigger_ctx.phase3_break1_seen = broke_phase1;
-   g_trigger_ctx.phase4_break2_seen = false;
-   __TRG_ClearPhase2Build();
-}
-
-
-inline bool __TRG_BullSameBarType2TriggerAllowed(const MqlRates &bar)
+inline bool __TRG_BullSameBarTriggerAllowed(const MqlRates &bar)
 {
    return __TRG_IsBullCandle(bar);
 }
 
-inline bool __TRG_BearSameBarType2TriggerAllowed(const MqlRates &bar)
+inline bool __TRG_BearSameBarTriggerAllowed(const MqlRates &bar)
 {
    return __TRG_IsBearCandle(bar);
 }
@@ -474,7 +184,8 @@ inline bool __TRG_BearSameBarType2TriggerAllowed(const MqlRates &bar)
 inline datetime __TRG_WorkerBarOpen(const datetime t)
 {
    int sec = PeriodSeconds((ENUM_TIMEFRAMES)Period());
-   if(sec <= 0) sec = 60;
+   if(sec <= 0)
+      sec = 60;
 
    long ts = (long)t;
    long ss = (long)sec;
@@ -482,60 +193,289 @@ inline datetime __TRG_WorkerBarOpen(const datetime t)
 }
 
 // ----------------------------------------------------------------------------
-// Reset helpers
+// Engine helpers
 // ----------------------------------------------------------------------------
-inline void __TRG_ClearFSM()
+inline void __TRG_ClearPhase2Build(TriggerEngineState &state)
 {
-   g_trigger_ctx.mother_set        = false;
-   g_trigger_ctx.mother_level      = 0.0;
-   g_trigger_ctx.mother_idx        = -1;
-   g_trigger_ctx.mother_time       = 0;
-
-   g_trigger_ctx.phase             = TRG_PHASE_NONE;
-
-   g_trigger_ctx.phase1_level      = 0.0;
-   g_trigger_ctx.phase1_idx        = -1;
-   g_trigger_ctx.phase2_level      = 0.0;
-   g_trigger_ctx.phase2_idx        = -1;
-   g_trigger_ctx.phase3_level      = 0.0;
-   g_trigger_ctx.phase3_idx        = -1;
-   g_trigger_ctx.phase4_level      = 0.0;
-   g_trigger_ctx.phase4_idx        = -1;
-
-   g_trigger_ctx.phase3_break1_seen= false;
-   g_trigger_ctx.phase4_break2_seen= false;
-
-   __TRG_ClearPhase2Build();
-
-   g_trigger_ctx.last_processed_time = 0;
-   g_trigger_ctx.last_processed_idx  = -1;
+   state.phase2_build_active = false;
+   state.phase2_build_level  = 0.0;
+   state.phase2_build_idx    = -1;
 }
 
+inline void __TRG_ClearLowerPhases(TriggerEngineState &state)
+{
+   state.phase2_level       = 0.0;
+   state.phase2_idx         = -1;
+   state.phase3_level       = 0.0;
+   state.phase3_idx         = -1;
+   state.phase4_level       = 0.0;
+   state.phase4_idx         = -1;
+   state.phase4_break2_seen = false;
+   __TRG_ClearPhase2Build(state);
+}
+
+inline void __TRG_ClearEngine(TriggerEngineState &state)
+{
+   state.mother_set        = false;
+   state.mother_level      = 0.0;
+   state.mother_idx        = -1;
+   state.mother_time       = 0;
+   state.phase             = TRG_PHASE_NONE;
+   state.phase1_level      = 0.0;
+   state.phase1_idx        = -1;
+   __TRG_ClearLowerPhases(state);
+}
+
+inline bool __TRG_EngineHasPhase3(const TriggerEngineState &state)
+{
+   return (state.phase3_idx >= 0);
+}
+
+inline int __TRG_BullPhase3StartRefIdx(const TriggerEngineState &state)
+{
+   if(state.phase2_build_active && state.phase2_build_idx >= 0)
+      return state.phase2_build_idx;
+
+   return state.phase2_idx;
+}
+
+inline int __TRG_BearPhase3StartRefIdx(const TriggerEngineState &state)
+{
+   if(state.phase2_build_active && state.phase2_build_idx >= 0)
+      return state.phase2_build_idx;
+
+   return state.phase2_idx;
+}
+
+inline bool __TRG_BullCanStartType1Phase3(const TriggerEngineState &state,
+                                          const MqlRates          &rates[],
+                                          const int                n,
+                                          const int                bar_idx)
+{
+   if(n <= 0 || bar_idx < 0 || bar_idx >= n)
+      return false;
+
+   int ref_idx = __TRG_BullPhase3StartRefIdx(state);
+   if(ref_idx < 0 || ref_idx >= n)
+      return false;
+
+   if(__TRG_BreakAboveStrict(rates[bar_idx].high, state.phase1_level))
+      return false;
+
+   return __TRG_BreakAboveStrict(rates[bar_idx].high, rates[ref_idx].high);
+}
+
+inline bool __TRG_BearCanStartType1Phase3(const TriggerEngineState &state,
+                                          const MqlRates          &rates[],
+                                          const int                n,
+                                          const int                bar_idx)
+{
+   if(n <= 0 || bar_idx < 0 || bar_idx >= n)
+      return false;
+
+   int ref_idx = __TRG_BearPhase3StartRefIdx(state);
+   if(ref_idx < 0 || ref_idx >= n)
+      return false;
+
+   if(__TRG_BreakBelowStrict(rates[bar_idx].low, state.phase1_level))
+      return false;
+
+   return __TRG_BreakBelowStrict(rates[bar_idx].low, rates[ref_idx].low);
+}
+
+inline void __TRG_BeginBullPhase2Build(TriggerEngineState &state,
+                                       const int           bar_idx,
+                                       const MqlRates     &bar,
+                                       const bool          sync_confirmed_phase2)
+{
+   state.phase               = TRG_PHASE_2;
+   state.phase2_build_active = true;
+   state.phase2_build_level  = bar.low;
+   state.phase2_build_idx    = bar_idx;
+
+   if(sync_confirmed_phase2)
+   {
+      state.phase2_level = bar.low;
+      state.phase2_idx   = bar_idx;
+   }
+}
+
+inline void __TRG_BeginBearPhase2Build(TriggerEngineState &state,
+                                       const int           bar_idx,
+                                       const MqlRates     &bar,
+                                       const bool          sync_confirmed_phase2)
+{
+   state.phase               = TRG_PHASE_2;
+   state.phase2_build_active = true;
+   state.phase2_build_level  = bar.high;
+   state.phase2_build_idx    = bar_idx;
+
+   if(sync_confirmed_phase2)
+   {
+      state.phase2_level = bar.high;
+      state.phase2_idx   = bar_idx;
+   }
+}
+
+inline void __TRG_UpdateBullPhase2Build(TriggerEngineState &state,
+                                        const int           bar_idx,
+                                        const MqlRates     &bar,
+                                        const bool          sync_confirmed_phase2)
+{
+   if(!state.phase2_build_active)
+   {
+      __TRG_BeginBullPhase2Build(state, bar_idx, bar, sync_confirmed_phase2);
+      return;
+   }
+
+   if(bar.low < state.phase2_build_level)
+   {
+      state.phase2_build_level = bar.low;
+      state.phase2_build_idx   = bar_idx;
+
+      if(sync_confirmed_phase2)
+      {
+         state.phase2_level = bar.low;
+         state.phase2_idx   = bar_idx;
+      }
+   }
+}
+
+inline void __TRG_UpdateBearPhase2Build(TriggerEngineState &state,
+                                        const int           bar_idx,
+                                        const MqlRates     &bar,
+                                        const bool          sync_confirmed_phase2)
+{
+   if(!state.phase2_build_active)
+   {
+      __TRG_BeginBearPhase2Build(state, bar_idx, bar, sync_confirmed_phase2);
+      return;
+   }
+
+   if(bar.high > state.phase2_build_level)
+   {
+      state.phase2_build_level = bar.high;
+      state.phase2_build_idx   = bar_idx;
+
+      if(sync_confirmed_phase2)
+      {
+         state.phase2_level = bar.high;
+         state.phase2_idx   = bar_idx;
+      }
+   }
+}
+
+inline void __TRG_CommitPhase2Build(TriggerEngineState &state)
+{
+   if(!state.phase2_build_active)
+      return;
+
+   state.phase2_level = state.phase2_build_level;
+   state.phase2_idx   = state.phase2_build_idx;
+}
+
+inline void __TRG_SetBullPhase2Latest(TriggerEngineState &state,
+                                      const int           bar_idx,
+                                      const MqlRates     &bar)
+{
+   state.phase = TRG_PHASE_2;
+   __TRG_UpdateBullPhase2Build(state, bar_idx, bar, true);
+}
+
+inline void __TRG_SetBearPhase2Latest(TriggerEngineState &state,
+                                      const int           bar_idx,
+                                      const MqlRates     &bar)
+{
+   state.phase = TRG_PHASE_2;
+   __TRG_UpdateBearPhase2Build(state, bar_idx, bar, true);
+}
+
+inline void __TRG_SetBullPhase2Candidate(TriggerEngineState &state,
+                                         const int           bar_idx,
+                                         const MqlRates     &bar)
+{
+   state.phase = TRG_PHASE_2;
+   __TRG_UpdateBullPhase2Build(state, bar_idx, bar, false);
+}
+
+inline void __TRG_SetBearPhase2Candidate(TriggerEngineState &state,
+                                         const int           bar_idx,
+                                         const MqlRates     &bar)
+{
+   state.phase = TRG_PHASE_2;
+   __TRG_UpdateBearPhase2Build(state, bar_idx, bar, false);
+}
+
+inline void __TRG_SetBullPhase3Latest(TriggerEngineState &state,
+                                      const int           bar_idx,
+                                      const MqlRates     &bar)
+{
+   if(state.phase2_build_active)
+      __TRG_CommitPhase2Build(state);
+
+   state.phase             = TRG_PHASE_3;
+   state.phase3_level      = bar.high;
+   state.phase3_idx        = bar_idx;
+   state.phase4_break2_seen= false;
+   state.phase4_level      = 0.0;
+   state.phase4_idx        = -1;
+   __TRG_ClearPhase2Build(state);
+}
+
+inline void __TRG_SetBearPhase3Latest(TriggerEngineState &state,
+                                      const int           bar_idx,
+                                      const MqlRates     &bar)
+{
+   if(state.phase2_build_active)
+      __TRG_CommitPhase2Build(state);
+
+   state.phase             = TRG_PHASE_3;
+   state.phase3_level      = bar.low;
+   state.phase3_idx        = bar_idx;
+   state.phase4_break2_seen= false;
+   state.phase4_level      = 0.0;
+   state.phase4_idx        = -1;
+   __TRG_ClearPhase2Build(state);
+}
+
+// ----------------------------------------------------------------------------
+// Reset helpers
+// ----------------------------------------------------------------------------
 inline void __TRG_ResetWindowState()
 {
-   __TRG_ClearFSM();
+   __TRG_ClearEngine(g_trigger_type1);
+   __TRG_ClearEngine(g_trigger_type2);
+   g_trigger_core.last_processed_time = 0;
+   g_trigger_core.last_processed_idx  = -1;
+   g_trigger_pending_restart_idx      = -1;
+   g_trigger_pending_refresh_time     = 0;
 }
 
 inline void Trigger_ResetGlobals()
 {
-   g_trigger_ctx.run_id                = 0.0;
-   g_trigger_ctx.bridge_seq            = 0;
+   g_trigger_core.run_id                = 0.0;
+   g_trigger_core.bridge_seq            = 0;
 
-   g_trigger_ctx.active                = false;
-   g_trigger_ctx.active_start_seq      = -1;
-   g_trigger_ctx.active_start_kind     = 0;
-   g_trigger_ctx.active_start_ns       = WB15_NS_NONE;
-   g_trigger_ctx.active_dir            = DIR_UP;
-   g_trigger_ctx.active_start_time     = 0;
-   g_trigger_ctx.active_start_bar_time = 0;
+   g_trigger_core.active                = false;
+   g_trigger_core.active_start_seq      = -1;
+   g_trigger_core.active_start_kind     = 0;
+   g_trigger_core.active_start_ns       = WB15_NS_NONE;
+   g_trigger_core.active_dir            = DIR_UP;
+   g_trigger_core.active_start_time     = 0;
+   g_trigger_core.active_start_bar_time = 0;
 
-   g_trigger_ctx.up_counter            = 0;
-   g_trigger_ctx.dn_counter            = 0;
+   g_trigger_core.last_processed_time   = 0;
+   g_trigger_core.last_processed_idx    = -1;
+   g_trigger_core.up_counter            = 0;
+   g_trigger_core.dn_counter            = 0;
 
-   g_trigger_symbol                    = "";
+   g_trigger_symbol                     = "";
 
-   __TRG_ClearFSM();
+   __TRG_ClearEngine(g_trigger_type1);
+   __TRG_ClearEngine(g_trigger_type2);
    ArrayResize(g_trigger_events, 0);
+   g_trigger_pending_restart_idx  = -1;
+   g_trigger_pending_refresh_time = 0;
    TriggerSLTP_ResetGlobals();
 }
 
@@ -579,7 +519,8 @@ inline int __TRG_CompareEvent(const TriggerEvent &a,
 inline void __TRG_SortBridgeEvents()
 {
    int n = ArraySize(g_trigger_events);
-   if(n <= 1) return;
+   if(n <= 1)
+      return;
 
    for(int i=0; i<n-1; ++i)
    {
@@ -592,7 +533,7 @@ inline void __TRG_SortBridgeEvents()
 
       if(best != i)
       {
-         TriggerEvent tmp  = g_trigger_events[i];
+         TriggerEvent tmp = g_trigger_events[i];
          g_trigger_events[i] = g_trigger_events[best];
          g_trigger_events[best] = tmp;
       }
@@ -610,30 +551,14 @@ inline void __TRG_ClearSession(TriggerStartSession &s)
    s.seq      = -1;
 }
 
-inline bool __TRG_ShouldAutoStopOnNewStart(const TriggerStartSession &sess,
-                                           const int new_kind,
-                                           const int new_ns)
-{
-   // Simplified lifecycle: a fresh M15 signal on replaces the previous window.
-   // No synthetic stop is generated on start.
-   if(!sess.active) return false;
-   if(new_kind <= 0) return false;
-   if(new_ns < 0) return false;
-   return false;
-}
-
 inline bool __TRG_SessionMatchesStop(const TriggerStartSession &sess,
-                                     const int stop_kind,
-                                     const int stop_ns,
-                                     const Direction stop_dir)
+                                     const int                  stop_kind,
+                                     const int                  stop_ns,
+                                     const Direction            stop_dir)
 {
    if(!sess.active) return false;
    if(!__TRG_IsStopKind(stop_kind)) return false;
 
-   // Simplified rule:
-   //   any M15 signal off closes the active trigger window,
-   //   provided that its direction is the opposite of the active signal direction.
-   // Namespace and signal kind no longer affect stop matching.
    if(stop_dir != __WB15_Opposite(sess.dir))
       return false;
 
@@ -658,16 +583,16 @@ inline bool __TRG_RebuildBridgeEvents(const string sym)
       return false;
 
    bool full_reset = false;
-   if(g_trigger_ctx.run_id != run_id)
+   if(g_trigger_core.run_id != run_id)
    {
-      g_trigger_ctx.run_id = run_id;
+      g_trigger_core.run_id = run_id;
       full_reset = true;
    }
 
-   if(!full_reset && g_trigger_ctx.bridge_seq == seq)
+   if(!full_reset && g_trigger_core.bridge_seq == seq)
       return true;
 
-   g_trigger_ctx.bridge_seq = seq;
+   g_trigger_core.bridge_seq = seq;
    ArrayResize(g_trigger_events, 0);
 
    for(int i=1; i<=seq; ++i)
@@ -702,13 +627,13 @@ inline bool __TRG_RebuildBridgeEvents(const string sym)
 
    if(full_reset)
    {
-      g_trigger_ctx.active                = false;
-      g_trigger_ctx.active_start_seq      = -1;
-      g_trigger_ctx.active_start_kind     = 0;
-      g_trigger_ctx.active_start_ns       = WB15_NS_NONE;
-      g_trigger_ctx.active_dir            = DIR_UP;
-      g_trigger_ctx.active_start_time     = 0;
-      g_trigger_ctx.active_start_bar_time = 0;
+      g_trigger_core.active                = false;
+      g_trigger_core.active_start_seq      = -1;
+      g_trigger_core.active_start_kind     = 0;
+      g_trigger_core.active_start_ns       = WB15_NS_NONE;
+      g_trigger_core.active_dir            = DIR_UP;
+      g_trigger_core.active_start_time     = 0;
+      g_trigger_core.active_start_bar_time = 0;
       __TRG_ResetWindowState();
    }
 
@@ -732,9 +657,6 @@ inline void __TRG_ApplyWindowAt(const datetime bar_time)
 
       if(__TRG_IsStartKind(evt.kind))
       {
-         // Simplified lifecycle:
-         // every new M15 signal on replaces the previously active window,
-         // regardless of type or namespace.
          for(int s=0; s<session_count; ++s)
             sessions[s].active = false;
 
@@ -787,21 +709,21 @@ inline void __TRG_ApplyWindowAt(const datetime bar_time)
    }
 
    bool changed = false;
-   if(new_active     != g_trigger_ctx.active) changed = true;
-   if(new_start_seq  != g_trigger_ctx.active_start_seq) changed = true;
-   if(new_start_kind != g_trigger_ctx.active_start_kind) changed = true;
-   if(new_start_ns   != g_trigger_ctx.active_start_ns) changed = true;
-   if(new_dir        != g_trigger_ctx.active_dir) changed = true;
-   if(new_start_time != g_trigger_ctx.active_start_time) changed = true;
-   if(new_start_bar  != g_trigger_ctx.active_start_bar_time) changed = true;
+   if(new_active     != g_trigger_core.active) changed = true;
+   if(new_start_seq  != g_trigger_core.active_start_seq) changed = true;
+   if(new_start_kind != g_trigger_core.active_start_kind) changed = true;
+   if(new_start_ns   != g_trigger_core.active_start_ns) changed = true;
+   if(new_dir        != g_trigger_core.active_dir) changed = true;
+   if(new_start_time != g_trigger_core.active_start_time) changed = true;
+   if(new_start_bar  != g_trigger_core.active_start_bar_time) changed = true;
 
-   g_trigger_ctx.active                = new_active;
-   g_trigger_ctx.active_start_seq      = new_start_seq;
-   g_trigger_ctx.active_start_kind     = new_start_kind;
-   g_trigger_ctx.active_start_ns       = new_start_ns;
-   g_trigger_ctx.active_dir            = new_dir;
-   g_trigger_ctx.active_start_time     = new_start_time;
-   g_trigger_ctx.active_start_bar_time = new_start_bar;
+   g_trigger_core.active                = new_active;
+   g_trigger_core.active_start_seq      = new_start_seq;
+   g_trigger_core.active_start_kind     = new_start_kind;
+   g_trigger_core.active_start_ns       = new_start_ns;
+   g_trigger_core.active_dir            = new_dir;
+   g_trigger_core.active_start_time     = new_start_time;
+   g_trigger_core.active_start_bar_time = new_start_bar;
 
    if(changed)
       __TRG_ResetWindowState();
@@ -812,46 +734,93 @@ inline void __TRG_ApplyWindowAt(const datetime bar_time)
 // ----------------------------------------------------------------------------
 inline string __TRG_RunTag()
 {
-   return IntegerToString((int)g_trigger_ctx.run_id);
+   return IntegerToString((int)g_trigger_core.run_id);
 }
 
 inline string __TRG_WindowTag()
 {
-   return IntegerToString(g_trigger_ctx.active_start_seq);
+   return IntegerToString(g_trigger_core.active_start_seq);
+}
+
+inline string __TRG_EngineTag(const int engine_type)
+{
+   if(engine_type == TRG_ENGINE_TYPE2)
+      return "T2";
+   return "T1";
+}
+
+inline color __TRG_EngineColor(const int engine_type)
+{
+   if(engine_type == TRG_ENGINE_TYPE2)
+      return clrDodgerBlue;
+   return clrYellow;
+}
+
+inline string __TRG_BoundaryText(const int engine_type)
+{
+   string stem = (g_trigger_core.active_dir == DIR_UP ? "L" : "H");
+   if(engine_type == TRG_ENGINE_TYPE2)
+      return (stem + "2");
+   return (stem + "1");
+}
+
+inline string __TRG_ResetText(const int engine_type)
+{
+   if(engine_type == TRG_ENGINE_TYPE2)
+      return "F2";
+   return "F1";
+}
+
+inline string __TRG_HitText(const int engine_type)
+{
+   if(engine_type == TRG_ENGINE_TYPE2)
+      return "T2";
+   return "T1";
 }
 
 inline double __TRG_LabelPad(const MqlRates &bar)
 {
    double span = bar.high - bar.low;
-   if(span <= 0.0) span = 10.0 * _Point;
+   if(span <= 0.0)
+      span = 10.0 * _Point;
 
    double pad = span * 0.28;
-   if(pad < 4.0 * _Point) pad = 4.0 * _Point;
+   if(pad < 4.0 * _Point)
+      pad = 4.0 * _Point;
    return pad;
 }
 
-inline double __TRG_PhaseLabelY(const MqlRates &bar)
+inline double __TRG_PhaseLabelY(const int engine_type,
+                                const MqlRates &bar)
 {
    double pad = __TRG_LabelPad(bar);
-   if(g_trigger_ctx.active_dir == DIR_UP)
-      return (bar.high + pad);
-   return (bar.low - pad);
+   double mult = (engine_type == TRG_ENGINE_TYPE2 ? 2.0 : 1.0);
+
+   if(g_trigger_core.active_dir == DIR_UP)
+      return (bar.high + (pad * mult));
+   return (bar.low - (pad * mult));
 }
 
-inline double __TRG_AnchorLabelY(const MqlRates &bar)
+inline double __TRG_AnchorLabelY(const int engine_type,
+                                 const MqlRates &bar)
 {
    double pad = __TRG_LabelPad(bar);
-   if(g_trigger_ctx.active_dir == DIR_UP)
-      return (bar.low - pad);
-   return (bar.high + pad);
+   double mult = (engine_type == TRG_ENGINE_TYPE2 ? 2.0 : 1.0);
+
+   if(g_trigger_core.active_dir == DIR_UP)
+      return (bar.low - (pad * mult));
+   return (bar.high + (pad * mult));
 }
 
-inline double __TRG_ResetLabelY(const MqlRates &bar)
+inline double __TRG_ResetLabelY(const int engine_type,
+                                const MqlRates &bar)
 {
    double pad = __TRG_LabelPad(bar);
-   if(g_trigger_ctx.active_dir == DIR_UP)
-      return (bar.low - (pad * 2.0));
-   return (bar.high + (pad * 2.0));
+   double mult = (engine_type == TRG_ENGINE_TYPE2 ? 3.2 : 2.2);
+
+   if(g_trigger_core.active_dir == DIR_UP)
+      return (bar.low - (pad * mult));
+   return (bar.high + (pad * mult));
 }
 
 inline void __TRG_DrawTextUnique(const string base,
@@ -911,44 +880,50 @@ inline void __TRG_DrawDashedLine(const string base,
    ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
 }
 
-inline void __TRG_DrawPhaseLabel(const MqlRates &bar, const int phase_id)
+inline void __TRG_DrawPhaseLabel(const int engine_type,
+                                 const MqlRates &bar,
+                                 const int phase_id)
 {
-   if(phase_id < TRG_PHASE_1 || phase_id > TRG_PHASE_5) return;
+   if(phase_id < TRG_PHASE_1 || phase_id > TRG_PHASE_5)
+      return;
 
-   string base = "TRG_PHASE_" + __TRG_RunTag() + "_" + __TRG_WindowTag() + "_"
+   string base = "TRG_" + __TRG_EngineTag(engine_type) + "_PHASE_"
+               + __TRG_RunTag() + "_" + __TRG_WindowTag() + "_"
                + IntegerToString((int)bar.time);
 
    __TRG_DrawTextUnique(base,
                         bar.time,
-                        __TRG_PhaseLabelY(bar),
+                        __TRG_PhaseLabelY(engine_type, bar),
                         IntegerToString(phase_id),
-                        clrAqua,
+                        __TRG_EngineColor(engine_type),
                         9);
 }
 
-inline void __TRG_DrawBoundaryLabel(const MqlRates &bar)
+inline void __TRG_DrawBoundaryLabel(const int engine_type,
+                                    const MqlRates &bar)
 {
-   string text = (g_trigger_ctx.active_dir == DIR_UP ? "L" : "H");
-   string base = "TRG_BOUND_" + __TRG_RunTag() + "_" + __TRG_WindowTag();
+   string base = "TRG_" + __TRG_EngineTag(engine_type) + "_BOUND_"
+               + __TRG_RunTag() + "_" + __TRG_WindowTag();
 
    __TRG_DrawTextUnique(base,
                         bar.time,
-                        __TRG_AnchorLabelY(bar),
-                        text,
-                        clrYellow,
+                        __TRG_AnchorLabelY(engine_type, bar),
+                        __TRG_BoundaryText(engine_type),
+                        __TRG_EngineColor(engine_type),
                         9);
 }
 
-
-inline void __TRG_DrawResetLabel(const MqlRates &bar)
+inline void __TRG_DrawResetLabel(const int engine_type,
+                                 const MqlRates &bar)
 {
-   string base = "TRG_RESET_" + __TRG_RunTag() + "_" + __TRG_WindowTag() + "_"
+   string base = "TRG_" + __TRG_EngineTag(engine_type) + "_RESET_"
+               + __TRG_RunTag() + "_" + __TRG_WindowTag() + "_"
                + IntegerToString((int)bar.time);
 
    __TRG_DrawTextUnique(base,
                         bar.time,
-                        __TRG_ResetLabelY(bar),
-                        "F",
+                        __TRG_ResetLabelY(engine_type, bar),
+                        __TRG_ResetText(engine_type),
                         clrRed,
                         10);
 }
@@ -961,127 +936,129 @@ inline void __TRG_DrawTriggerMarker(const int type_id,
    int serial = 0;
    string dir_tag = "U";
 
-   if(g_trigger_ctx.active_dir == DIR_UP)
+   if(g_trigger_core.active_dir == DIR_UP)
    {
-      g_trigger_ctx.up_counter++;
-      serial  = g_trigger_ctx.up_counter;
+      g_trigger_core.up_counter++;
+      serial  = g_trigger_core.up_counter;
       dir_tag = "U";
    }
    else
    {
-      g_trigger_ctx.dn_counter++;
-      serial  = g_trigger_ctx.dn_counter;
+      g_trigger_core.dn_counter++;
+      serial  = g_trigger_core.dn_counter;
       dir_tag = "D";
    }
 
    string base = "TRG_HIT_" + __TRG_RunTag() + "_" + __TRG_WindowTag() + "_"
                + dir_tag + "_" + IntegerToString(serial) + "_"
-               + IntegerToString(type_id);
+               + __TRG_EngineTag(type_id);
 
-   __TRG_DrawDashedLine(base + "_L", ref_t, hit_t, level, clrYellow);
-   __TRG_DrawTextUnique(base + "_T", hit_t, level, "T", clrYellow, 10);
+   __TRG_DrawDashedLine(base + "_L", ref_t, hit_t, level, __TRG_EngineColor(type_id));
+   __TRG_DrawTextUnique(base + "_T", hit_t, level, __TRG_HitText(type_id), __TRG_EngineColor(type_id), 10);
 }
 
 // ----------------------------------------------------------------------------
 // Cycle start / restart helpers
 // ----------------------------------------------------------------------------
-inline void __TRG_StartBullCycle(const MqlRates &rates[],
-                                 const int       n,
-                                 const int       bar_idx,
-                                 const bool      draw_reset,
-                                 const bool      draw_anchor,
-                                 const bool      draw_phase)
+inline void __TRG_StartBullCycle(TriggerEngineState &state,
+                                 const int           engine_type,
+                                 const MqlRates     &rates[],
+                                 const int           n,
+                                 const int           bar_idx,
+                                 const bool          draw_reset,
+                                 const bool          draw_anchor,
+                                 const bool          draw_phase)
 {
    if(bar_idx < 0 || bar_idx >= n) return;
 
    const MqlRates bar = rates[bar_idx];
 
-   g_trigger_ctx.mother_set   = true;
-   g_trigger_ctx.mother_level = bar.low;
-   g_trigger_ctx.mother_idx   = bar_idx;
-   g_trigger_ctx.mother_time  = bar.time;
+   state.mother_set   = true;
+   state.mother_level = bar.low;
+   state.mother_idx   = bar_idx;
+   state.mother_time  = bar.time;
 
-   g_trigger_ctx.phase        = TRG_PHASE_1;
+   state.phase        = TRG_PHASE_1;
+   state.phase1_level = bar.high;
+   state.phase1_idx   = bar_idx;
+   __TRG_ClearLowerPhases(state);
 
-   g_trigger_ctx.phase1_level = bar.high;
-   g_trigger_ctx.phase1_idx   = bar_idx;
-
-   g_trigger_ctx.phase2_level = 0.0;
-   g_trigger_ctx.phase2_idx   = -1;
-   g_trigger_ctx.phase3_level = 0.0;
-   g_trigger_ctx.phase3_idx   = -1;
-   g_trigger_ctx.phase4_level = 0.0;
-   g_trigger_ctx.phase4_idx   = -1;
-
-   g_trigger_ctx.phase3_break1_seen = false;
-   g_trigger_ctx.phase4_break2_seen = false;
-
-   __TRG_ClearPhase2Build();
-
-   if(draw_reset) __TRG_DrawResetLabel(bar);
-   if(draw_anchor) __TRG_DrawBoundaryLabel(bar);
-   if(draw_phase) __TRG_DrawPhaseLabel(bar, TRG_PHASE_1);
+   if(draw_reset)  __TRG_DrawResetLabel(engine_type, bar);
+   if(draw_anchor) __TRG_DrawBoundaryLabel(engine_type, bar);
+   if(draw_phase)  __TRG_DrawPhaseLabel(engine_type, bar, TRG_PHASE_1);
 }
 
-inline void __TRG_StartBearCycle(const MqlRates &rates[],
-                                 const int       n,
-                                 const int       bar_idx,
-                                 const bool      draw_reset,
-                                 const bool      draw_anchor,
-                                 const bool      draw_phase)
+inline void __TRG_StartBearCycle(TriggerEngineState &state,
+                                 const int           engine_type,
+                                 const MqlRates     &rates[],
+                                 const int           n,
+                                 const int           bar_idx,
+                                 const bool          draw_reset,
+                                 const bool          draw_anchor,
+                                 const bool          draw_phase)
 {
    if(bar_idx < 0 || bar_idx >= n) return;
 
    const MqlRates bar = rates[bar_idx];
 
-   g_trigger_ctx.mother_set   = true;
-   g_trigger_ctx.mother_level = bar.high;
-   g_trigger_ctx.mother_idx   = bar_idx;
-   g_trigger_ctx.mother_time  = bar.time;
+   state.mother_set   = true;
+   state.mother_level = bar.high;
+   state.mother_idx   = bar_idx;
+   state.mother_time  = bar.time;
 
-   g_trigger_ctx.phase        = TRG_PHASE_1;
+   state.phase        = TRG_PHASE_1;
+   state.phase1_level = bar.low;
+   state.phase1_idx   = bar_idx;
+   __TRG_ClearLowerPhases(state);
 
-   g_trigger_ctx.phase1_level = bar.low;
-   g_trigger_ctx.phase1_idx   = bar_idx;
-
-   g_trigger_ctx.phase2_level = 0.0;
-   g_trigger_ctx.phase2_idx   = -1;
-   g_trigger_ctx.phase3_level = 0.0;
-   g_trigger_ctx.phase3_idx   = -1;
-   g_trigger_ctx.phase4_level = 0.0;
-   g_trigger_ctx.phase4_idx   = -1;
-
-   g_trigger_ctx.phase3_break1_seen = false;
-   g_trigger_ctx.phase4_break2_seen = false;
-
-   __TRG_ClearPhase2Build();
-
-   if(draw_reset) __TRG_DrawResetLabel(bar);
-   if(draw_anchor) __TRG_DrawBoundaryLabel(bar);
-   if(draw_phase) __TRG_DrawPhaseLabel(bar, TRG_PHASE_1);
+   if(draw_reset)  __TRG_DrawResetLabel(engine_type, bar);
+   if(draw_anchor) __TRG_DrawBoundaryLabel(engine_type, bar);
+   if(draw_phase)  __TRG_DrawPhaseLabel(engine_type, bar, TRG_PHASE_1);
 }
 
-inline void __TRG_StartCycleAt(const MqlRates &rates[],
-                               const int       n,
-                               const int       bar_idx,
-                               const bool      draw_reset,
-                               const bool      draw_anchor,
-                               const bool      draw_phase)
+inline void __TRG_StartCycleAt(TriggerEngineState &state,
+                               const int           engine_type,
+                               const MqlRates     &rates[],
+                               const int           n,
+                               const int           bar_idx,
+                               const bool          draw_reset,
+                               const bool          draw_anchor,
+                               const bool          draw_phase)
 {
-   if(g_trigger_ctx.active_dir == DIR_UP)
-      __TRG_StartBullCycle(rates, n, bar_idx, draw_reset, draw_anchor, draw_phase);
+   if(g_trigger_core.active_dir == DIR_UP)
+      __TRG_StartBullCycle(state, engine_type, rates, n, bar_idx, draw_reset, draw_anchor, draw_phase);
    else
-      __TRG_StartBearCycle(rates, n, bar_idx, draw_reset, draw_anchor, draw_phase);
+      __TRG_StartBearCycle(state, engine_type, rates, n, bar_idx, draw_reset, draw_anchor, draw_phase);
 }
 
-inline void __TRG_RestartAfterHit(const MqlRates &rates[],
-                                  const int       n,
-                                  const int       hit_idx)
+inline void __TRG_RebaseBullPhase1(TriggerEngineState &state,
+                                   const int           engine_type,
+                                   const int           bar_idx,
+                                   const MqlRates     &bar)
 {
-   // Start a fresh internal cycle from the trigger candle itself so the next
-   // candles can continue without waiting for the normal scan to reset.
-   // Visual re-anchoring is intentionally silent here to keep the chart clear.
-   __TRG_StartCycleAt(rates, n, hit_idx, false, false, false);
+   state.phase        = TRG_PHASE_1;
+   state.phase1_level = bar.high;
+   state.phase1_idx   = bar_idx;
+   __TRG_ClearLowerPhases(state);
+   __TRG_DrawPhaseLabel(engine_type, bar, TRG_PHASE_1);
+}
+
+inline void __TRG_RebaseBearPhase1(TriggerEngineState &state,
+                                   const int           engine_type,
+                                   const int           bar_idx,
+                                   const MqlRates     &bar)
+{
+   state.phase        = TRG_PHASE_1;
+   state.phase1_level = bar.low;
+   state.phase1_idx   = bar_idx;
+   __TRG_ClearLowerPhases(state);
+   __TRG_DrawPhaseLabel(engine_type, bar, TRG_PHASE_1);
+}
+
+inline void __TRG_ClearPendingResults()
+{
+   g_trigger_pending_restart_idx  = -1;
+   g_trigger_pending_refresh_time = 0;
 }
 
 inline void __TRG_FireTrigger(const int       type_id,
@@ -1099,7 +1076,7 @@ inline void __TRG_FireTrigger(const int       type_id,
       sym = _Symbol;
 
    TriggerSLTP_OnTriggerFired(sym,
-                              g_trigger_ctx.active_dir,
+                              g_trigger_core.active_dir,
                               type_id,
                               src_idx,
                               level,
@@ -1112,517 +1089,38 @@ inline void __TRG_FireTrigger(const int       type_id,
                            rates[hit_idx].time,
                            level);
 
-   __TRG_RestartAfterHit(rates, n, hit_idx);
-   TriggerStatement_OnNewTriggerAt(rates[hit_idx].time);
+   if(hit_idx > g_trigger_pending_restart_idx)
+      g_trigger_pending_restart_idx = hit_idx;
+   if(rates[hit_idx].time > g_trigger_pending_refresh_time)
+      g_trigger_pending_refresh_time = rates[hit_idx].time;
 }
 
-inline int __TRG_BullHandlePhase4Break(const MqlRates &rates[],
-                                       const int       n,
-                                       const int       bar_idx)
+inline void __TRG_RestartAfterHit(const MqlRates &rates[],
+                                  const int       n,
+                                  const int       hit_idx)
 {
-   if(bar_idx < 0 || bar_idx >= n)
-      return TRG_PHASE_NONE;
-
-   const MqlRates bar = rates[bar_idx];
-
-   int    type_id    = 2;
-   double target     = 0.0;
-   int    target_idx = -1;
-   __TRG_GetBullTriggerTarget(type_id, target, target_idx);
-
-   g_trigger_ctx.phase              = TRG_PHASE_4;
-   g_trigger_ctx.phase4_level       = bar.low;
-   g_trigger_ctx.phase4_idx         = bar_idx;
-   g_trigger_ctx.phase4_break2_seen = true;
-   __TRG_ClearPhase2Build();
-
-   __TRG_DrawPhaseLabel(bar, TRG_PHASE_4);
-
-   // Same-candle completion is valid only for a bullish (green) candle.
-   if(target_idx >= 0 &&
-      __TRG_TouchHigh(bar.high, target) &&
-      __TRG_BullSameBarType2TriggerAllowed(bar))
-   {
-      __TRG_FireTrigger(type_id, target_idx, target, bar_idx, rates, n);
-      return TRG_PHASE_4;
-   }
-
-   g_trigger_ctx.phase = TRG_PHASE_5;
-   return TRG_PHASE_4;
+   __TRG_StartCycleAt(g_trigger_type1, TRG_ENGINE_TYPE1, rates, n, hit_idx, false, false, false);
+   __TRG_StartCycleAt(g_trigger_type2, TRG_ENGINE_TYPE2, rates, n, hit_idx, false, false, false);
 }
 
-inline int __TRG_BearHandlePhase4Break(const MqlRates &rates[],
-                                       const int       n,
-                                       const int       bar_idx)
+inline void __TRG_CommitPendingResults(const MqlRates &rates[],
+                                       const int       n)
 {
-   if(bar_idx < 0 || bar_idx >= n)
-      return TRG_PHASE_NONE;
+   if(g_trigger_pending_restart_idx >= 0)
+      __TRG_RestartAfterHit(rates, n, g_trigger_pending_restart_idx);
 
-   const MqlRates bar = rates[bar_idx];
+   if(g_trigger_pending_refresh_time > 0)
+      TriggerStatement_OnNewTriggerAt(g_trigger_pending_refresh_time);
 
-   int    type_id    = 2;
-   double target     = 0.0;
-   int    target_idx = -1;
-   __TRG_GetBearTriggerTarget(type_id, target, target_idx);
-
-   g_trigger_ctx.phase              = TRG_PHASE_4;
-   g_trigger_ctx.phase4_level       = bar.high;
-   g_trigger_ctx.phase4_idx         = bar_idx;
-   g_trigger_ctx.phase4_break2_seen = true;
-   __TRG_ClearPhase2Build();
-
-   __TRG_DrawPhaseLabel(bar, TRG_PHASE_4);
-
-   // Mirror rule: same-candle completion is valid only for a bearish (red) candle.
-   if(target_idx >= 0 &&
-      __TRG_TouchLow(bar.low, target) &&
-      __TRG_BearSameBarType2TriggerAllowed(bar))
-   {
-      __TRG_FireTrigger(type_id, target_idx, target, bar_idx, rates, n);
-      return TRG_PHASE_4;
-   }
-
-   g_trigger_ctx.phase = TRG_PHASE_5;
-   return TRG_PHASE_4;
+   __TRG_ClearPendingResults();
 }
 
-inline int __TRG_ProcessBull(const MqlRates &rates[],
-                             const int       n,
-                             const int       bar_idx)
-{
-   if(bar_idx < 0 || bar_idx >= n) return TRG_PHASE_NONE;
-
-   const MqlRates bar = rates[bar_idx];
-
-   if(!g_trigger_ctx.mother_set)
-   {
-      __TRG_StartBullCycle(rates, n, bar_idx, false, true, true);
-      return TRG_PHASE_1;
-   }
-
-   bool allow_phase1_mother_update = false;
-   if(g_trigger_ctx.phase == TRG_PHASE_1 &&
-      __TRG_BreakAboveStrict(bar.high, g_trigger_ctx.phase1_level))
-   {
-      allow_phase1_mother_update = true;
-   }
-
-   if(__TRG_BreakBelowStrict(bar.low, g_trigger_ctx.mother_level) &&
-      !allow_phase1_mother_update)
-   {
-      __TRG_StartBullCycle(rates, n, bar_idx, true, true, true);
-      return TRG_PHASE_1;
-   }
-
-   if(g_trigger_ctx.phase <= TRG_PHASE_NONE || g_trigger_ctx.phase > TRG_PHASE_5)
-   {
-      __TRG_StartBullCycle(rates, n, bar_idx, false, true, true);
-      return TRG_PHASE_1;
-   }
-
-   if(bar_idx == g_trigger_ctx.mother_idx && g_trigger_ctx.phase == TRG_PHASE_1)
-   {
-      __TRG_DrawPhaseLabel(bar, TRG_PHASE_1);
-      return TRG_PHASE_1;
-   }
-
-   switch(g_trigger_ctx.phase)
-   {
-      case TRG_PHASE_1:
-      {
-         bool extended_phase1 = false;
-
-         if(__TRG_BreakAboveStrict(bar.high, g_trigger_ctx.phase1_level))
-         {
-            g_trigger_ctx.phase1_level = bar.high;
-            g_trigger_ctx.phase1_idx   = bar_idx;
-            extended_phase1 = true;
-         }
-
-         if(bar.low < g_trigger_ctx.mother_level)
-         {
-            g_trigger_ctx.mother_level = bar.low;
-            g_trigger_ctx.mother_idx   = bar_idx;
-            g_trigger_ctx.mother_time  = bar.time;
-            __TRG_DrawBoundaryLabel(bar);
-         }
-
-         if(extended_phase1)
-         {
-            __TRG_DrawPhaseLabel(bar, TRG_PHASE_1);
-            return TRG_PHASE_1;
-         }
-
-         // After phase-1 stops extending, the next candle starts the phase-2 group.
-         // The phase-4 break reference is the LOWEST low of that group.
-         __TRG_SetBullPhase2Latest(bar_idx, bar);
-         __TRG_DrawPhaseLabel(bar, TRG_PHASE_2);
-         return TRG_PHASE_2;
-      }
-
-      case TRG_PHASE_2:
-      {
-         if(!__TRG_HasConfirmedPhase3())
-         {
-            // Type-2 path: a direct break of phase-1 high creates the first break-1 phase-3.
-            if(__TRG_BreakAboveStrict(bar.high, g_trigger_ctx.phase1_level))
-            {
-               __TRG_SetBullPhase3Latest(bar_idx, bar, true);
-               __TRG_DrawPhaseLabel(bar, TRG_PHASE_3);
-               return TRG_PHASE_3;
-            }
-
-            // Type-1 path: a local bullish swing that stays below phase-1 high is a valid phase-3 group.
-            if(__TRG_BullCanStartType1Phase3(rates, n, bar_idx))
-            {
-               __TRG_SetBullPhase3Latest(bar_idx, bar, false);
-               __TRG_DrawPhaseLabel(bar, TRG_PHASE_3);
-               return TRG_PHASE_3;
-            }
-
-            __TRG_SetBullPhase2Latest(bar_idx, bar);
-            __TRG_DrawPhaseLabel(bar, TRG_PHASE_2);
-            return TRG_PHASE_2;
-         }
-
-         // A break of the active phase-2 reference always starts phase-4,
-         // regardless of whether the active path is type-1 or type-2.
-         if(g_trigger_ctx.phase2_idx >= 0 &&
-            __TRG_BreakBelowStrict(bar.low, g_trigger_ctx.phase2_level))
-         {
-            return __TRG_BullHandlePhase4Break(rates, n, bar_idx);
-         }
-
-         if(g_trigger_ctx.phase3_break1_seen)
-         {
-            // Type-2: the active trigger target is the latest confirmed phase-3,
-            // so only a fresh break above that latest phase-3 creates the next phase-3.
-            if(__TRG_BreakAboveStrict(bar.high, g_trigger_ctx.phase3_level))
-            {
-               __TRG_SetBullPhase3Latest(bar_idx, bar, true);
-               __TRG_DrawPhaseLabel(bar, TRG_PHASE_3);
-               return TRG_PHASE_3;
-            }
-         }
-         else
-         {
-            // Type-1: before phase-4, a break of phase-1 high invalidates the type-1 path
-            // and immediately converts the structure into the type-2 path.
-            if(__TRG_BreakAboveStrict(bar.high, g_trigger_ctx.phase1_level))
-            {
-               __TRG_SetBullPhase3Latest(bar_idx, bar, true);
-               __TRG_DrawPhaseLabel(bar, TRG_PHASE_3);
-               return TRG_PHASE_3;
-            }
-
-            // Type-1 also allows many phase-2 / phase-3 groups under the same phase-1 high.
-            // Any fresh local bullish swing from the latest phase-2 group becomes the next phase-3,
-            // even if its سقف stays below the previous phase-3 سقف.
-            if(__TRG_BullCanStartType1Phase3(rates, n, bar_idx))
-            {
-               __TRG_SetBullPhase3Latest(bar_idx, bar, false);
-               __TRG_DrawPhaseLabel(bar, TRG_PHASE_3);
-               return TRG_PHASE_3;
-            }
-         }
-
-         __TRG_SetBullPhase2Candidate(bar_idx, bar);
-         __TRG_DrawPhaseLabel(bar, TRG_PHASE_2);
-         return TRG_PHASE_2;
-      }
-
-      case TRG_PHASE_3:
-      {
-         if(g_trigger_ctx.phase2_idx >= 0 &&
-            __TRG_BreakBelowStrict(bar.low, g_trigger_ctx.phase2_level))
-         {
-            return __TRG_BullHandlePhase4Break(rates, n, bar_idx);
-         }
-
-         if(g_trigger_ctx.phase3_break1_seen)
-         {
-            if(__TRG_BreakAboveStrict(bar.high, g_trigger_ctx.phase3_level))
-            {
-               __TRG_SetBullPhase3Latest(bar_idx, bar, true);
-               __TRG_DrawPhaseLabel(bar, TRG_PHASE_3);
-               return TRG_PHASE_3;
-            }
-         }
-         else
-         {
-            if(__TRG_BreakAboveStrict(bar.high, g_trigger_ctx.phase1_level))
-            {
-               __TRG_SetBullPhase3Latest(bar_idx, bar, true);
-               __TRG_DrawPhaseLabel(bar, TRG_PHASE_3);
-               return TRG_PHASE_3;
-            }
-
-            if(__TRG_BreakAboveStrict(bar.high, g_trigger_ctx.phase3_level))
-            {
-               __TRG_SetBullPhase3Latest(bar_idx, bar, false);
-               __TRG_DrawPhaseLabel(bar, TRG_PHASE_3);
-               return TRG_PHASE_3;
-            }
-         }
-
-         __TRG_SetBullPhase2Candidate(bar_idx, bar);
-         __TRG_DrawPhaseLabel(bar, TRG_PHASE_2);
-         return TRG_PHASE_2;
-      }
-
-      case TRG_PHASE_4:
-      {
-         g_trigger_ctx.phase = TRG_PHASE_5;
-         __TRG_DrawPhaseLabel(bar, TRG_PHASE_5);
-
-         int    type_id    = 0;
-         double target     = 0.0;
-         int    target_idx = -1;
-         __TRG_GetBullTriggerTarget(type_id, target, target_idx);
-
-         if(target_idx >= 0 && __TRG_TouchHigh(bar.high, target))
-            __TRG_FireTrigger(type_id, target_idx, target, bar_idx, rates, n);
-
-         return TRG_PHASE_5;
-      }
-
-      case TRG_PHASE_5:
-      {
-         __TRG_DrawPhaseLabel(bar, TRG_PHASE_5);
-
-         int    type_id    = 0;
-         double target     = 0.0;
-         int    target_idx = -1;
-         __TRG_GetBullTriggerTarget(type_id, target, target_idx);
-
-         if(target_idx >= 0 && __TRG_TouchHigh(bar.high, target))
-            __TRG_FireTrigger(type_id, target_idx, target, bar_idx, rates, n);
-
-         return TRG_PHASE_5;
-      }
-   }
-
-   return TRG_PHASE_NONE;
-}
-
-
-
-// ----------------------------------------------------------------------------
-// Bearish 5-phase FSM (mirror)
-// ----------------------------------------------------------------------------
-inline int __TRG_ProcessBear(const MqlRates &rates[],
-                             const int       n,
-                             const int       bar_idx)
-{
-   if(bar_idx < 0 || bar_idx >= n) return TRG_PHASE_NONE;
-
-   const MqlRates bar = rates[bar_idx];
-
-   if(!g_trigger_ctx.mother_set)
-   {
-      __TRG_StartBearCycle(rates, n, bar_idx, false, true, true);
-      return TRG_PHASE_1;
-   }
-
-   bool allow_phase1_mother_update = false;
-   if(g_trigger_ctx.phase == TRG_PHASE_1 &&
-      __TRG_BreakBelowStrict(bar.low, g_trigger_ctx.phase1_level))
-   {
-      allow_phase1_mother_update = true;
-   }
-
-   if(__TRG_BreakAboveStrict(bar.high, g_trigger_ctx.mother_level) &&
-      !allow_phase1_mother_update)
-   {
-      __TRG_StartBearCycle(rates, n, bar_idx, true, true, true);
-      return TRG_PHASE_1;
-   }
-
-   if(g_trigger_ctx.phase <= TRG_PHASE_NONE || g_trigger_ctx.phase > TRG_PHASE_5)
-   {
-      __TRG_StartBearCycle(rates, n, bar_idx, false, true, true);
-      return TRG_PHASE_1;
-   }
-
-   if(bar_idx == g_trigger_ctx.mother_idx && g_trigger_ctx.phase == TRG_PHASE_1)
-   {
-      __TRG_DrawPhaseLabel(bar, TRG_PHASE_1);
-      return TRG_PHASE_1;
-   }
-
-   switch(g_trigger_ctx.phase)
-   {
-      case TRG_PHASE_1:
-      {
-         bool extended_phase1 = false;
-
-         if(__TRG_BreakBelowStrict(bar.low, g_trigger_ctx.phase1_level))
-         {
-            g_trigger_ctx.phase1_level = bar.low;
-            g_trigger_ctx.phase1_idx   = bar_idx;
-            extended_phase1 = true;
-         }
-
-         if(bar.high > g_trigger_ctx.mother_level)
-         {
-            g_trigger_ctx.mother_level = bar.high;
-            g_trigger_ctx.mother_idx   = bar_idx;
-            g_trigger_ctx.mother_time  = bar.time;
-            __TRG_DrawBoundaryLabel(bar);
-         }
-
-         if(extended_phase1)
-         {
-            __TRG_DrawPhaseLabel(bar, TRG_PHASE_1);
-            return TRG_PHASE_1;
-         }
-
-         __TRG_SetBearPhase2Latest(bar_idx, bar);
-         __TRG_DrawPhaseLabel(bar, TRG_PHASE_2);
-         return TRG_PHASE_2;
-      }
-
-      case TRG_PHASE_2:
-      {
-         if(!__TRG_HasConfirmedPhase3())
-         {
-            if(__TRG_BreakBelowStrict(bar.low, g_trigger_ctx.phase1_level))
-            {
-               __TRG_SetBearPhase3Latest(bar_idx, bar, true);
-               __TRG_DrawPhaseLabel(bar, TRG_PHASE_3);
-               return TRG_PHASE_3;
-            }
-
-            if(__TRG_BearCanStartType1Phase3(rates, n, bar_idx))
-            {
-               __TRG_SetBearPhase3Latest(bar_idx, bar, false);
-               __TRG_DrawPhaseLabel(bar, TRG_PHASE_3);
-               return TRG_PHASE_3;
-            }
-
-            __TRG_SetBearPhase2Latest(bar_idx, bar);
-            __TRG_DrawPhaseLabel(bar, TRG_PHASE_2);
-            return TRG_PHASE_2;
-         }
-
-         if(g_trigger_ctx.phase2_idx >= 0 &&
-            __TRG_BreakAboveStrict(bar.high, g_trigger_ctx.phase2_level))
-         {
-            return __TRG_BearHandlePhase4Break(rates, n, bar_idx);
-         }
-
-         if(g_trigger_ctx.phase3_break1_seen)
-         {
-            if(__TRG_BreakBelowStrict(bar.low, g_trigger_ctx.phase3_level))
-            {
-               __TRG_SetBearPhase3Latest(bar_idx, bar, true);
-               __TRG_DrawPhaseLabel(bar, TRG_PHASE_3);
-               return TRG_PHASE_3;
-            }
-         }
-         else
-         {
-            if(__TRG_BreakBelowStrict(bar.low, g_trigger_ctx.phase1_level))
-            {
-               __TRG_SetBearPhase3Latest(bar_idx, bar, true);
-               __TRG_DrawPhaseLabel(bar, TRG_PHASE_3);
-               return TRG_PHASE_3;
-            }
-
-            if(__TRG_BearCanStartType1Phase3(rates, n, bar_idx))
-            {
-               __TRG_SetBearPhase3Latest(bar_idx, bar, false);
-               __TRG_DrawPhaseLabel(bar, TRG_PHASE_3);
-               return TRG_PHASE_3;
-            }
-         }
-
-         __TRG_SetBearPhase2Candidate(bar_idx, bar);
-         __TRG_DrawPhaseLabel(bar, TRG_PHASE_2);
-         return TRG_PHASE_2;
-      }
-
-      case TRG_PHASE_3:
-      {
-         if(g_trigger_ctx.phase2_idx >= 0 &&
-            __TRG_BreakAboveStrict(bar.high, g_trigger_ctx.phase2_level))
-         {
-            return __TRG_BearHandlePhase4Break(rates, n, bar_idx);
-         }
-
-         if(g_trigger_ctx.phase3_break1_seen)
-         {
-            if(__TRG_BreakBelowStrict(bar.low, g_trigger_ctx.phase3_level))
-            {
-               __TRG_SetBearPhase3Latest(bar_idx, bar, true);
-               __TRG_DrawPhaseLabel(bar, TRG_PHASE_3);
-               return TRG_PHASE_3;
-            }
-         }
-         else
-         {
-            if(__TRG_BreakBelowStrict(bar.low, g_trigger_ctx.phase1_level))
-            {
-               __TRG_SetBearPhase3Latest(bar_idx, bar, true);
-               __TRG_DrawPhaseLabel(bar, TRG_PHASE_3);
-               return TRG_PHASE_3;
-            }
-
-            if(__TRG_BreakBelowStrict(bar.low, g_trigger_ctx.phase3_level))
-            {
-               __TRG_SetBearPhase3Latest(bar_idx, bar, false);
-               __TRG_DrawPhaseLabel(bar, TRG_PHASE_3);
-               return TRG_PHASE_3;
-            }
-         }
-
-         __TRG_SetBearPhase2Candidate(bar_idx, bar);
-         __TRG_DrawPhaseLabel(bar, TRG_PHASE_2);
-         return TRG_PHASE_2;
-      }
-
-      case TRG_PHASE_4:
-      {
-         g_trigger_ctx.phase = TRG_PHASE_5;
-         __TRG_DrawPhaseLabel(bar, TRG_PHASE_5);
-
-         int    type_id    = 0;
-         double target     = 0.0;
-         int    target_idx = -1;
-         __TRG_GetBearTriggerTarget(type_id, target, target_idx);
-
-         if(target_idx >= 0 && __TRG_TouchLow(bar.low, target))
-            __TRG_FireTrigger(type_id, target_idx, target, bar_idx, rates, n);
-
-         return TRG_PHASE_5;
-      }
-
-      case TRG_PHASE_5:
-      {
-         __TRG_DrawPhaseLabel(bar, TRG_PHASE_5);
-
-         int    type_id    = 0;
-         double target     = 0.0;
-         int    target_idx = -1;
-         __TRG_GetBearTriggerTarget(type_id, target, target_idx);
-
-         if(target_idx >= 0 && __TRG_TouchLow(bar.low, target))
-            __TRG_FireTrigger(type_id, target_idx, target, bar_idx, rates, n);
-
-         return TRG_PHASE_5;
-      }
-   }
-
-   return TRG_PHASE_NONE;
-}
-
-
+#include <WaveBot/Trigger_Type1.mqh>
+#include <WaveBot/Trigger_Type2.mqh>
 
 // ----------------------------------------------------------------------------
 // Public feeder
 // ----------------------------------------------------------------------------
-
-
 inline void __TRG_ProcessLoadedBar(const string    sym,
                                    const MqlRates &rates[],
                                    const int       n,
@@ -1635,21 +1133,31 @@ inline void __TRG_ProcessLoadedBar(const string    sym,
    const datetime bar_time = rates[bar_idx].time;
    __TRG_ApplyWindowAt(bar_time);
 
-   if(!g_trigger_ctx.active)
+   if(!g_trigger_core.active)
       return;
-   if(bar_time < g_trigger_ctx.active_start_bar_time)
-      return;
-
-   if(g_trigger_ctx.last_processed_time > 0 && bar_time <= g_trigger_ctx.last_processed_time)
+   if(bar_time < g_trigger_core.active_start_bar_time)
       return;
 
-   if(g_trigger_ctx.active_dir == DIR_UP)
-      __TRG_ProcessBull(rates, n, bar_idx);
+   if(g_trigger_core.last_processed_time > 0 && bar_time <= g_trigger_core.last_processed_time)
+      return;
+
+   __TRG_ClearPendingResults();
+
+   if(g_trigger_core.active_dir == DIR_UP)
+   {
+      __TRG1_ProcessBull(rates, n, bar_idx);
+      __TRG2_ProcessBull(rates, n, bar_idx);
+   }
    else
-      __TRG_ProcessBear(rates, n, bar_idx);
+   {
+      __TRG1_ProcessBear(rates, n, bar_idx);
+      __TRG2_ProcessBear(rates, n, bar_idx);
+   }
 
-   g_trigger_ctx.last_processed_time = bar_time;
-   g_trigger_ctx.last_processed_idx  = bar_idx;
+   __TRG_CommitPendingResults(rates, n);
+
+   g_trigger_core.last_processed_time = bar_time;
+   g_trigger_core.last_processed_idx  = bar_idx;
 }
 
 inline void Trigger_OnTimer(const string sym)
@@ -1667,15 +1175,16 @@ inline void Trigger_OnTimer(const string sym)
    __TRG_ApplyWindowAt(probe_bar_time);
 
    datetime seed_time = 0;
-   if(g_trigger_ctx.last_processed_time > 0)
-      seed_time = g_trigger_ctx.last_processed_time;
-   else if(g_trigger_ctx.active && g_trigger_ctx.active_start_bar_time > 0)
-      seed_time = g_trigger_ctx.active_start_bar_time;
+   if(g_trigger_core.last_processed_time > 0)
+      seed_time = g_trigger_core.last_processed_time;
+   else if(g_trigger_core.active && g_trigger_core.active_start_bar_time > 0)
+      seed_time = g_trigger_core.active_start_bar_time;
    else
       return;
 
    int tfsec = PeriodSeconds((ENUM_TIMEFRAMES)Period());
-   if(tfsec <= 0) tfsec = 60;
+   if(tfsec <= 0)
+      tfsec = 60;
 
    datetime from_time = (seed_time - (datetime)(tfsec * 2));
    if(from_time < (datetime)0)
