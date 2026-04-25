@@ -244,3 +244,4 @@ inline void SR_OnBar_DOWN(const MqlRates &rates[], const int n, const int j, con
 }
 
 #endif // WAVEBOT_STRONGRANGE_MQH
+

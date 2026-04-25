@@ -20,3 +20,4 @@ enum Direction
 };
 
 #endif // WAVEBOT_TYPES_MQH
+

@@ -78,3 +78,4 @@ bool CheckWave2FromIndex_Hunter(const MqlRates &rates[],
 }
 
 #endif // WAVEBOT_WAVE2_MQH
+

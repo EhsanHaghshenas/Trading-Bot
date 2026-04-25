@@ -248,3 +248,4 @@ inline bool ExtLQ_Down_PromotePrevToCurrent()
 }
 
 #endif // WAVEBOT_EXTLQ_DOWN_MQH
+

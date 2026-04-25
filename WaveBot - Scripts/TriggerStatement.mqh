@@ -20,7 +20,7 @@
 
 #define TRGSTMT_SKIP_NONE          0
 #define TRGSTMT_SKIP_ACTIVE_TRADE  1
-#define TRGSTMT_SKIP_LOCKOUT       2
+#define TRGSTMT_SKIP_DAILY_LOSS_CAP 2
 #define TRGSTMT_SKIP_TREND_FILTER  3
 #define TRGSTMT_SKIP_LOCAL_GATE    4
 #define TRGSTMT_SKIP_POST_WIN_WAIT 5
@@ -172,14 +172,14 @@ inline string __TRGSTM_SkipReasonName(const int skip_reason)
 {
    if(skip_reason == TRGSTMT_SKIP_ACTIVE_TRADE)
       return "ACTIVE_TRADE_OPEN";
-   if(skip_reason == TRGSTMT_SKIP_LOCKOUT)
-      return "WAIT_NEW_4H_ON_AFTER_4_LOSSES";
+   if(skip_reason == TRGSTMT_SKIP_DAILY_LOSS_CAP)
+      return "DAILY_4_LOSSES_REACHED_WAIT_NEXT_DAY";
    if(skip_reason == TRGSTMT_SKIP_TREND_FILTER)
-      return "M15_TREND_NOT_ALIGNED";
+      return (__TRGSTM_WorkerLabel() + "_TREND_NOT_ALIGNED");
    if(skip_reason == TRGSTMT_SKIP_LOCAL_GATE)
-      return "M15_LOCAL_SIGNAL_WINDOW_NOT_OPEN";
+      return (__TRGSTM_WorkerLabel() + "_LOCAL_SIGNAL_WINDOW_NOT_OPEN");
    if(skip_reason == TRGSTMT_SKIP_POST_WIN_WAIT)
-      return "WAIT_NEW_LOCAL_M15_SIGNAL_ON_AFTER_WIN";
+      return ("WAIT_NEW_LOCAL_" + __TRGSTM_WorkerLabel() + "_SIGNAL_ON_AFTER_WIN");
    return "-";
 }
 
@@ -327,6 +327,22 @@ inline string __TRGSTM_TimeframeTag(const ENUM_TIMEFRAMES tf)
    return IntegerToString((int)tf);
 }
 
+
+inline string __TRGSTM_WorkerLabel()
+{
+   return WBBridge_WorkerLabel();
+}
+
+inline string __TRGSTM_ParentLabel()
+{
+   return WBBridge_ParentLabel();
+}
+
+inline string __TRGSTM_LocalGateToken()
+{
+   return (__TRGSTM_WorkerLabel() + "_LOCAL_SIGNAL");
+}
+
 inline string __TRGSTM_SanitizeFilePart(string text)
 {
    StringReplace(text, "\\", "_");
@@ -395,6 +411,65 @@ inline int __TRGSTM_FindLastBarAtOrBefore(const MqlRates &rates[],
    }
 
    return idx;
+}
+
+
+inline int __TRGSTM_DayKey(const datetime t)
+{
+   if(t <= 0)
+      return 0;
+
+   MqlDateTime dt;
+   TimeToStruct(t, dt);
+   return (dt.year * 10000 + dt.mon * 100 + dt.day);
+}
+
+inline string __TRGSTM_DayKeyText(const int day_key)
+{
+   if(day_key <= 0)
+      return "n/a";
+
+   int y = (day_key / 10000);
+   int m = ((day_key / 100) % 100);
+   int d = (day_key % 100);
+
+   return (IntegerToString(y) + "." + IntegerToString(m) + "." + IntegerToString(d));
+}
+
+inline datetime __TRGSTM_NextDayStart(const datetime t)
+{
+   if(t <= 0)
+      return 0;
+
+   MqlDateTime dt;
+   TimeToStruct(t, dt);
+   dt.hour = 0;
+   dt.min  = 0;
+   dt.sec  = 0;
+
+   datetime base = StructToTime(dt);
+   return (base + 86400);
+}
+
+inline void __TRGSTM_EnsureDailyLossBucket(const datetime t,
+                                           int           &day_key,
+                                           int           &daily_losses,
+                                           bool          &cap_active,
+                                           int           &cap_resets)
+{
+   int current_key = __TRGSTM_DayKey(t);
+   if(current_key <= 0)
+      return;
+
+   if(day_key == current_key)
+      return;
+
+   if(day_key > 0 && cap_active)
+      cap_resets++;
+
+   day_key      = current_key;
+   daily_losses = 0;
+   cap_active   = false;
 }
 
 inline int __TRGSTM_CompareRecord(const TriggerSLTPRecord &a,
@@ -489,6 +564,44 @@ inline int __TRGSTM_CollectStartEvents(const string sym,
 
       if(!__TRG_IsStartKind(evt.kind))
          continue;
+      if(evt.bar_time <= 0)
+         continue;
+      if(scan_to > 0 && evt.bar_time > scan_to)
+         continue;
+
+      int pos = ArraySize(out);
+      ArrayResize(out, pos + 1);
+
+      out[pos].t        = evt.t;
+      out[pos].bar_time = evt.bar_time;
+      out[pos].dir      = evt.dir;
+      out[pos].kind     = evt.kind;
+      out[pos].ns       = evt.ns;
+      out[pos].seq      = evt.seq;
+   }
+
+   __TRGSTM_SortStartEvents(out);
+   return ArraySize(out);
+}
+
+
+inline int __TRGSTM_CollectBridgeEvents(const string sym,
+                                        const datetime scan_to,
+                                        TriggerStatementStartEvent &out[])
+{
+   ArrayResize(out, 0);
+
+   if(sym == "")
+      return 0;
+
+   if(!__TRG_RebuildBridgeEvents(sym))
+      return 0;
+
+   int total = ArraySize(g_trigger_events);
+   for(int i = 0; i < total; ++i)
+   {
+      TriggerEvent evt = g_trigger_events[i];
+
       if(evt.bar_time <= 0)
          continue;
       if(scan_to > 0 && evt.bar_time > scan_to)
@@ -656,6 +769,50 @@ inline void __TRGSTM_ClearLocalGateState(bool      &gate_active,
    gate_seq        = -1;
 }
 
+inline void __TRGSTM_AdvanceParentGateEvents(const TriggerStatementStartEvent &events[],
+                                             const int total,
+                                             int &next_index,
+                                             const datetime upto_time,
+                                             bool &gate_active,
+                                             Direction &gate_dir,
+                                             int &gate_kind,
+                                             int &gate_ns,
+                                             datetime &gate_start_time,
+                                             datetime &gate_start_bar,
+                                             int &gate_seq)
+{
+   while(next_index < total)
+   {
+      TriggerStatementStartEvent evt = events[next_index];
+      if(evt.bar_time > upto_time)
+         break;
+
+      if(__TRG_IsStartKind(evt.kind))
+      {
+         gate_active     = true;
+         gate_dir        = evt.dir;
+         gate_kind       = evt.kind;
+         gate_ns         = evt.ns;
+         gate_start_time = evt.t;
+         gate_start_bar  = evt.bar_time;
+         gate_seq        = evt.seq;
+      }
+      else if(__TRG_IsStopKind(evt.kind))
+      {
+         if(gate_active && evt.dir == WBBridge_Opposite(gate_dir))
+            __TRGSTM_ClearLocalGateState(gate_active,
+                                         gate_dir,
+                                         gate_kind,
+                                         gate_ns,
+                                         gate_start_time,
+                                         gate_start_bar,
+                                         gate_seq);
+      }
+
+      next_index++;
+   }
+}
+
 inline void __TRGSTM_AdvanceLocalGateEvents(const TriggerStatementStartEvent &events[],
                                             const int total,
                                             int &next_index,
@@ -707,7 +864,7 @@ inline string __TRGSTM_BuildLocalGateSkipNote(const Direction trg_dir,
                                               const int       gate_ns,
                                               const datetime  gate_start_bar)
 {
-   string note = "SKIPPED_M15_LOCAL_SIGNAL_GATE";
+   string note = ("SKIPPED_" + __TRGSTM_LocalGateToken() + "_GATE");
    note = __TRGSTM_AppendNote(note, "TRG_" + __TRGSTM_DirName(trg_dir));
 
    if(!gate_active)
@@ -725,7 +882,7 @@ inline string __TRGSTM_BuildLocalGateMatchNote(const Direction trg_dir,
                                                const int       gate_ns,
                                                const datetime  gate_start_bar)
 {
-   string note = "M15_LOCAL_SIGNAL_GATE_OPEN";
+   string note = (__TRGSTM_LocalGateToken() + "_GATE_OPEN");
    note = __TRGSTM_AppendNote(note, "TRG_" + __TRGSTM_DirName(trg_dir));
    note = __TRGSTM_AppendNote(note, "TYPE_" + __TRGSTM_LocalGateKindName(gate_kind));
    note = __TRGSTM_AppendNote(note, "NS_" + __TRGSTM_LocalGateNsName(gate_ns));
@@ -741,7 +898,7 @@ inline string __TRGSTM_BuildPostWinWaitSkipNote(const Direction trg_dir,
                                                 const int       gate_ns,
                                                 const datetime  gate_start_bar)
 {
-   string note = "SKIPPED_WAITING_FRESH_LOCAL_M15_SIGNAL_AFTER_WIN";
+   string note = ("SKIPPED_WAITING_FRESH_LOCAL_" + __TRGSTM_WorkerLabel() + "_SIGNAL_AFTER_WIN");
    note = __TRGSTM_AppendNote(note, "TRG_" + __TRGSTM_DirName(trg_dir));
    note = __TRGSTM_AppendNote(note, "AFTER_WIN_" + __TRGSTM_SafeTime(ref_time));
 
@@ -760,7 +917,7 @@ inline string __TRGSTM_BuildPostWinRearmNote(const Direction gate_dir,
                                              const int       gate_ns,
                                              const datetime  gate_start_bar)
 {
-   string note = "FRESH_LOCAL_M15_SIGNAL_ON_AFTER_WIN";
+   string note = ("FRESH_LOCAL_" + __TRGSTM_WorkerLabel() + "_SIGNAL_ON_AFTER_WIN");
    note = __TRGSTM_AppendNote(note, "LOCAL_GATE_" + __TRGSTM_DirName(gate_dir));
    note = __TRGSTM_AppendNote(note, "TYPE_" + __TRGSTM_LocalGateKindName(gate_kind));
    note = __TRGSTM_AppendNote(note, "NS_" + __TRGSTM_LocalGateNsName(gate_ns));
@@ -1682,6 +1839,9 @@ inline int __TRGSTM_BuildMinorTrendWindows(const datetime                  scan_
 {
    ArrayResize(out, 0);
 
+   if(!__FSMS_SW_ShouldRunMinorWorldOnThisChart())
+      return 0;
+
    int session_count = FSMS_SW_Session_Count();
    for(int si = 0; si < session_count; ++si)
    {
@@ -1896,7 +2056,7 @@ inline string __TRGSTM_BuildTrendSkipNote(const Direction trg_dir,
                                           const Direction minor_dir,
                                           const string    minor_tag)
 {
-   string note = "SKIPPED_M15_TREND_FILTER";
+   string note = ("SKIPPED_" + __TRGSTM_WorkerLabel() + "_TREND_FILTER");
    note = __TRGSTM_AppendNote(note, "TRG_" + __TRGSTM_DirName(trg_dir));
    note = __TRGSTM_AppendNote(note, __TRGSTM_BuildTrendSlotText(major_active, major_dir, major_tag, "MAJ"));
    note = __TRGSTM_AppendNote(note, __TRGSTM_BuildTrendSlotText(minor_active, minor_dir, minor_tag, "MIN"));
@@ -1914,11 +2074,11 @@ inline string __TRGSTM_BuildTrendMatchNote(const Direction trg_dir,
    string note = "";
 
    if(major_match && minor_match)
-      note = "M15_TREND_MATCH_BOTH";
+      note = (__TRGSTM_WorkerLabel() + "_TREND_MATCH_BOTH");
    else if(major_match)
-      note = "M15_TREND_MATCH_MAJOR";
+      note = (__TRGSTM_WorkerLabel() + "_TREND_MATCH_MAJOR");
    else if(minor_match)
-      note = "M15_TREND_MATCH_MINOR";
+      note = (__TRGSTM_WorkerLabel() + "_TREND_MATCH_MINOR");
 
    note = __TRGSTM_AppendNote(note, "TRG_" + __TRGSTM_DirName(trg_dir));
 
@@ -2252,8 +2412,8 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
       }
    }
 
-   TriggerStatementStartEvent start_events[];
-   int start_count = __TRGSTM_CollectStartEvents(use_sym, use_scan_to, start_events);
+   TriggerStatementStartEvent bridge_events[];
+   int bridge_event_count = __TRGSTM_CollectBridgeEvents(use_sym, use_scan_to, bridge_events);
 
    TriggerStatementStartEvent local_gate_events[];
    int local_gate_count = __TRGSTM_CollectLocalGateEvents(use_sym, use_scan_to, local_gate_events);
@@ -2287,7 +2447,7 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
                                                                 minor_windows,
                                                                 eligible_epochs);
 
-   int minor_session_count = FSMS_SW_Session_Count();
+   int minor_session_count = (__FSMS_SW_ShouldRunMinorWorldOnThisChart() ? FSMS_SW_Session_Count() : 0);
 
    datetime major_resume_from = scan_from;
    if(major_boot.ok && major_boot.complete_time > 0)
@@ -2310,15 +2470,15 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
 
    double equity             = initial_capital;
    double peak_balance       = initial_capital;
+   double highest_balance    = initial_capital;
+   double lowest_balance     = initial_capital;
    double max_drawdown_money = 0.0;
    double max_drawdown_pct   = 0.0;
 
    int executed_trades         = 0;
    int ignored_valid_triggers  = 0;
    int skipped_active_trade    = 0;
-   int skipped_lockout         = 0;
-   int skipped_trend_filter    = 0;
-   int skipped_local_gate      = 0;
+   int skipped_daily_loss_cap  = 0;
    int skipped_post_win_wait   = 0;
    int skipped_hypo_wins       = 0;
    int skipped_hypo_losses     = 0;
@@ -2343,11 +2503,13 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    int max_win_streak      = 0;
    int max_loss_streak     = 0;
 
-   int gate_loss_streak      = 0;
-   int lockout_activations   = 0;
-   int lockout_releases      = 0;
-   int post_win_wait_arms    = 0;
-   int post_win_wait_releases= 0;
+   int  daily_loss_count         = 0;
+   int  daily_loss_day_key       = 0;
+   bool daily_loss_cap_active    = false;
+   int  daily_loss_cap_activations = 0;
+   int  daily_loss_cap_resets      = 0;
+   int  post_win_wait_arms         = 0;
+   int  post_win_wait_releases     = 0;
 
    int exec_trend_major_only = 0;
    int exec_trend_minor_only = 0;
@@ -2380,13 +2542,18 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    bool     active_trade_open  = false;
    datetime active_trade_until = 0;
 
-   bool     lockout_active   = false;
-   datetime lockout_ref_time = 0;
-   int      next_start_index = 0;
-
    bool     post_win_wait_active   = false;
    datetime post_win_wait_ref_time = 0;
    int      next_local_rearm_index = 0;
+
+   bool      parent_gate_active     = false;
+   Direction parent_gate_dir        = DIR_UP;
+   int       parent_gate_kind       = 0;
+   int       parent_gate_ns         = WB15_NS_NONE;
+   datetime  parent_gate_start_time = 0;
+   datetime  parent_gate_start_bar  = 0;
+   int       next_parent_gate_index = 0;
+   int       parent_gate_seq        = -1;
 
    bool      local_gate_active     = false;
    Direction local_gate_dir        = DIR_UP;
@@ -2397,12 +2564,20 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    int       next_local_gate_index = 0;
    int       local_gate_seq        = -1;
 
-   bool      gate_cycle_set   = false;
-   Direction gate_cycle_dir   = DIR_UP;
-   datetime  gate_cycle_start = 0;
-
    for(int i = 0; i < raw_valid_triggers; ++i)
    {
+      __TRGSTM_AdvanceParentGateEvents(bridge_events,
+                                       bridge_event_count,
+                                       next_parent_gate_index,
+                                       trades[i].rec.hit_time,
+                                       parent_gate_active,
+                                       parent_gate_dir,
+                                       parent_gate_kind,
+                                       parent_gate_ns,
+                                       parent_gate_start_time,
+                                       parent_gate_start_bar,
+                                       parent_gate_seq);
+
       __TRGSTM_AdvanceLocalGateEvents(local_gate_events,
                                       local_gate_count,
                                       next_local_gate_index,
@@ -2414,23 +2589,6 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
                                       local_gate_start_time,
                                       local_gate_start_bar,
                                       local_gate_seq);
-
-      datetime unlock_on_time = __TRGSTM_AdvanceStartEvents(start_events,
-                                                            start_count,
-                                                            next_start_index,
-                                                            trades[i].rec.hit_time,
-                                                            lockout_active,
-                                                            lockout_ref_time,
-                                                            gate_loss_streak,
-                                                            lockout_releases);
-
-      trades[i].unlock_on_time = unlock_on_time;
-      if(unlock_on_time > 0)
-      {
-         gate_cycle_set   = false;
-         gate_cycle_dir   = DIR_UP;
-         gate_cycle_start = 0;
-      }
 
       Direction local_rearm_dir  = DIR_UP;
       int       local_rearm_kind = 0;
@@ -2446,6 +2604,12 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
                                                                          local_rearm_ns);
       if(local_rearm_time > 0)
          post_win_wait_releases++;
+
+      __TRGSTM_EnsureDailyLossBucket(trades[i].rec.hit_time,
+                                     daily_loss_day_key,
+                                     daily_loss_count,
+                                     daily_loss_cap_active,
+                                     daily_loss_cap_resets);
 
       if(active_trade_open)
       {
@@ -2471,14 +2635,16 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
          continue;
       }
 
-      if(lockout_active)
+      if(daily_loss_cap_active && daily_loss_count >= TRGSTMT_LOCK_AFTER_LOSSES)
       {
+         trades[i].unlock_on_time = __TRGSTM_NextDayStart(trades[i].rec.hit_time);
          __TRGSTM_SetSkip(trades[i],
-                          TRGSTMT_SKIP_LOCKOUT,
+                          TRGSTMT_SKIP_DAILY_LOSS_CAP,
                           equity,
-                          __TRGSTM_AppendNote(trades[i].note, "SKIPPED_WAITING_NEW_4H_SIGNAL_ON_AFTER_4_LOSSES"));
+                          __TRGSTM_AppendNote(trades[i].note,
+                                              "SKIPPED_DAILY_4L_CAP_UNTIL_" + __TRGSTM_SafeTime(trades[i].unlock_on_time)));
          ignored_valid_triggers++;
-         skipped_lockout++;
+         skipped_daily_loss_cap++;
          __TRGSTM_BumpHypotheticalCounters(trades[i],
                                            skipped_hypo_wins,
                                            skipped_hypo_losses,
@@ -2504,47 +2670,12 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
       bool major_match = (major_active && major_dir == trades[i].rec.dir);
       bool minor_match = (minor_active && minor_dir == trades[i].rec.dir);
 
-      if(!major_match && !minor_match)
-      {
-         __TRGSTM_SetSkip(trades[i],
-                          TRGSTMT_SKIP_TREND_FILTER,
-                          equity,
-                          __TRGSTM_AppendNote(trades[i].note,
-                                              __TRGSTM_BuildTrendSkipNote(trades[i].rec.dir,
-                                                                          major_active,
-                                                                          major_dir,
-                                                                          major_tag,
-                                                                          minor_active,
-                                                                          minor_dir,
-                                                                          minor_tag)));
-         ignored_valid_triggers++;
-         skipped_trend_filter++;
-         __TRGSTM_BumpHypotheticalCounters(trades[i],
-                                           skipped_hypo_wins,
-                                           skipped_hypo_losses,
-                                           skipped_hypo_open);
-         continue;
-      }
-
       if(major_match && minor_match)
          exec_trend_both++;
       else if(major_match)
          exec_trend_major_only++;
-      else
+      else if(minor_match)
          exec_trend_minor_only++;
-
-      bool gate_cycle_reset = __TRGSTM_ResetGateIfNewTrendCycle(eligible_epochs,
-                                                                trades[i].rec.dir,
-                                                                trades[i].rec.hit_time,
-                                                                gate_cycle_set,
-                                                                gate_cycle_dir,
-                                                                gate_cycle_start,
-                                                                gate_loss_streak);
-      if(gate_cycle_reset)
-      {
-         trades[i].note = __TRGSTM_AppendNote(trades[i].note,
-                                              "4L_COUNTER_RESET_NEW_M15_TREND_CYCLE");
-      }
 
       if(post_win_wait_active)
       {
@@ -2577,32 +2708,12 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
                                                                             local_rearm_time));
       }
 
-      if(!local_gate_active || local_gate_dir != trades[i].rec.dir)
-      {
-         __TRGSTM_SetSkip(trades[i],
-                          TRGSTMT_SKIP_LOCAL_GATE,
-                          equity,
-                          __TRGSTM_AppendNote(trades[i].note,
-                                              __TRGSTM_BuildLocalGateSkipNote(trades[i].rec.dir,
-                                                                              local_gate_active,
-                                                                              local_gate_dir,
-                                                                              local_gate_kind,
-                                                                              local_gate_ns,
-                                                                              local_gate_start_bar)));
-         ignored_valid_triggers++;
-         skipped_local_gate++;
-         __TRGSTM_BumpHypotheticalCounters(trades[i],
-                                           skipped_hypo_wins,
-                                           skipped_hypo_losses,
-                                           skipped_hypo_open);
-         continue;
-      }
-
       trades[i].taken       = true;
       trades[i].exec_index  = (executed_trades + 1);
       trades[i].skip_reason = TRGSTMT_SKIP_NONE;
       executed_trades++;
 
+      trades[i].note = __TRGSTM_AppendNote(trades[i].note, "ENGINE_TRIGGER_WINDOW_OK");
       trades[i].note = __TRGSTM_AppendNote(trades[i].note,
                                            __TRGSTM_BuildTrendMatchNote(trades[i].rec.dir,
                                                                         major_match,
@@ -2611,14 +2722,19 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
                                                                         minor_match,
                                                                         minor_dir,
                                                                         minor_tag));
-      trades[i].note = __TRGSTM_AppendNote(trades[i].note,
-                                           __TRGSTM_BuildLocalGateMatchNote(trades[i].rec.dir,
-                                                                            local_gate_kind,
-                                                                            local_gate_ns,
-                                                                            local_gate_start_bar));
-
-      if(trades[i].unlock_on_time > 0)
-         trades[i].note = __TRGSTM_AppendNote(trades[i].note, "UNLOCKED_BY_NEW_4H_SIGNAL_ON");
+      if(local_gate_active)
+      {
+         trades[i].note = __TRGSTM_AppendNote(trades[i].note,
+                                              __TRGSTM_BuildLocalGateMatchNote(trades[i].rec.dir,
+                                                                               local_gate_kind,
+                                                                               local_gate_ns,
+                                                                               local_gate_start_bar));
+      }
+      if(parent_gate_active)
+      {
+         trades[i].note = __TRGSTM_AppendNote(trades[i].note,
+                                              "PARENT_GATE_FROM_" + __TRGSTM_SafeTime(parent_gate_start_bar));
+      }
 
       if(trades[i].rec.dir == DIR_UP)
          buy_total++;
@@ -2642,6 +2758,10 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
 
          if(equity > peak_balance)
             peak_balance = equity;
+         if(equity > highest_balance)
+            highest_balance = equity;
+         if(equity < lowest_balance)
+            lowest_balance = equity;
 
          double dd_money = (peak_balance - equity);
          double dd_pct   = 0.0;
@@ -2671,12 +2791,11 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
             else
                sell_wins++;
 
-            gate_loss_streak      = 0;
-            post_win_wait_active  = true;
-            post_win_wait_ref_time= (trades[i].exit_time > 0 ? trades[i].exit_time : trades[i].rec.hit_time);
+            post_win_wait_active   = true;
+            post_win_wait_ref_time = (trades[i].exit_time > 0 ? trades[i].exit_time : trades[i].rec.hit_time);
             post_win_wait_arms++;
             trades[i].note = __TRGSTM_AppendNote(trades[i].note,
-                                                 "WAIT_FRESH_LOCAL_M15_SIGNAL_ON_AFTER_WIN");
+                                                 ("WAIT_FRESH_LOCAL_" + __TRGSTM_WorkerLabel() + "_SIGNAL_ON_AFTER_WIN"));
          }
          else
          {
@@ -2700,13 +2819,13 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
             if(trades[i].trigger_bar_ambiguous)
                trigger_bar_ambiguous++;
 
-            gate_loss_streak++;
-            if(gate_loss_streak >= TRGSTMT_LOCK_AFTER_LOSSES)
+            daily_loss_count++;
+            if(daily_loss_count >= TRGSTMT_LOCK_AFTER_LOSSES)
             {
-               lockout_active    = true;
-               lockout_ref_time  = (trades[i].exit_time > 0 ? trades[i].exit_time : trades[i].rec.hit_time);
-               lockout_activations++;
-               trades[i].note = __TRGSTM_AppendNote(trades[i].note, "LOCKOUT_ARMED_AFTER_4_CONSEC_LOSSES");
+               daily_loss_cap_active = true;
+               daily_loss_cap_activations++;
+               trades[i].note = __TRGSTM_AppendNote(trades[i].note,
+                                                    "DAILY_4L_CAP_ACTIVE_UNTIL_" + __TRGSTM_SafeTime(__TRGSTM_NextDayStart(trades[i].exit_time > 0 ? trades[i].exit_time : trades[i].rec.hit_time)));
             }
          }
 
@@ -2743,18 +2862,6 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
       }
    }
 
-   if(lockout_active)
-   {
-      __TRGSTM_AdvanceStartEvents(start_events,
-                                  start_count,
-                                  next_start_index,
-                                  use_scan_to,
-                                  lockout_active,
-                                  lockout_ref_time,
-                                  gate_loss_streak,
-                                  lockout_releases);
-   }
-
    if(post_win_wait_active)
    {
       Direction local_rearm_dir  = DIR_UP;
@@ -2773,8 +2880,10 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
          post_win_wait_releases++;
    }
 
-   bool lockout_active_at_end   = lockout_active;
-   bool post_win_wait_at_end    = post_win_wait_active;
+   bool daily_loss_cap_active_at_end = daily_loss_cap_active;
+   bool post_win_wait_at_end         = post_win_wait_active;
+   int  daily_loss_count_at_end      = daily_loss_count;
+   int  daily_loss_day_key_at_end    = daily_loss_day_key;
 
    if(executed_trades <= 0)
    {
@@ -2892,19 +3001,26 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "Initial Capital        : " + __TRGSTM_Money(initial_capital));
    __TRGSTM_WriteLine(handle, "Fixed Risk Per Trade   : " + __TRGSTM_Pct(risk_percent) + " = " + __TRGSTM_Money(risk_money));
    __TRGSTM_WriteLine(handle, "SL/TP Source           : TriggerSLTP.mqh valid triggers only");
-   __TRGSTM_WriteLine(handle, "Execution Model        : Single active trade only | entry at breakout level | touch-based TP/SL | conservative same-bar ambiguity = SL | M15 trend alignment required | active local M15 signal-on window required | fresh local M15 signal-on required after every executed WIN");
-   __TRGSTM_WriteLine(handle, "Protection Rule        : After 4 consecutive executed losses inside the same active M15-aligned trend cycle, trading is locked until a new 4H signal on arrives");
-   __TRGSTM_WriteLine(handle, "Trend Filter           : Trigger direction must align with active M15 major trend or active M15 minor trend");
-   __TRGSTM_WriteLine(handle, "Local M15 Signal Gate  : Trigger direction must also sit inside the active local M15 signal-on window opened by HWX/HWBB/FSMS/Gooz and closed by opposite MTC/MinorStarter/MinorOff");
-   __TRGSTM_WriteLine(handle, "Post-Win Re-Entry Rule : After each executed WIN, no new trigger can become a trade until a fresh local M15 signal-on event arrives after that win");
+   __TRGSTM_WriteLine(handle, "Execution Model        : Single active trade only | entry at breakout level | touch-based TP/SL | conservative same-bar ambiguity = SL | Trigger.mqh already enforces the parent " + __TRGSTM_ParentLabel() + " -> " + __TRGSTM_WorkerLabel() + " window plus the active local " + __TRGSTM_WorkerLabel() + " signal gate | max 4 executed losses per calendar day | fresh local " + __TRGSTM_WorkerLabel() + " signal-on required after every executed WIN");
+   __TRGSTM_WriteLine(handle, "Protection Rule        : After 4 executed losses on the same calendar day, no more trades are allowed until the next calendar day starts");
+   if(__FSMS_SW_ShouldRunMinorWorldOnThisChart())
+      __TRGSTM_WriteLine(handle, "Trend Context          : " + __TRGSTM_WorkerLabel() + " major/minor windows are reported as context only; execution itself follows Trigger.mqh parent/local gate rules");
+   else
+      __TRGSTM_WriteLine(handle, "Trend Context          : local minor world is disabled on this chart; execution itself follows Trigger.mqh parent/local gate rules");
+
+   if(__FSMS_SW_ShouldRunMinorWorldOnThisChart())
+      __TRGSTM_WriteLine(handle, "Local " + __TRGSTM_WorkerLabel() + " Signal Gate  : Trigger direction must also sit inside the active local " + __TRGSTM_WorkerLabel() + " signal-on window opened by HWX/HWBB/FSMS/Gooz and closed by opposite MTC/MinorStarter/MinorOff");
+   else
+      __TRGSTM_WriteLine(handle, "Local " + __TRGSTM_WorkerLabel() + " Signal Gate  : Trigger direction must also sit inside the active local " + __TRGSTM_WorkerLabel() + " signal-on window opened by HWX/HWBB/FSMS/Gooz and closed by opposite MTC only");
+   __TRGSTM_WriteLine(handle, "Post-Win Re-Entry Rule : After each executed WIN, no new trigger can become a trade until a fresh local " + __TRGSTM_WorkerLabel() + " signal-on event arrives after that win");
    __TRGSTM_WriteLine(handle, "Trend Seed (Major)     : " + major_seed_text);
    __TRGSTM_WriteLine(handle, "Trend Windows MAJ/MIN  : " + IntegerToString(major_window_count) + " / " + IntegerToString(minor_window_count));
    __TRGSTM_WriteLine(handle, "Aligned Trend Cycles   : " + IntegerToString(eligible_epoch_count));
    __TRGSTM_WriteLine(handle, "Minor Sessions Seen    : " + IntegerToString(minor_session_count));
    __TRGSTM_WriteLine(handle, "MTC Marker Events      : " + IntegerToString(mtc_count));
    __TRGSTM_WriteLine(handle, "Local Gate Events      : " + IntegerToString(local_gate_count));
-   __TRGSTM_WriteLine(handle, "Bridge Source          : Trigger.mqh / WB15 bridge start events");
-   __TRGSTM_WriteLine(handle, "Local Gate Source      : TriggerM15SignalGate.mqh / local M15 signal on-off events");
+   __TRGSTM_WriteLine(handle, "Bridge Source          : Trigger.mqh / " + __TRGSTM_ParentLabel() + " -> " + __TRGSTM_WorkerLabel() + " bridge events");
+   __TRGSTM_WriteLine(handle, "Local Gate Source      : TriggerM15SignalGate.mqh / local " + __TRGSTM_WorkerLabel() + " signal on-off events");
    __TRGSTM_WriteLine(handle, "Output Path            : " + g_trgstmt_last_fullpath);
    __TRGSTM_WriteLine(handle, "");
 
@@ -2915,12 +3031,11 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "Execution Rate         : " + __TRGSTM_Pct(execution_rate));
    __TRGSTM_WriteLine(handle, "Ignored Valid Triggers : " + IntegerToString(ignored_valid_triggers) + " | " + __TRGSTM_Pct(ignored_rate));
    __TRGSTM_WriteLine(handle, "Ignored: Active Trade  : " + IntegerToString(skipped_active_trade));
-   __TRGSTM_WriteLine(handle, "Ignored: 4L Lockout    : " + IntegerToString(skipped_lockout));
-   __TRGSTM_WriteLine(handle, "Ignored: Trend Filter  : " + IntegerToString(skipped_trend_filter));
-   __TRGSTM_WriteLine(handle, "Ignored: Local Gate    : " + IntegerToString(skipped_local_gate));
+   __TRGSTM_WriteLine(handle, "Ignored: Daily 4L Cap  : " + IntegerToString(skipped_daily_loss_cap));
+   __TRGSTM_WriteLine(handle, "Engine Gate            : Parent/local gate enforced before TriggerSLTP records are created inside Trigger.mqh");
+   __TRGSTM_WriteLine(handle, "Trend Context MAJ/MIN/B: " + IntegerToString(exec_trend_major_only) + " / " + IntegerToString(exec_trend_minor_only) + " / " + IntegerToString(exec_trend_both));
    __TRGSTM_WriteLine(handle, "Ignored: Post-Win Wait : " + IntegerToString(skipped_post_win_wait));
    __TRGSTM_WriteLine(handle, "Skipped Hypo W/L/O     : " + IntegerToString(skipped_hypo_wins) + " / " + IntegerToString(skipped_hypo_losses) + " / " + IntegerToString(skipped_hypo_open));
-   __TRGSTM_WriteLine(handle, "Trend Match MAJ/MIN/B  : " + IntegerToString(exec_trend_major_only) + " / " + IntegerToString(exec_trend_minor_only) + " / " + IntegerToString(exec_trend_both));
    __TRGSTM_WriteLine(handle, "Closed Trades          : " + IntegerToString(closed_trades));
    __TRGSTM_WriteLine(handle, "Open Trades            : " + IntegerToString(open_trades));
    __TRGSTM_WriteLine(handle, "Wins / Losses          : " + IntegerToString(wins) + " / " + IntegerToString(losses));
@@ -2941,15 +3056,18 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "Worst Trade            : " + worst_trade_text);
    __TRGSTM_WriteLine(handle, "Max Win Streak         : " + IntegerToString(max_win_streak));
    __TRGSTM_WriteLine(handle, "Max Loss Streak        : " + IntegerToString(max_loss_streak));
-   __TRGSTM_WriteLine(handle, "4L Lock Threshold      : " + IntegerToString(TRGSTMT_LOCK_AFTER_LOSSES));
-   __TRGSTM_WriteLine(handle, "Lockout Activations    : " + IntegerToString(lockout_activations));
-   __TRGSTM_WriteLine(handle, "Lockout Releases       : " + IntegerToString(lockout_releases));
-   __TRGSTM_WriteLine(handle, "Lockout Active At End  : " + (lockout_active_at_end ? "YES" : "NO"));
+   __TRGSTM_WriteLine(handle, "Daily 4L Threshold     : " + IntegerToString(TRGSTMT_LOCK_AFTER_LOSSES));
+   __TRGSTM_WriteLine(handle, "Daily Cap Activations  : " + IntegerToString(daily_loss_cap_activations));
+   __TRGSTM_WriteLine(handle, "Daily Cap Resets       : " + IntegerToString(daily_loss_cap_resets));
+   __TRGSTM_WriteLine(handle, "Daily Cap Active End   : " + (daily_loss_cap_active_at_end ? "YES" : "NO"));
+   __TRGSTM_WriteLine(handle, "Daily Losses End Day   : " + IntegerToString(daily_loss_count_at_end) + " | " + __TRGSTM_DayKeyText(daily_loss_day_key_at_end));
    __TRGSTM_WriteLine(handle, "Post-Win Wait Arms     : " + IntegerToString(post_win_wait_arms));
    __TRGSTM_WriteLine(handle, "Post-Win Wait Releases : " + IntegerToString(post_win_wait_releases));
    __TRGSTM_WriteLine(handle, "Post-Win Wait At End   : " + (post_win_wait_at_end ? "YES" : "NO"));
    __TRGSTM_WriteLine(handle, "Max Drawdown           : " + __TRGSTM_Money(max_drawdown_money) + " | " + __TRGSTM_Pct(max_drawdown_pct));
    __TRGSTM_WriteLine(handle, "Balance (Closed)       : " + __TRGSTM_Money(equity));
+   __TRGSTM_WriteLine(handle, "Highest Balance Seen   : " + __TRGSTM_Money(highest_balance));
+   __TRGSTM_WriteLine(handle, "Lowest Balance Seen    : " + __TRGSTM_Money(lowest_balance));
    __TRGSTM_WriteLine(handle, "Open Floating P/L      : " + __TRGSTM_Money(total_open_float_money) + " | " + DoubleToString(total_open_float_r, 2) + "R");
    __TRGSTM_WriteLine(handle, "Equity + Floating      : " + __TRGSTM_Money(balance_plus_float));
    __TRGSTM_WriteLine(handle, "Ambiguous Losses       : " + IntegerToString(ambiguous_losses));
@@ -2963,7 +3081,7 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
 
    if(executed_trades <= 0)
    {
-      __TRGSTM_WriteLine(handle, "No executable trades were taken under the single-trade, 4-loss-lock, M15 trend-alignment, local M15 signal-gate, and post-win fresh-local-signal re-entry rules.");
+      __TRGSTM_WriteLine(handle, "No executable trades were taken under the single-trade, daily 4-loss cap, engine-level parent/local gate enforcement, and post-win fresh-local-signal re-entry rules.");
    }
    else
    {
@@ -3046,11 +3164,11 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "------------------------------------------------------------");
    __TRGSTM_WriteLine(handle, "1) This statement first collects all valid TriggerSLTP triggers inside the scan window, then applies the execution model.");
    __TRGSTM_WriteLine(handle, "2) Only one trade can be active at a time; all later valid triggers are ignored until that trade reaches WIN, LOSS, or remains OPEN at scan end.");
-   __TRGSTM_WriteLine(handle, "3) The 4-loss protection counter belongs to the current aligned M15 trend cycle; if that cycle ends and a fresh same-direction cycle appears later, the counter restarts from zero.");
-   __TRGSTM_WriteLine(handle, "4) After 4 consecutive executed losses inside the same aligned cycle, new entries are blocked until a fresh 4H signal on is received from the H4->worker bridge.");
-   __TRGSTM_WriteLine(handle, "5) A valid trigger is converted to a trade only when its direction matches the active M15 major trend or an active M15 minor trend at trigger time.");
-   __TRGSTM_WriteLine(handle, "6) A valid trigger also needs an active local M15 signal-on window in the same direction at trigger time.");
-   __TRGSTM_WriteLine(handle, "7) After every executed WIN, the strategy waits for a fresh local M15 signal-on event after that win before any new trigger can become a trade again.");
+   __TRGSTM_WriteLine(handle, "3) The executed-loss protection counter is calendar-day based; it resets automatically when a new trading day starts.");
+   __TRGSTM_WriteLine(handle, "4) After 4 executed losses inside the same calendar day, new entries are blocked until the next calendar day begins.");
+   __TRGSTM_WriteLine(handle, "5) Trigger.mqh already enforces the active parent " + __TRGSTM_ParentLabel() + " -> " + __TRGSTM_WorkerLabel() + " bridge window together with the active local " + __TRGSTM_WorkerLabel() + " signal-on window before TriggerSLTP records are created.");
+   __TRGSTM_WriteLine(handle, "6) The reported " + __TRGSTM_WorkerLabel() + " major/minor trend windows are context statistics only; they no longer block execution by themselves.");
+   __TRGSTM_WriteLine(handle, "7) After every executed WIN, the strategy waits for a fresh local " + __TRGSTM_WorkerLabel() + " signal-on event after that win before any new trigger can become a trade again.");
    __TRGSTM_WriteLine(handle, "8) Skipped valid triggers are listed separately together with their hypothetical outcome so you can inspect missed opportunities.");
    __TRGSTM_WriteLine(handle, "9) Risk per executed trade is fixed on initial capital, not compounded trade-by-trade.");
    __TRGSTM_WriteLine(handle, "10) Ambiguous same-bar outcomes are counted conservatively as SL to avoid optimistic bias.");
@@ -3064,14 +3182,14 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
             " | raw_valid=", raw_valid_triggers,
             " | executed=", executed_trades,
             " | ignored=", ignored_valid_triggers,
-            " | trend_skips=", skipped_trend_filter,
+            " | daily_cap_skips=", skipped_daily_loss_cap,
             " | postwin_skips=", skipped_post_win_wait,
             " | major_windows=", major_window_count,
             " | minor_windows=", minor_window_count,
             " | closed=", closed_trades,
             " | open=", open_trades,
             " | net=", __TRGSTM_Money(net_profit),
-            " | lockouts=", lockout_activations);
+            " | daily_caps=", daily_loss_cap_activations);
    }
 
    return true;

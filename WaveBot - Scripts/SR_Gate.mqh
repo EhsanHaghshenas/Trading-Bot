@@ -90,3 +90,4 @@ inline void SR_DeleteAllObjects()
    SR_GoozBaghali_ResetAll();
 }
 #endif // WAVEBOT_SR_GATE_MQH
+
