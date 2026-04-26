@@ -1,3 +1,4 @@
+
 // WaveBot/SR_Mitigator.mqh
 
 // WaveBot/SR_Mitigator.mqh

@@ -1,3 +1,4 @@
+
 #ifndef WAVEBOT_TRIGGER_SLTP_MQH
 #define WAVEBOT_TRIGGER_SLTP_MQH
 
@@ -641,11 +642,13 @@ inline void __TRGSL_CloseExecutionRecord(const int      pos,
       g_trgsl_exec_records[pos].daily_losses_after = g_trgsl_exec_daily_losses;
    }
 
+   // Re-entry after a WIN is now allowed immediately on any later valid trigger.
+   // The historical post-win fresh-local-signal gate is intentionally disabled.
    if(result_status == TRGSL_EXEC_RESULT_WIN)
    {
-      g_trgsl_exec_post_win_wait     = true;
-      g_trgsl_exec_post_win_gate_seq = rec.local_gate_seq;
-      g_trgsl_exec_post_win_ref_time = exit_time;
+      g_trgsl_exec_post_win_wait     = false;
+      g_trgsl_exec_post_win_gate_seq = -1;
+      g_trgsl_exec_post_win_ref_time = 0;
    }
 
    g_trgsl_exec_active      = false;
@@ -657,21 +660,15 @@ inline void __TRGSL_CloseExecutionRecord(const int      pos,
 inline bool __TRGSL_AllowFreshLocalAfterWin(const int      local_gate_seq,
                                             const datetime local_gate_time)
 {
-   if(!g_trgsl_exec_post_win_wait)
-      return true;
-
-   if(local_gate_seq <= 0 || local_gate_time <= 0)
-      return false;
-
-   if(local_gate_seq == g_trgsl_exec_post_win_gate_seq)
-      return false;
-
-   if(local_gate_time <= g_trgsl_exec_post_win_ref_time)
-      return false;
-
+   // This rule has been removed by design: after a WIN, the next valid
+   // Type-1 or Type-2 trigger may become a trade as long as the shared
+   // execution limits still allow it.
    g_trgsl_exec_post_win_wait     = false;
-   g_trgsl_exec_post_win_gate_seq = local_gate_seq;
+   g_trgsl_exec_post_win_gate_seq = -1;
    g_trgsl_exec_post_win_ref_time = 0;
+
+   bool __unused = (local_gate_seq > 0 && local_gate_time > 0);
+   if(__unused) { /* keep MQL5 compiler quiet */ }
    return true;
 }
 
@@ -702,11 +699,7 @@ inline bool __TRGSL_CanOpenExecution(const datetime hit_time,
       return false;
    }
 
-   if(!__TRGSL_AllowFreshLocalAfterWin(local_gate_seq, local_gate_time))
-   {
-      reason = "WAIT_FRESH_LOCAL_SIGNAL_AFTER_WIN";
-      return false;
-   }
+   __TRGSL_AllowFreshLocalAfterWin(local_gate_seq, local_gate_time);
 
    return true;
 }
@@ -1023,6 +1016,7 @@ inline void TriggerSLTP_OnTriggerFired(const string    sym,
       Print("[TRG-SLTP] ",
             (dir == DIR_UP ? "UP" : "DOWN"),
             " #", rec.serial,
+            " | type=", rec.type_id,
             " | breakout=", DoubleToString(rec.breakout_level, digits),
             " | SL=", DoubleToString(rec.sl_level, digits),
             " | TP=", DoubleToString(rec.tp_level, digits),
@@ -1031,7 +1025,7 @@ inline void TriggerSLTP_OnTriggerFired(const string    sym,
             " | hit=", TimeToString(rec.hit_time, TIME_DATE|TIME_SECONDS),
             " | local_seq=", local_gate_seq,
             " | daily_losses=", g_trgsl_exec_daily_losses,
-            " | postwin_wait=", (g_trgsl_exec_post_win_wait ? "YES" : "NO"));
+            " | postwin_wait=DISABLED_REENTRY_ALLOWED");
    }
 }
 

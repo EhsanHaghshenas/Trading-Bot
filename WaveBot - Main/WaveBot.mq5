@@ -1,3 +1,4 @@
+
 #property strict
 #property description "WaveBot – W2/W3 + Hunter + ExtLQ + SW (Bootstrap Direction Race)"
 

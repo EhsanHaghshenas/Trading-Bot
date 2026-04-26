@@ -1,3 +1,4 @@
+
 // WaveBot/SR_Gate.mqh
 #ifndef WAVEBOT_SR_GATE_MQH
 #define WAVEBOT_SR_GATE_MQH

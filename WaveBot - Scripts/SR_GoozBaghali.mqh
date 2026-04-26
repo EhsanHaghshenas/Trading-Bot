@@ -1,3 +1,4 @@
+
 // WaveBot/SR_GoozBaghali.mqh
 // WaveBot/SR_GoozBaghali.mqh
 #ifndef WAVEBOT_SR_GOOZBAGHALI_MQH

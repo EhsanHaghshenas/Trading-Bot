@@ -1,3 +1,4 @@
+
 #ifndef WAVEBOT_TRIGGER_STATEMENT_MQH
 #define WAVEBOT_TRIGGER_STATEMENT_MQH
 
@@ -182,7 +183,7 @@ inline string __TRGSTM_SkipReasonName(const int skip_reason)
    if(skip_reason == TRGSTMT_SKIP_LOCAL_GATE)
       return (__TRGSTM_WorkerLabel() + "_LOCAL_SIGNAL_WINDOW_NOT_OPEN");
    if(skip_reason == TRGSTMT_SKIP_POST_WIN_WAIT)
-      return ("WAIT_NEW_LOCAL_" + __TRGSTM_WorkerLabel() + "_SIGNAL_ON_AFTER_WIN");
+      return "POST_WIN_WAIT_DISABLED";
    return "-";
 }
 
@@ -2469,12 +2470,29 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    int raw_fired_triggers = __TRGSTM_CollectFireEvents(use_sym, scan_from, scan_to, fire_events);
    int raw_rejected_triggers = 0;
    int raw_valid_fire_events = 0;
+   int raw_fired_type1 = 0;
+   int raw_fired_type2 = 0;
    for(int fe = 0; fe < raw_fired_triggers; ++fe)
    {
+      if(fire_events[fe].type_id == 1)
+         raw_fired_type1++;
+      else if(fire_events[fe].type_id == 2)
+         raw_fired_type2++;
+
       if(fire_events[fe].sltp_valid)
          raw_valid_fire_events++;
       else
          raw_rejected_triggers++;
+   }
+
+   int raw_valid_type1 = 0;
+   int raw_valid_type2 = 0;
+   for(int rv = 0; rv < raw_valid_triggers; ++rv)
+   {
+      if(records[rv].type_id == 1)
+         raw_valid_type1++;
+      else if(records[rv].type_id == 2)
+         raw_valid_type2++;
    }
 
    int tfsec = PeriodSeconds(tf);
@@ -2790,7 +2808,7 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
       else if(minor_match)
          exec_trend_minor_only++;
 
-      if(post_win_wait_active)
+      if(false && post_win_wait_active)
       {
          __TRGSTM_SetSkip(trades[i],
                           TRGSTMT_SKIP_POST_WIN_WAIT,
@@ -2904,11 +2922,10 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
             else
                sell_wins++;
 
-            post_win_wait_active   = true;
-            post_win_wait_ref_time = (trades[i].exit_time > 0 ? trades[i].exit_time : trades[i].rec.hit_time);
-            post_win_wait_arms++;
+            post_win_wait_active   = false;
+            post_win_wait_ref_time = 0;
             trades[i].note = __TRGSTM_AppendNote(trades[i].note,
-                                                 ("WAIT_FRESH_LOCAL_" + __TRGSTM_WorkerLabel() + "_SIGNAL_ON_AFTER_WIN"));
+                                                 "POST_WIN_REENTRY_ALLOWED_NEXT_VALID_TRIGGER");
          }
          else
          {
@@ -2975,7 +2992,7 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
       }
    }
 
-   if(post_win_wait_active)
+   if(false && post_win_wait_active)
    {
       Direction local_rearm_dir  = DIR_UP;
       int       local_rearm_kind = 0;
@@ -3146,7 +3163,7 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "Initial Capital        : " + __TRGSTM_Money(initial_capital));
    __TRGSTM_WriteLine(handle, "Fixed Risk Per Trade   : " + __TRGSTM_Pct(risk_percent) + " = " + __TRGSTM_Money(risk_money));
    __TRGSTM_WriteLine(handle, "Trigger Log Source     : TriggerSLTP.mqh fired-trigger events; valid SL/TP records are still used for execution statistics");
-   __TRGSTM_WriteLine(handle, "Execution Model        : Single active trade only | entry at breakout level | touch-based TP/SL | conservative same-bar ambiguity = SL | Trigger.mqh already enforces the parent " + __TRGSTM_ParentLabel() + " -> " + __TRGSTM_WorkerLabel() + " window plus the active local " + __TRGSTM_WorkerLabel() + " signal gate | max 4 executed losses per calendar day | fresh local " + __TRGSTM_WorkerLabel() + " signal-on required after every executed WIN");
+   __TRGSTM_WriteLine(handle, "Execution Model        : Single active trade only | entry at breakout level | touch-based TP/SL | conservative same-bar ambiguity = SL | Trigger.mqh enforces the parent " + __TRGSTM_ParentLabel() + " -> " + __TRGSTM_WorkerLabel() + " window plus the active local " + __TRGSTM_WorkerLabel() + " signal gate | max 4 executed losses per calendar day | post-win wait disabled");
    __TRGSTM_WriteLine(handle, "Protection Rule        : After 4 executed losses on the same calendar day, no more trades are allowed until the next calendar day starts");
    if(__FSMS_SW_ShouldRunMinorWorldOnThisChart())
       __TRGSTM_WriteLine(handle, "Trend Context          : " + __TRGSTM_WorkerLabel() + " major/minor windows are reported as context only; execution itself follows Trigger.mqh parent/local gate rules");
@@ -3157,7 +3174,7 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
       __TRGSTM_WriteLine(handle, "Local " + __TRGSTM_WorkerLabel() + " Signal Gate  : Trigger direction must also sit inside the active local " + __TRGSTM_WorkerLabel() + " signal-on window opened by HWX/HWBB/FSMS/Gooz and closed by opposite MTC/MinorStarter/MinorOff");
    else
       __TRGSTM_WriteLine(handle, "Local " + __TRGSTM_WorkerLabel() + " Signal Gate  : Trigger direction must also sit inside the active local " + __TRGSTM_WorkerLabel() + " signal-on window opened by HWX/HWBB/FSMS/Gooz and closed by opposite MTC only");
-   __TRGSTM_WriteLine(handle, "Post-Win Re-Entry Rule : After each executed WIN, no new trigger can become a trade until a fresh local " + __TRGSTM_WorkerLabel() + " signal-on event arrives after that win");
+   __TRGSTM_WriteLine(handle, "Post-Win Re-Entry Rule : DISABLED - after a WIN, the next valid Type-1 or Type-2 trigger may execute if shared limits allow it");
    __TRGSTM_WriteLine(handle, "Trend Seed (Major)     : " + major_seed_text);
    __TRGSTM_WriteLine(handle, "Trend Windows MAJ/MIN  : " + IntegerToString(major_window_count) + " / " + IntegerToString(minor_window_count));
    __TRGSTM_WriteLine(handle, "Aligned Trend Cycles   : " + IntegerToString(eligible_epoch_count));
@@ -3173,7 +3190,9 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "SUMMARY");
    __TRGSTM_WriteLine(handle, "------------------------------------------------------------");
    __TRGSTM_WriteLine(handle, "Raw Fired Triggers     : " + IntegerToString(raw_fired_triggers));
+   __TRGSTM_WriteLine(handle, "Raw Fired Type 1 / 2   : " + IntegerToString(raw_fired_type1) + " / " + IntegerToString(raw_fired_type2));
    __TRGSTM_WriteLine(handle, "Raw Valid Triggers     : " + IntegerToString(raw_valid_triggers));
+   __TRGSTM_WriteLine(handle, "Raw Valid Type 1 / 2   : " + IntegerToString(raw_valid_type1) + " / " + IntegerToString(raw_valid_type2));
    __TRGSTM_WriteLine(handle, "Rejected Fired Triggers: " + IntegerToString(raw_rejected_triggers));
    __TRGSTM_WriteLine(handle, "Valid Fire Events      : " + IntegerToString(raw_valid_fire_events));
    __TRGSTM_WriteLine(handle, "Last Fired Trigger     : " + last_fired_text);
@@ -3184,7 +3203,7 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "Ignored: Daily 4L Cap  : " + IntegerToString(skipped_daily_loss_cap));
    __TRGSTM_WriteLine(handle, "Engine Gate            : Parent/local gate enforced before TriggerSLTP records are created inside Trigger.mqh");
    __TRGSTM_WriteLine(handle, "Trend Context MAJ/MIN/B: " + IntegerToString(exec_trend_major_only) + " / " + IntegerToString(exec_trend_minor_only) + " / " + IntegerToString(exec_trend_both));
-   __TRGSTM_WriteLine(handle, "Ignored: Post-Win Wait : " + IntegerToString(skipped_post_win_wait));
+   __TRGSTM_WriteLine(handle, "Ignored: Post-Win Wait : " + IntegerToString(skipped_post_win_wait) + " (disabled)");
    __TRGSTM_WriteLine(handle, "Skipped Hypo W/L/O     : " + IntegerToString(skipped_hypo_wins) + " / " + IntegerToString(skipped_hypo_losses) + " / " + IntegerToString(skipped_hypo_open));
    __TRGSTM_WriteLine(handle, "Closed Trades          : " + IntegerToString(closed_trades));
    __TRGSTM_WriteLine(handle, "Open Trades            : " + IntegerToString(open_trades));
@@ -3211,6 +3230,7 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "Daily Cap Resets       : " + IntegerToString(daily_loss_cap_resets));
    __TRGSTM_WriteLine(handle, "Daily Cap Active End   : " + (daily_loss_cap_active_at_end ? "YES" : "NO"));
    __TRGSTM_WriteLine(handle, "Daily Losses End Day   : " + IntegerToString(daily_loss_count_at_end) + " | " + __TRGSTM_DayKeyText(daily_loss_day_key_at_end));
+   __TRGSTM_WriteLine(handle, "Post-Win Re-entry Rule : DISABLED - next valid Type-1/Type-2 trigger may execute");
    __TRGSTM_WriteLine(handle, "Post-Win Wait Arms     : " + IntegerToString(post_win_wait_arms));
    __TRGSTM_WriteLine(handle, "Post-Win Wait Releases : " + IntegerToString(post_win_wait_releases));
    __TRGSTM_WriteLine(handle, "Post-Win Wait At End   : " + (post_win_wait_at_end ? "YES" : "NO"));
@@ -3275,7 +3295,7 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
 
    if(executed_trades <= 0)
    {
-      __TRGSTM_WriteLine(handle, "No executable trades were taken under the single-trade, daily 4-loss cap, engine-level parent/local gate enforcement, and post-win fresh-local-signal re-entry rules.");
+      __TRGSTM_WriteLine(handle, "No executable trades were taken under the single-trade, daily 4-loss cap, and engine-level parent/local gate enforcement rules.");
    }
    else
    {
@@ -3363,10 +3383,11 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "5) After 4 executed losses inside the same calendar day, new entries are blocked until the next calendar day begins.");
    __TRGSTM_WriteLine(handle, "6) Trigger.mqh already enforces the active parent " + __TRGSTM_ParentLabel() + " -> " + __TRGSTM_WorkerLabel() + " bridge window together with the active local " + __TRGSTM_WorkerLabel() + " signal-on window before TriggerSLTP records are created.");
    __TRGSTM_WriteLine(handle, "7) The reported " + __TRGSTM_WorkerLabel() + " major/minor trend windows are context statistics only; they no longer block execution by themselves.");
-   __TRGSTM_WriteLine(handle, "8) After every executed WIN, the strategy waits for a fresh local " + __TRGSTM_WorkerLabel() + " signal-on event after that win before any new trigger can become a trade again.");
-   __TRGSTM_WriteLine(handle, "9) Skipped valid triggers are listed separately together with their hypothetical outcome so you can inspect missed opportunities.");
-   __TRGSTM_WriteLine(handle, "10) Risk per executed trade is fixed on initial capital, not compounded trade-by-trade.");
-   __TRGSTM_WriteLine(handle, "11) Ambiguous same-bar outcomes are counted conservatively as SL to avoid optimistic bias.");
+   __TRGSTM_WriteLine(handle, "8) Post-win waiting is disabled: after a WIN, the next valid Type-1 or Type-2 trigger can become a trade if the shared execution limits allow it.");
+   __TRGSTM_WriteLine(handle, "9) Trigger Type=1 and Type=2 are detected by separate engines but share one execution/risk limit model.");
+   __TRGSTM_WriteLine(handle, "10) Skipped valid triggers are listed separately together with their hypothetical outcome so you can inspect missed opportunities.");
+   __TRGSTM_WriteLine(handle, "11) Risk per executed trade is fixed on initial capital, not compounded trade-by-trade.");
+   __TRGSTM_WriteLine(handle, "12) Ambiguous same-bar outcomes are counted conservatively as SL to avoid optimistic bias.");
 
    FileFlush(handle);
    FileClose(handle);
