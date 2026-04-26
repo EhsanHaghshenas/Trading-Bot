@@ -66,24 +66,57 @@ int g_scan_id = 0;
 datetime g_stmt_scan_start = 0;
 datetime g_stmt_scan_stop  = 0;
 bool     g_stmt_window_set = false;
+bool     g_stmt_first_write_done = false;
+datetime g_stmt_last_write_attempt = 0;
 
-// --- NEW: Auto Master/Slave role based on chart timeframe (H4=Master, M15=Slave) ---
-enum WBRole { WBROLE_STANDALONE=0, WBROLE_MASTER_H4=1, WBROLE_SLAVE_M15=2 };
+// --- Auto role based on chart timeframe (H4 -> M15 -> M1) ---
+enum WBRole
+{
+   WBROLE_STANDALONE = 0,
+   WBROLE_MASTER_H4  = 1,
+   WBROLE_MIDDLE_M15 = 2,
+   WBROLE_TRIGGER_M1 = 3
+};
 WBRole g_role = WBROLE_STANDALONE;
 
 inline WBRole __WB_DetectRole()
 {
    ENUM_TIMEFRAMES tf = (ENUM_TIMEFRAMES)Period();
+
    if(tf == PERIOD_H4)  return WBROLE_MASTER_H4;
-   if(tf == PERIOD_M15) return WBROLE_SLAVE_M15;
+   if(tf == PERIOD_M15) return WBROLE_MIDDLE_M15;
+   if(tf == PERIOD_M1)  return WBROLE_TRIGGER_M1;
+
    return WBROLE_STANDALONE;
+}
+
+inline bool __WB_IsRoleH4()
+{
+   return (g_role == WBROLE_MASTER_H4);
+}
+
+inline bool __WB_IsRoleM15()
+{
+   return (g_role == WBROLE_MIDDLE_M15);
+}
+
+inline bool __WB_IsRoleM1()
+{
+   return (g_role == WBROLE_TRIGGER_M1);
 }
 
 inline ENUM_TIMEFRAMES __WB_EffectiveTF()
 {
-   if(g_role == WBROLE_MASTER_H4)  return PERIOD_H4;
-   if(g_role == WBROLE_SLAVE_M15) return PERIOD_M15;
+   if(__WB_IsRoleH4())  return PERIOD_H4;
+   if(__WB_IsRoleM15()) return PERIOD_M15;
+   if(__WB_IsRoleM1())  return PERIOD_M1;
+
    return InpTF; // legacy standalone mode
+}
+
+inline bool __WB_ShouldRunTriggerEngine()
+{
+   return __WB_IsRoleM1();
 }
 
 void ResolveWindow(datetime &start, datetime &stop);
@@ -97,7 +130,11 @@ inline void __WB_ApplyHiddenVisualPolicies()
 
 inline void __WB_DeleteAllM15NumberingObjects()
 {
-   if((ENUM_TIMEFRAMES)Period() != PERIOD_M15) return;
+   // Legacy function name kept intentionally.
+   // We also purge old local minor-world artifacts from M1 because minor logic
+   // is no longer allowed to execute on M15 or M1.
+   ENUM_TIMEFRAMES chart_tf = (ENUM_TIMEFRAMES)Period();
+   if(chart_tf != PERIOD_M15 && chart_tf != PERIOD_M1) return;
 
    for(int i = ObjectsTotal(0) - 1; i >= 0; --i)
    {
@@ -161,7 +198,7 @@ inline bool __WB_ShouldHandleTriggerStatement()
    if(!InpEnableTriggerStatement)
       return false;
 
-   return ((ENUM_TIMEFRAMES)Period() == PERIOD_M15);
+   return ((ENUM_TIMEFRAMES)Period() == PERIOD_M1);
 }
 
 inline void __WB_RememberTriggerStatementWindow(const datetime start,
@@ -183,20 +220,60 @@ inline void __WB_WriteTriggerStatementReport()
    if(g_stmt_window_set)
    {
       stmt_start = g_stmt_scan_start;
-      stmt_stop  = g_stmt_scan_stop;
+      stmt_stop  = TimeCurrent();
+      if(stmt_stop <= 0)
+         stmt_stop = g_stmt_scan_stop;
    }
    else
    {
       ResolveWindow(stmt_start, stmt_stop);
    }
 
-   TriggerStatement_WriteTextReport(InpSymbol,
-                                    (ENUM_TIMEFRAMES)Period(),
-                                    stmt_start,
-                                    stmt_stop,
-                                    InpTriggerStatementInitialCapital,
-                                    InpTriggerStatementRiskPercent,
-                                    InpTriggerStatementFileTag);
+   if(stmt_stop <= 0)
+      stmt_stop = TimeCurrent();
+   if(stmt_start > stmt_stop)
+      stmt_start = 0;
+
+   g_stmt_last_write_attempt = TimeCurrent();
+
+   bool ok = TriggerStatement_WriteTextReport(InpSymbol,
+                                              (ENUM_TIMEFRAMES)Period(),
+                                              stmt_start,
+                                              stmt_stop,
+                                              InpTriggerStatementInitialCapital,
+                                              InpTriggerStatementRiskPercent,
+                                              InpTriggerStatementFileTag);
+   if(ok)
+   {
+      g_stmt_first_write_done = true;
+      g_stmt_scan_stop = stmt_stop;
+      TriggerSLTP_ClearStatementDirty();
+   }
+   else if(InpDebugPrints)
+   {
+      Print("[WB] Trigger statement write failed | last_path=", TriggerStatement_LastFullPath(),
+            " | records=", TriggerStatement_LastRecordCount());
+   }
+}
+
+inline void __WB_MaybeWriteTriggerStatementReport()
+{
+   if(!__WB_ShouldHandleTriggerStatement())
+      return;
+
+   // The first write creates the TXT file even before the first valid trade.
+   // Later writes are event-driven through TriggerSLTP's dirty flag.
+   if(!g_stmt_first_write_done || TriggerSLTP_IsStatementDirty())
+      __WB_WriteTriggerStatementReport();
+}
+
+bool WaveBot_RequestImmediateTriggerStatementWrite()
+{
+   if(!__WB_ShouldHandleTriggerStatement())
+      return false;
+
+   __WB_WriteTriggerStatementReport();
+   return TriggerStatement_LastWriteOK();
 }
 // ============================================================================
 // Minor session runner (Phase-1: Minor inside Major)
@@ -347,17 +424,36 @@ int OnInit()
    WBWM_Init();
    Trigger_ResetGlobals();
    TriggerStatement_ResetGlobals();
+   TriggerM15SignalGate_ResetGlobals();
+
    g_stmt_scan_start = 0;
    g_stmt_scan_stop  = 0;
    g_stmt_window_set = false;
+   g_stmt_first_write_done = false;
+   g_stmt_last_write_attempt = 0;
+
    __WB_ApplyHiddenVisualPolicies();
    __WB_DeleteAllM15NumberingObjects();
 
-   // M15 Slave: start in idle mode and wait for Master signals
-   if(g_role == WBROLE_SLAVE_M15)
+   if(__WB_IsRoleM15())
+   {
       WB15_SlaveInit();
+   }
+   else if(__WB_IsRoleM1())
+   {
+      WB1_SlaveInit();
+   }
 
-   EventSetTimer(g_role == WBROLE_SLAVE_M15 ? 1 : 2);
+   if(__WB_ShouldHandleTriggerStatement())
+   {
+      datetime stmt_start = 0;
+      datetime stmt_stop  = 0;
+      ResolveWindow(stmt_start, stmt_stop);
+      __WB_RememberTriggerStatementWindow(stmt_start, stmt_stop);
+      __WB_WriteTriggerStatementReport();
+   }
+
+   EventSetTimer((__WB_IsRoleM15() || __WB_IsRoleM1()) ? 1 : 2);
    return(INIT_SUCCEEDED);
 }
 
@@ -366,8 +462,11 @@ void OnDeinit(const int reason)
    __WB_ApplyHiddenVisualPolicies();
    __WB_DeleteAllM15NumberingObjects();
    __WB_WriteTriggerStatementReport();
+
    Trigger_ResetGlobals();
    TriggerStatement_ResetGlobals();
+   TriggerM15SignalGate_ResetGlobals();
+
    EventKillTimer();
 }
 
@@ -393,22 +492,31 @@ void SB_RunOneShot()
             " | NOTE: Only SHADOW_BREAK_* markers are drawn by the ShadowBreaker module.");
 }
 
-// --- OnTimer: ??????? ????? + ????? ??? ?? Mode ????? + ????? Minor sessions ---
+// --- OnTimer: bridge sync + one-shot scan on the current role + live trigger on M1 ---
 void OnTimer()
 {
-   // M15 keeps listening to the H4 bridge on every timer tick.
-   // Local MIN-world execution on the slave is disabled and any old
-   // local-minor artifacts are purged from the chart.
-   if(g_role == WBROLE_SLAVE_M15)
+   if(__WB_IsRoleM15())
    {
       WB15_Slave_OnTimer(InpSymbol);
+      __WB_DeleteAllM15NumberingObjects();
+   }
+   else if(__WB_IsRoleM1())
+   {
+      WB1_Slave_OnTimer(InpSymbol);
       __WB_DeleteAllM15NumberingObjects();
    }
 
    // Major namespace (default world)
    Markers_SetNamespace("MAJ");
    __WB_ApplyHiddenVisualPolicies();
-   Trigger_OnTimer(InpSymbol);
+
+   if(__WB_ShouldRunTriggerEngine())
+      Trigger_OnTimer(InpSymbol);
+
+   // On M1, live trigger processing can happen before the initial one-shot scan
+   // finishes or before parent-readiness allows the scan branch below to run.
+   // Therefore statement writing must be checked immediately after Trigger_OnTimer.
+   __WB_MaybeWriteTriggerStatementReport();
 
    // --- optional one-shot ShadowBreaker run (replacement for old OnStart)
    if(InpRunShadowBreakerOnce && !g_sb_ran)
@@ -417,13 +525,32 @@ void OnTimer()
       g_sb_ran = true;
    }
 
-   if(g_once) return;
+   if(g_once)
+   {
+      __WB_MaybeWriteTriggerStatementReport();
+      return;
+   }
 
-   // MASTER (H4): start a fresh run for the M15 bridge (streamed signals)
-   if(g_role == WBROLE_MASTER_H4)
+   // Readiness / lifecycle across the 3 charts
+   if(__WB_IsRoleH4())
+   {
       WB15_MasterBegin(InpSymbol);
+   }
+   else if(__WB_IsRoleM15())
+   {
+      if(!WB15_MasterIsReadyForChild(InpSymbol))
+         return;
 
-   datetime start=0, stop=0;
+      WB1_MasterBegin(InpSymbol);
+   }
+   else if(__WB_IsRoleM1())
+   {
+      if(!WB1_MasterIsReadyForChild(InpSymbol))
+         return;
+   }
+
+   datetime start = 0;
+   datetime stop  = 0;
    ResolveWindow(start, stop);
    __WB_RememberTriggerStatementWindow(start, stop);
 
@@ -443,7 +570,7 @@ void OnTimer()
       resume_from = boot.complete_time + PeriodSeconds(tf);
 
       if(InpDebugPrints)
-         Print("[BOOT] Winner=", (mode_for_run==DIR_UP?"UP":"DOWN"),
+         Print("[BOOT] Winner=", (mode_for_run==DIR_UP ? "UP" : "DOWN"),
                " | first pair @ ", TimeToString(boot.complete_time, TIME_DATE|TIME_SECONDS),
                " | resume_from=", TimeToString(resume_from, TIME_DATE|TIME_SECONDS));
    }
@@ -454,12 +581,17 @@ void OnTimer()
    }
 
    // 2) اجرای اسکن Major با Mode تعیین‌شده (یا Fallback)
-   if(mode_for_run==DIR_UP)
+   if(mode_for_run == DIR_UP)
       API_RunScanSequential_W2W3_Hunter(InpSymbol, tf, resume_from, stop);
    else
       API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, tf, resume_from, stop);
 
+   if(__WB_IsRoleH4())
+      WB15_MasterMarkScanDone(InpSymbol);
+   else if(__WB_IsRoleM15())
+      WB1_MasterMarkScanDone(InpSymbol);
+
    __WB_WriteTriggerStatementReport();
 
-   g_once=true;  // فقط یک‌بار اسکن کامل در هر اجرای EA
+   g_once = true;  // فقط یک‌بار اسکن کامل در هر اجرای EA
 }

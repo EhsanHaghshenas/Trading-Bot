@@ -23,8 +23,12 @@ inline ENUM_TIMEFRAMES __Race_RuntimeTF()
    ENUM_TIMEFRAMES tf = InpTF;
    ENUM_TIMEFRAMES chart_tf = (ENUM_TIMEFRAMES)Period();
 
-   if(chart_tf == PERIOD_H4)      tf = PERIOD_H4;
-   else if(chart_tf == PERIOD_M15) tf = PERIOD_M15;
+   if(chart_tf == PERIOD_H4)
+      tf = PERIOD_H4;
+   else if(chart_tf == PERIOD_M15)
+      tf = PERIOD_M15;
+   else if(chart_tf == PERIOD_M1)
+      tf = PERIOD_M1;
 
    return tf;
 }

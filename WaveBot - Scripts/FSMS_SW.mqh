@@ -44,7 +44,10 @@ static double g_C1_W3_Minor_D_Value = 0.0;   // Low C1_W3_Minor_D آخرین ج�
 
 inline bool __FSMS_SW_ShouldRunMinorWorldOnThisChart()
 {
-   return ((ENUM_TIMEFRAMES)Period() != PERIOD_M15);
+   // Minor-world detection/execution must exist ONLY on the H4 chart.
+   // M15 and M1 still consume the higher-timeframe bridge results, but they
+   // must not build a local minor world, minor sessions, or minor markers.
+   return ((ENUM_TIMEFRAMES)Period() == PERIOD_H4);
 }
 
 // --- NEW: Getters for FSMS–SW UP ---

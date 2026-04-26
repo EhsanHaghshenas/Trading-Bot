@@ -32,12 +32,25 @@ inline void TriggerM15SignalGate_ResetGlobals()
    g_trgm15_seq = 0;
 }
 
+inline ENUM_TIMEFRAMES __TRGM15_WorkerTF()
+{
+   ENUM_TIMEFRAMES tf = (ENUM_TIMEFRAMES)Period();
+
+   if(tf == PERIOD_M15)
+      return PERIOD_M15;
+   if(tf == PERIOD_M1)
+      return PERIOD_M1;
+
+   return PERIOD_CURRENT;
+}
+
 inline bool __TRGM15_ShouldRecord(const string sym)
 {
    if(sym == "")
       return false;
 
-   if((ENUM_TIMEFRAMES)Period() != PERIOD_M15)
+   ENUM_TIMEFRAMES tf = __TRGM15_WorkerTF();
+   if(tf != PERIOD_M15 && tf != PERIOD_M1)
       return false;
 
    return true;
@@ -89,14 +102,21 @@ inline bool TriggerM15SignalGate_EventGet(const int index,
    return true;
 }
 
-inline datetime __TRGM15_M15CloseActivationTime(const datetime bar_open_time)
+inline datetime __TRGM15_WorkerCloseActivationTime(const datetime bar_open_time)
 {
    if(bar_open_time <= 0)
       return 0;
 
-   int sec = PeriodSeconds(PERIOD_M15);
+   ENUM_TIMEFRAMES tf = __TRGM15_WorkerTF();
+   int sec = PeriodSeconds(tf);
+
    if(sec <= 0)
-      sec = 900;
+   {
+      if(tf == PERIOD_M15)
+         sec = 900;
+      else
+         sec = 60;
+   }
 
    return (bar_open_time + (datetime)sec);
 }
@@ -180,7 +200,7 @@ inline void TriggerM15SignalGate_RecordClose(const string    sym,
                                              const Direction dir,
                                              const datetime  signal_bar_open_time)
 {
-   datetime activation_time = __TRGM15_M15CloseActivationTime(signal_bar_open_time);
+   datetime activation_time = __TRGM15_WorkerCloseActivationTime(signal_bar_open_time);
    if(activation_time <= 0)
       return;
 

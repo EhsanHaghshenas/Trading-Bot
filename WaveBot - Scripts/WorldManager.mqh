@@ -26,8 +26,12 @@ inline ENUM_TIMEFRAMES __WBWM_RuntimeTF()
    ENUM_TIMEFRAMES tf = InpTF;
    ENUM_TIMEFRAMES chart_tf = (ENUM_TIMEFRAMES)Period();
 
-   if(chart_tf == PERIOD_H4)      tf = PERIOD_H4;
-   else if(chart_tf == PERIOD_M15) tf = PERIOD_M15;
+   if(chart_tf == PERIOD_H4)
+      tf = PERIOD_H4;
+   else if(chart_tf == PERIOD_M15)
+      tf = PERIOD_M15;
+   else if(chart_tf == PERIOD_M1)
+      tf = PERIOD_M1;
 
    return tf;
 }
@@ -493,10 +497,14 @@ inline void WBWM_ProcessMinorStarterEvents(const MqlRates &rates[],
    if(!g_wbwm_inited)
       WBWM_Init();
 
-   // روی چارت اسلیو M15 دیگر هیچ اجرای محلیِ MIN مجاز نیست.
-   // فقط مستر H4 می‌تواند دنیای مینور را اجرا و از طریق bridge به M15 سیگنال بدهد.
-   if((ENUM_TIMEFRAMES)Period() == PERIOD_M15)
+   // Minor-world execution is allowed only on H4. M15/M1 keep consuming the
+   // parent bridge, but they must never build or step a local MIN world.
+   if(!__FSMS_SW_ShouldRunMinorWorldOnThisChart())
+   {
+      if(g_wbwm_minor_active)
+         WBWM_MinorSession_Deactivate();
       return;
+   }
 
    // Only MAJ drives MIN (never run inside MIN)
    if(Markers_GetNamespace() != "MAJ")

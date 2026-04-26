@@ -1,10 +1,14 @@
-﻿#ifndef WAVEBOT_TRIGGER_MQH
+#ifndef WAVEBOT_TRIGGER_MQH
 #define WAVEBOT_TRIGGER_MQH
 
 #include <WaveBot/Types.mqh>
 #include <WaveBot/Markers.mqh>
 #include <WaveBot/WB15_SignalBridge.mqh>
 #include <WaveBot/TriggerSLTP.mqh>
+
+// Implemented in WaveBot.mq5. Trigger.mqh only requests the write;
+// execution/trade rules remain entirely inside TriggerSLTP.mqh.
+bool WaveBot_RequestImmediateTriggerStatementWrite();
 
 // ============================================================================
 // Trigger.mqh
@@ -125,7 +129,9 @@ struct TriggerCore
 };
 
 static TriggerCore  g_trigger_ctx;
-static TriggerEvent g_trigger_events[];
+static TriggerEvent g_trigger_events[];       // parent bridge events
+static TriggerEvent g_trigger_local_events[]; // local worker signal gate events
+static int          g_trigger_local_total = -1;
 static string       g_trigger_symbol = "";
 
 // ----------------------------------------------------------------------------
@@ -134,7 +140,7 @@ static string       g_trigger_symbol = "";
 inline bool __TRG_IsWorkerTF()
 {
    ENUM_TIMEFRAMES tf = (ENUM_TIMEFRAMES)Period();
-   return (tf == PERIOD_M15 || tf == PERIOD_M1);
+   return (tf == PERIOD_M1);
 }
 
 inline bool __TRG_IsMajorWorld()
@@ -530,9 +536,11 @@ inline void Trigger_ResetGlobals()
    g_trigger_ctx.dn_counter            = 0;
 
    g_trigger_symbol                    = "";
+   g_trigger_local_total               = -1;
 
    __TRG_ClearFSM();
    ArrayResize(g_trigger_events, 0);
+   ArrayResize(g_trigger_local_events, 0);
    TriggerSLTP_ResetGlobals();
 }
 
@@ -631,7 +639,7 @@ inline bool __TRG_SessionMatchesStop(const TriggerStartSession &sess,
    //   any 4H signal off closes the active trigger window,
    //   provided that its direction is the opposite of the active signal direction.
    // Namespace and signal kind no longer affect stop matching.
-   if(stop_dir != __WB15_Opposite(sess.dir))
+   if(stop_dir != WBBridge_Opposite(sess.dir))
       return false;
 
    if(stop_ns < WB15_NS_NONE)
@@ -642,8 +650,8 @@ inline bool __TRG_SessionMatchesStop(const TriggerStartSession &sess,
 
 inline bool __TRG_RebuildBridgeEvents(const string sym)
 {
-   const string kRun = __WB15_Key(sym, "RUN");
-   const string kSeq = __WB15_Key(sym, "SEQ");
+   const string kRun = WBBridge_Key(sym, "RUN");
+   const string kSeq = WBBridge_Key(sym, "SEQ");
 
    if(!GlobalVariableCheck(kRun) || !GlobalVariableCheck(kSeq))
       return false;
@@ -669,8 +677,8 @@ inline bool __TRG_RebuildBridgeEvents(const string sym)
 
    for(int i=1; i<=seq; ++i)
    {
-      const string kt = __WB15_KeyT(sym, i);
-      const string kc = __WB15_KeyC(sym, i);
+      const string kt = WBBridge_KeyT(sym, i);
+      const string kc = WBBridge_KeyC(sym, i);
 
       if(!GlobalVariableCheck(kt) || !GlobalVariableCheck(kc))
          continue;
@@ -687,7 +695,7 @@ inline bool __TRG_RebuildBridgeEvents(const string sym)
       evt.bar_time = __TRG_WorkerBarOpen(t);
       evt.kind     = kind;
       evt.ns       = __TRG_DecodeNS(code);
-      evt.dir      = __WB15_CodeDir(__TRG_DecodeDirCode(code));
+      evt.dir      = WBBridge_CodeDir(__TRG_DecodeDirCode(code));
       evt.seq      = i;
 
       int pos = ArraySize(g_trigger_events);
@@ -712,16 +720,90 @@ inline bool __TRG_RebuildBridgeEvents(const string sym)
    return true;
 }
 
+inline bool __TRG_LocalSessionMatchesStop(const TriggerStartSession &sess,
+                                          const int                  stop_kind,
+                                          const int                  stop_ns,
+                                          const Direction            stop_dir)
+{
+   if(!sess.active) return false;
+   if(!__TRGM15_IsStopKind(stop_kind)) return false;
+   if(stop_dir != WBBridge_Opposite(sess.dir)) return false;
+   if(stop_ns <= 0) return false;
+   return true;
+}
+
+inline bool __TRG_RebuildLocalGateEvents(const string sym)
+{
+   int total = TriggerM15SignalGate_EventCount();
+   if(total < 0)
+      total = 0;
+
+   // Rebuild every time on M1 because local gate events can appear during the
+   // same one-shot scan and must become visible immediately to the trigger FSM.
+   ArrayResize(g_trigger_local_events, 0);
+
+   for(int i = 0; i < total; ++i)
+   {
+      TriggerM15SignalGateEvent src;
+      if(!TriggerM15SignalGate_EventGet(i, src))
+         continue;
+
+      if(src.symbol != sym)
+         continue;
+
+      if(!__TRGM15_IsStartKind(src.kind) && !__TRGM15_IsStopKind(src.kind))
+         continue;
+
+      TriggerEvent evt;
+      evt.t        = src.t;
+      evt.bar_time = src.bar_time;
+      evt.dir      = src.dir;
+      evt.kind     = src.kind;
+      evt.ns       = src.ns;
+      evt.seq      = src.seq;
+
+      int pos = ArraySize(g_trigger_local_events);
+      ArrayResize(g_trigger_local_events, pos + 1);
+      g_trigger_local_events[pos] = evt;
+   }
+
+   __TRG_SortBridgeEvents();
+   // sort local events with the same comparator
+   int n = ArraySize(g_trigger_local_events);
+   if(n > 1)
+   {
+      for(int i = 0; i < n - 1; ++i)
+      {
+         int best = i;
+         for(int j = i + 1; j < n; ++j)
+         {
+            if(__TRG_CompareEvent(g_trigger_local_events[j], g_trigger_local_events[best]) < 0)
+               best = j;
+         }
+
+         if(best != i)
+         {
+            TriggerEvent tmp = g_trigger_local_events[i];
+            g_trigger_local_events[i] = g_trigger_local_events[best];
+            g_trigger_local_events[best] = tmp;
+         }
+      }
+   }
+
+   g_trigger_local_total = total;
+   return true;
+}
+
 inline void __TRG_ApplyWindowAt(const datetime bar_time)
 {
-   TriggerStartSession sessions[TRG_MAX_ACTIVE_SESSIONS];
-   for(int i=0; i<TRG_MAX_ACTIVE_SESSIONS; ++i)
-      __TRG_ClearSession(sessions[i]);
+   TriggerStartSession parent_sess;
+   TriggerStartSession local_sess;
 
-   int session_count = 0;
-   const int evt_count = ArraySize(g_trigger_events);
+   __TRG_ClearSession(parent_sess);
+   __TRG_ClearSession(local_sess);
 
-   for(int i=0; i<evt_count; ++i)
+   const int parent_evt_count = ArraySize(g_trigger_events);
+   for(int i = 0; i < parent_evt_count; ++i)
    {
       TriggerEvent evt = g_trigger_events[i];
       if(evt.bar_time > bar_time)
@@ -729,35 +811,40 @@ inline void __TRG_ApplyWindowAt(const datetime bar_time)
 
       if(__TRG_IsStartKind(evt.kind))
       {
-         // Simplified lifecycle:
-         // every new 4H signal on replaces the previously active window,
-         // regardless of type or namespace.
-         for(int s=0; s<session_count; ++s)
-            sessions[s].active = false;
-
-         if(session_count <= 0)
-            session_count = 1;
-         if(session_count > TRG_MAX_ACTIVE_SESSIONS)
-            session_count = TRG_MAX_ACTIVE_SESSIONS;
-
-         sessions[0].active   = true;
-         sessions[0].kind     = evt.kind;
-         sessions[0].ns       = evt.ns;
-         sessions[0].dir      = evt.dir;
-         sessions[0].t        = evt.t;
-         sessions[0].bar_time = evt.bar_time;
-         sessions[0].seq      = evt.seq;
+         parent_sess.active   = true;
+         parent_sess.kind     = evt.kind;
+         parent_sess.ns       = evt.ns;
+         parent_sess.dir      = evt.dir;
+         parent_sess.t        = evt.t;
+         parent_sess.bar_time = evt.bar_time;
+         parent_sess.seq      = evt.seq;
       }
-      else
+      else if(__TRG_SessionMatchesStop(parent_sess, evt.kind, evt.ns, evt.dir))
       {
-         for(int s=session_count-1; s>=0; --s)
-         {
-            if(__TRG_SessionMatchesStop(sessions[s], evt.kind, evt.ns, evt.dir))
-            {
-               sessions[s].active = false;
-               break;
-            }
-         }
+         __TRG_ClearSession(parent_sess);
+      }
+   }
+
+   const int local_evt_count = ArraySize(g_trigger_local_events);
+   for(int i = 0; i < local_evt_count; ++i)
+   {
+      TriggerEvent evt = g_trigger_local_events[i];
+      if(evt.bar_time > bar_time)
+         break;
+
+      if(__TRGM15_IsStartKind(evt.kind))
+      {
+         local_sess.active   = true;
+         local_sess.kind     = evt.kind;
+         local_sess.ns       = evt.ns;
+         local_sess.dir      = evt.dir;
+         local_sess.t        = evt.t;
+         local_sess.bar_time = evt.bar_time;
+         local_sess.seq      = evt.seq;
+      }
+      else if(__TRG_LocalSessionMatchesStop(local_sess, evt.kind, evt.ns, evt.dir))
+      {
+         __TRG_ClearSession(local_sess);
       }
    }
 
@@ -769,18 +856,23 @@ inline void __TRG_ApplyWindowAt(const datetime bar_time)
    datetime  new_start_time = 0;
    datetime  new_start_bar  = 0;
 
-   for(int s=session_count-1; s>=0; --s)
+   // Final trigger window on M1 exists only when:
+   //   1) parent M15 -> M1 bridge window is active,
+   //   2) local M1 signal-on window is active,
+   //   3) directions match,
+   //   4) local M1 signal started INSIDE the active parent window.
+   if(parent_sess.active &&
+      local_sess.active &&
+      parent_sess.dir == local_sess.dir &&
+      local_sess.bar_time >= parent_sess.bar_time)
    {
-      if(!sessions[s].active) continue;
-
       new_active     = true;
-      new_start_seq  = sessions[s].seq;
-      new_start_kind = sessions[s].kind;
-      new_start_ns   = sessions[s].ns;
-      new_dir        = sessions[s].dir;
-      new_start_time = sessions[s].t;
-      new_start_bar  = sessions[s].bar_time;
-      break;
+      new_start_seq  = local_sess.seq;
+      new_start_kind = local_sess.kind;
+      new_start_ns   = local_sess.ns;
+      new_dir        = local_sess.dir;
+      new_start_time = local_sess.t;
+      new_start_bar  = local_sess.bar_time;
    }
 
    bool changed = false;
@@ -1102,7 +1194,9 @@ inline void __TRG_FireTrigger(const int       type_id,
                               level,
                               hit_idx,
                               rates,
-                              n);
+                              n,
+                              g_trigger_ctx.active_start_seq,
+                              g_trigger_ctx.active_start_bar_time);
 
    __TRG_DrawTriggerMarker(type_id,
                            rates[src_idx].time,
@@ -1110,6 +1204,11 @@ inline void __TRG_FireTrigger(const int       type_id,
                            level);
 
    __TRG_RestartAfterHit(rates, n, hit_idx);
+
+   // Live-statement sync: after every detected trigger, ask the EA to
+   // rewrite the existing statement file immediately. This does not change
+   // any trigger-to-trade decision; it only refreshes the report.
+   WaveBot_RequestImmediateTriggerStatementWrite();
 }
 
 inline int __TRG_BullHandlePhase4Break(const MqlRates &rates[],
@@ -1628,6 +1727,8 @@ inline void __TRG_ProcessLoadedBar(const string    sym,
    g_trigger_symbol = sym;
    if(n <= 0 || bar_idx < 0 || bar_idx >= n) return;
 
+   TriggerSLTP_OnBarSync(sym, rates, n, bar_idx);
+
    const datetime bar_time = rates[bar_idx].time;
    __TRG_ApplyWindowAt(bar_time);
 
@@ -1657,6 +1758,8 @@ inline void Trigger_OnTimer(const string sym)
    if(sym == "") return;
 
    if(!__TRG_RebuildBridgeEvents(sym))
+      return;
+   if(!__TRG_RebuildLocalGateEvents(sym))
       return;
 
    const datetime probe_bar_time = __TRG_WorkerBarOpen(TimeCurrent());
@@ -1715,6 +1818,8 @@ inline void Trigger_OnBarCandidate(const string    sym,
    if(__unused_inside) { /* intentionally ignored */ }
 
    if(!__TRG_RebuildBridgeEvents(sym))
+      return;
+   if(!__TRG_RebuildLocalGateEvents(sym))
       return;
 
    __TRG_ProcessLoadedBar(sym, rates, n, bar_idx);

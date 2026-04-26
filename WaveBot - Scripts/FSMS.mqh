@@ -884,4 +884,3 @@ inline void FSMS_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
 }
 
 #endif // WAVEBOT_FSMS_MQH
-
