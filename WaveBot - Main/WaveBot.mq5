@@ -1,3 +1,4 @@
+
 #property strict
 #property description "WaveBot – W2/W3 + Hunter + ExtLQ + SW (Bootstrap Direction Race)"
 
@@ -66,6 +67,8 @@ int g_scan_id = 0;
 datetime g_stmt_scan_start = 0;
 datetime g_stmt_scan_stop  = 0;
 bool     g_stmt_window_set = false;
+bool     g_stmt_first_write_done = false;
+datetime g_stmt_last_write_attempt = 0;
 
 // --- Auto role based on chart timeframe (H4 -> M15 -> M1) ---
 enum WBRole
@@ -232,6 +235,11 @@ inline void __WB_WriteTriggerStatementReport()
    if(stmt_start > stmt_stop)
       stmt_start = 0;
 
+<<<<<<< HEAD
+=======
+   g_stmt_last_write_attempt = TimeCurrent();
+
+>>>>>>> e5da32fe47c817fae05de25b108d1646fb695725
    bool ok = TriggerStatement_WriteTextReport(InpSymbol,
                                               (ENUM_TIMEFRAMES)Period(),
                                               stmt_start,
@@ -241,9 +249,41 @@ inline void __WB_WriteTriggerStatementReport()
                                               InpTriggerStatementFileTag);
    if(ok)
    {
+<<<<<<< HEAD
       g_stmt_scan_stop = stmt_stop;
       TriggerSLTP_ClearStatementDirty();
    }
+=======
+      g_stmt_first_write_done = true;
+      g_stmt_scan_stop = stmt_stop;
+      TriggerSLTP_ClearStatementDirty();
+   }
+   else if(InpDebugPrints)
+   {
+      Print("[WB] Trigger statement write failed | last_path=", TriggerStatement_LastFullPath(),
+            " | records=", TriggerStatement_LastRecordCount());
+   }
+}
+
+inline void __WB_MaybeWriteTriggerStatementReport()
+{
+   if(!__WB_ShouldHandleTriggerStatement())
+      return;
+
+   // The first write creates the TXT file even before the first valid trade.
+   // Later writes are event-driven through TriggerSLTP's dirty flag.
+   if(!g_stmt_first_write_done || TriggerSLTP_IsStatementDirty())
+      __WB_WriteTriggerStatementReport();
+}
+
+bool WaveBot_RequestImmediateTriggerStatementWrite()
+{
+   if(!__WB_ShouldHandleTriggerStatement())
+      return false;
+
+   __WB_WriteTriggerStatementReport();
+   return TriggerStatement_LastWriteOK();
+>>>>>>> e5da32fe47c817fae05de25b108d1646fb695725
 }
 // ============================================================================
 // Minor session runner (Phase-1: Minor inside Major)
@@ -399,6 +439,11 @@ int OnInit()
    g_stmt_scan_start = 0;
    g_stmt_scan_stop  = 0;
    g_stmt_window_set = false;
+<<<<<<< HEAD
+=======
+   g_stmt_first_write_done = false;
+   g_stmt_last_write_attempt = 0;
+>>>>>>> e5da32fe47c817fae05de25b108d1646fb695725
 
    __WB_ApplyHiddenVisualPolicies();
    __WB_DeleteAllM15NumberingObjects();
@@ -412,6 +457,18 @@ int OnInit()
       WB1_SlaveInit();
    }
 
+<<<<<<< HEAD
+=======
+   if(__WB_ShouldHandleTriggerStatement())
+   {
+      datetime stmt_start = 0;
+      datetime stmt_stop  = 0;
+      ResolveWindow(stmt_start, stmt_stop);
+      __WB_RememberTriggerStatementWindow(stmt_start, stmt_stop);
+      __WB_WriteTriggerStatementReport();
+   }
+
+>>>>>>> e5da32fe47c817fae05de25b108d1646fb695725
    EventSetTimer((__WB_IsRoleM15() || __WB_IsRoleM1()) ? 1 : 2);
    return(INIT_SUCCEEDED);
 }
@@ -471,6 +528,14 @@ void OnTimer()
 
    if(__WB_ShouldRunTriggerEngine())
       Trigger_OnTimer(InpSymbol);
+<<<<<<< HEAD
+=======
+
+   // On M1, live trigger processing can happen before the initial one-shot scan
+   // finishes or before parent-readiness allows the scan branch below to run.
+   // Therefore statement writing must be checked immediately after Trigger_OnTimer.
+   __WB_MaybeWriteTriggerStatementReport();
+>>>>>>> e5da32fe47c817fae05de25b108d1646fb695725
 
    // --- optional one-shot ShadowBreaker run (replacement for old OnStart)
    if(InpRunShadowBreakerOnce && !g_sb_ran)
@@ -481,8 +546,12 @@ void OnTimer()
 
    if(g_once)
    {
+<<<<<<< HEAD
       if(__WB_ShouldHandleTriggerStatement() && TriggerSLTP_IsStatementDirty())
          __WB_WriteTriggerStatementReport();
+=======
+      __WB_MaybeWriteTriggerStatementReport();
+>>>>>>> e5da32fe47c817fae05de25b108d1646fb695725
       return;
    }
 

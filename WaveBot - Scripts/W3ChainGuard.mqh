@@ -1,3 +1,4 @@
+
 // WaveBot/W3ChainGuard.mqh
 #ifndef WAVEBOT_W3CHAINGUARD_MQH
 #define WAVEBOT_W3CHAINGUARD_MQH

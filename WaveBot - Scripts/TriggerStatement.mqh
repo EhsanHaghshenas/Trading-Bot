@@ -1,3 +1,4 @@
+
 #ifndef WAVEBOT_TRIGGER_STATEMENT_MQH
 #define WAVEBOT_TRIGGER_STATEMENT_MQH
 
@@ -99,6 +100,7 @@ static bool     g_trgstmt_last_write_ok = false;
 static datetime g_trgstmt_last_scan_from = 0;
 static datetime g_trgstmt_last_scan_to   = 0;
 static int      g_trgstmt_last_records   = 0;
+static int      g_trgstmt_last_fire_events = 0;
 
 inline void __TRGSTM_ClearTrade(TriggerStatementTrade &stmt_trade)
 {
@@ -132,12 +134,14 @@ inline void TriggerStatement_ResetGlobals()
    g_trgstmt_last_scan_from = 0;
    g_trgstmt_last_scan_to   = 0;
    g_trgstmt_last_records   = 0;
+   g_trgstmt_last_fire_events = 0;
 }
 
 inline string TriggerStatement_LastFileName() { return g_trgstmt_last_filename; }
 inline string TriggerStatement_LastFullPath() { return g_trgstmt_last_fullpath; }
 inline bool   TriggerStatement_LastWriteOK()  { return g_trgstmt_last_write_ok; }
 inline int    TriggerStatement_LastRecordCount() { return g_trgstmt_last_records; }
+inline int    TriggerStatement_LastFireEventCount() { return g_trgstmt_last_fire_events; }
 
 inline string __TRGSTM_SafeTime(const datetime t)
 {
@@ -179,7 +183,11 @@ inline string __TRGSTM_SkipReasonName(const int skip_reason)
    if(skip_reason == TRGSTMT_SKIP_LOCAL_GATE)
       return (__TRGSTM_WorkerLabel() + "_LOCAL_SIGNAL_WINDOW_NOT_OPEN");
    if(skip_reason == TRGSTMT_SKIP_POST_WIN_WAIT)
+<<<<<<< HEAD
       return ("WAIT_NEW_LOCAL_" + __TRGSTM_WorkerLabel() + "_SIGNAL_ON_AFTER_WIN");
+=======
+      return "POST_WIN_WAIT_DISABLED";
+>>>>>>> e5da32fe47c817fae05de25b108d1646fb695725
    return "-";
 }
 
@@ -297,6 +305,27 @@ inline string __TRGSTM_LocalGateKindName(const int kind)
    return TriggerM15SignalGate_KindName(kind);
 }
 
+inline string __TRGSTM_FireEventSLTPStatus(const TriggerSLTPFireEvent &evt)
+{
+   if(!evt.valid)
+      return "INVALID_EVENT";
+   return (evt.sltp_valid ? "SLTP_VALID" : "SLTP_REJECTED");
+}
+
+inline string __TRGSTM_FireEventExecStatus(const TriggerSLTPFireEvent &evt)
+{
+   if(!evt.valid)
+      return "n/a";
+   if(!evt.sltp_valid)
+      return "NO_TRADE_INVALID_SLTP";
+   if(evt.execution_opened)
+      return "TRADE_OPENED";
+   if(evt.execution_allowed)
+      return "EXECUTION_ALLOWED";
+   return "NO_TRADE_RULE_BLOCK";
+}
+
+
 inline string __TRGSTM_TimeframeTag(const ENUM_TIMEFRAMES tf)
 {
    switch(tf)
@@ -371,6 +400,16 @@ inline string __TRGSTM_BuildFileName(const string tag,
    string tf_tag   = __TRGSTM_TimeframeTag(tf);
 
    return (base + "_" + safe_sym + "_" + tf_tag + ".txt");
+}
+
+inline string __TRGSTM_LocalFilesPath(const string filename)
+{
+   return (TerminalInfoString(TERMINAL_DATA_PATH) + "\\MQL5\\Files\\" + filename);
+}
+
+inline string __TRGSTM_CommonFilesPath(const string filename)
+{
+   return (TerminalInfoString(TERMINAL_COMMONDATA_PATH) + "\\Files\\" + filename);
 }
 
 inline void __TRGSTM_WriteLine(const int handle, const string text)
@@ -541,6 +580,73 @@ inline int __TRGSTM_CollectRecords(const string   sym,
    }
 
    __TRGSTM_SortRecords(out);
+   return ArraySize(out);
+}
+
+inline int __TRGSTM_CompareFireEvent(const TriggerSLTPFireEvent &a,
+                                     const TriggerSLTPFireEvent &b)
+{
+   if(a.hit_time < b.hit_time) return -1;
+   if(a.hit_time > b.hit_time) return  1;
+   if(a.event_index < b.event_index) return -1;
+   if(a.event_index > b.event_index) return  1;
+   return 0;
+}
+
+inline void __TRGSTM_SortFireEvents(TriggerSLTPFireEvent &events[])
+{
+   int n = ArraySize(events);
+   if(n <= 1)
+      return;
+
+   for(int i = 0; i < n - 1; ++i)
+   {
+      int best = i;
+      for(int j = i + 1; j < n; ++j)
+      {
+         if(__TRGSTM_CompareFireEvent(events[j], events[best]) < 0)
+            best = j;
+      }
+
+      if(best != i)
+      {
+         TriggerSLTPFireEvent tmp = events[i];
+         events[i] = events[best];
+         events[best] = tmp;
+      }
+   }
+}
+
+inline int __TRGSTM_CollectFireEvents(const string   sym,
+                                      const datetime scan_from,
+                                      const datetime scan_to,
+                                      TriggerSLTPFireEvent &out[])
+{
+   ArrayResize(out, 0);
+
+   int count = TriggerSLTP_FireEventCount();
+   for(int i = 0; i < count; ++i)
+   {
+      TriggerSLTPFireEvent evt;
+      if(!TriggerSLTP_FireEventGet(i, evt))
+         continue;
+      if(!evt.valid)
+         continue;
+
+      if(sym != "" && evt.symbol != "" && evt.symbol != sym)
+         continue;
+
+      if(scan_from > 0 && evt.hit_time < scan_from)
+         continue;
+      if(scan_to > 0 && evt.hit_time > scan_to)
+         continue;
+
+      int pos = ArraySize(out);
+      ArrayResize(out, pos + 1);
+      out[pos] = evt;
+   }
+
+   __TRGSTM_SortFireEvents(out);
    return ArraySize(out);
 }
 
@@ -2364,6 +2470,35 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    TriggerSLTPRecord records[];
    int raw_valid_triggers = __TRGSTM_CollectRecords(use_sym, scan_from, scan_to, records);
 
+   TriggerSLTPFireEvent fire_events[];
+   int raw_fired_triggers = __TRGSTM_CollectFireEvents(use_sym, scan_from, scan_to, fire_events);
+   int raw_rejected_triggers = 0;
+   int raw_valid_fire_events = 0;
+   int raw_fired_type1 = 0;
+   int raw_fired_type2 = 0;
+   for(int fe = 0; fe < raw_fired_triggers; ++fe)
+   {
+      if(fire_events[fe].type_id == 1)
+         raw_fired_type1++;
+      else if(fire_events[fe].type_id == 2)
+         raw_fired_type2++;
+
+      if(fire_events[fe].sltp_valid)
+         raw_valid_fire_events++;
+      else
+         raw_rejected_triggers++;
+   }
+
+   int raw_valid_type1 = 0;
+   int raw_valid_type2 = 0;
+   for(int rv = 0; rv < raw_valid_triggers; ++rv)
+   {
+      if(records[rv].type_id == 1)
+         raw_valid_type1++;
+      else if(records[rv].type_id == 2)
+         raw_valid_type2++;
+   }
+
    int tfsec = PeriodSeconds(tf);
    if(tfsec <= 0)
       tfsec = 60;
@@ -2677,7 +2812,11 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
       else if(minor_match)
          exec_trend_minor_only++;
 
+<<<<<<< HEAD
       if(post_win_wait_active)
+=======
+      if(false && post_win_wait_active)
+>>>>>>> e5da32fe47c817fae05de25b108d1646fb695725
       {
          __TRGSTM_SetSkip(trades[i],
                           TRGSTMT_SKIP_POST_WIN_WAIT,
@@ -2791,11 +2930,18 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
             else
                sell_wins++;
 
+<<<<<<< HEAD
             post_win_wait_active   = true;
             post_win_wait_ref_time = (trades[i].exit_time > 0 ? trades[i].exit_time : trades[i].rec.hit_time);
             post_win_wait_arms++;
             trades[i].note = __TRGSTM_AppendNote(trades[i].note,
                                                  ("WAIT_FRESH_LOCAL_" + __TRGSTM_WorkerLabel() + "_SIGNAL_ON_AFTER_WIN"));
+=======
+            post_win_wait_active   = false;
+            post_win_wait_ref_time = 0;
+            trades[i].note = __TRGSTM_AppendNote(trades[i].note,
+                                                 "POST_WIN_REENTRY_ALLOWED_NEXT_VALID_TRIGGER");
+>>>>>>> e5da32fe47c817fae05de25b108d1646fb695725
          }
          else
          {
@@ -2862,7 +3008,11 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
       }
    }
 
+<<<<<<< HEAD
    if(post_win_wait_active)
+=======
+   if(false && post_win_wait_active)
+>>>>>>> e5da32fe47c817fae05de25b108d1646fb695725
    {
       Direction local_rearm_dir  = DIR_UP;
       int       local_rearm_kind = 0;
@@ -2954,28 +3104,47 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
       return_pct = (net_profit / initial_capital) * 100.0;
 
    string filename = __TRGSTM_BuildFileName(file_tag, use_sym, tf);
-   int handle = FileOpen(filename, FILE_WRITE|FILE_TXT|FILE_COMMON|FILE_UNICODE|FILE_SHARE_READ);
-   if(handle == INVALID_HANDLE)
-   {
-      g_trgstmt_last_filename = filename;
-      g_trgstmt_last_fullpath = TerminalInfoString(TERMINAL_COMMONDATA_PATH) + "\\Files\\" + filename;
-      g_trgstmt_last_write_ok = false;
-      g_trgstmt_last_scan_from = scan_from;
-      g_trgstmt_last_scan_to   = use_scan_to;
-      g_trgstmt_last_records   = raw_valid_triggers;
 
-      if(InpDebugPrints)
-         Print("[TRG-STATEMENT] FileOpen failed | path=", g_trgstmt_last_fullpath,
-               " | error=", GetLastError());
-      return false;
-   }
+   // Prefer the EA's local MQL5\Files folder because users normally look there.
+   // If local opening fails, fall back to the terminal Common\Files folder.
+   ResetLastError();
+   int handle = FileOpen(filename, FILE_WRITE|FILE_TXT|FILE_UNICODE|FILE_SHARE_READ);
+   int local_error = GetLastError();
+   bool used_common_folder = false;
 
    g_trgstmt_last_filename = filename;
-   g_trgstmt_last_fullpath = TerminalInfoString(TERMINAL_COMMONDATA_PATH) + "\\Files\\" + filename;
+   g_trgstmt_last_fullpath = __TRGSTM_LocalFilesPath(filename);
+
+   if(handle == INVALID_HANDLE)
+   {
+      ResetLastError();
+      handle = FileOpen(filename, FILE_WRITE|FILE_TXT|FILE_COMMON|FILE_UNICODE|FILE_SHARE_READ);
+      int common_error = GetLastError();
+      used_common_folder = true;
+      g_trgstmt_last_fullpath = __TRGSTM_CommonFilesPath(filename);
+
+      if(handle == INVALID_HANDLE)
+      {
+         g_trgstmt_last_write_ok = false;
+         g_trgstmt_last_scan_from = scan_from;
+         g_trgstmt_last_scan_to   = use_scan_to;
+         g_trgstmt_last_records   = raw_valid_triggers;
+         g_trgstmt_last_fire_events = raw_fired_triggers;
+
+         if(InpDebugPrints)
+            Print("[TRG-STATEMENT] FileOpen failed | local=", __TRGSTM_LocalFilesPath(filename),
+                  " | local_error=", local_error,
+                  " | common=", __TRGSTM_CommonFilesPath(filename),
+                  " | common_error=", common_error);
+         return false;
+      }
+   }
+
    g_trgstmt_last_write_ok = true;
    g_trgstmt_last_scan_from = scan_from;
    g_trgstmt_last_scan_to   = use_scan_to;
    g_trgstmt_last_records   = raw_valid_triggers;
+   g_trgstmt_last_fire_events = raw_fired_triggers;
 
    int digits = __TRGSL_DigitsOf(use_sym);
 
@@ -2991,6 +3160,19 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
                        + " | " + __TRGSTM_Money(worst_trade_money)
                        + " | " + DoubleToString(worst_trade_r, 2) + "R");
 
+   string last_fired_text = "n/a";
+   if(raw_fired_triggers > 0)
+   {
+      TriggerSLTPFireEvent last_evt = fire_events[raw_fired_triggers - 1];
+      last_fired_text = "#" + IntegerToString(last_evt.event_index)
+                      + " | " + __TRGSTM_DirName(last_evt.dir)
+                      + " | Type=" + IntegerToString(last_evt.type_id)
+                      + " | Hit=" + __TRGSTM_SafeTime(last_evt.hit_time)
+                      + " | " + __TRGSTM_FireEventSLTPStatus(last_evt)
+                      + " | " + __TRGSTM_FireEventExecStatus(last_evt)
+                      + " | Reason=" + last_evt.decision_reason;
+   }
+
    __TRGSTM_WriteLine(handle, "WaveBot Trigger Statement");
    __TRGSTM_WriteLine(handle, "============================================================");
    __TRGSTM_WriteLine(handle, "Generated At           : " + __TRGSTM_SafeTime(TimeCurrent()));
@@ -3000,8 +3182,13 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "Scan To                : " + __TRGSTM_SafeTime(use_scan_to));
    __TRGSTM_WriteLine(handle, "Initial Capital        : " + __TRGSTM_Money(initial_capital));
    __TRGSTM_WriteLine(handle, "Fixed Risk Per Trade   : " + __TRGSTM_Pct(risk_percent) + " = " + __TRGSTM_Money(risk_money));
+<<<<<<< HEAD
    __TRGSTM_WriteLine(handle, "SL/TP Source           : TriggerSLTP.mqh valid triggers only");
    __TRGSTM_WriteLine(handle, "Execution Model        : Single active trade only | entry at breakout level | touch-based TP/SL | conservative same-bar ambiguity = SL | Trigger.mqh already enforces the parent " + __TRGSTM_ParentLabel() + " -> " + __TRGSTM_WorkerLabel() + " window plus the active local " + __TRGSTM_WorkerLabel() + " signal gate | max 4 executed losses per calendar day | fresh local " + __TRGSTM_WorkerLabel() + " signal-on required after every executed WIN");
+=======
+   __TRGSTM_WriteLine(handle, "Trigger Log Source     : TriggerSLTP.mqh fired-trigger events; valid SL/TP records are still used for execution statistics");
+   __TRGSTM_WriteLine(handle, "Execution Model        : Single active trade only | entry at breakout level | touch-based TP/SL | conservative same-bar ambiguity = SL | Trigger.mqh enforces the parent " + __TRGSTM_ParentLabel() + " -> " + __TRGSTM_WorkerLabel() + " window plus the active local " + __TRGSTM_WorkerLabel() + " signal gate | max 4 executed losses per calendar day | post-win wait disabled");
+>>>>>>> e5da32fe47c817fae05de25b108d1646fb695725
    __TRGSTM_WriteLine(handle, "Protection Rule        : After 4 executed losses on the same calendar day, no more trades are allowed until the next calendar day starts");
    if(__FSMS_SW_ShouldRunMinorWorldOnThisChart())
       __TRGSTM_WriteLine(handle, "Trend Context          : " + __TRGSTM_WorkerLabel() + " major/minor windows are reported as context only; execution itself follows Trigger.mqh parent/local gate rules");
@@ -3012,7 +3199,11 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
       __TRGSTM_WriteLine(handle, "Local " + __TRGSTM_WorkerLabel() + " Signal Gate  : Trigger direction must also sit inside the active local " + __TRGSTM_WorkerLabel() + " signal-on window opened by HWX/HWBB/FSMS/Gooz and closed by opposite MTC/MinorStarter/MinorOff");
    else
       __TRGSTM_WriteLine(handle, "Local " + __TRGSTM_WorkerLabel() + " Signal Gate  : Trigger direction must also sit inside the active local " + __TRGSTM_WorkerLabel() + " signal-on window opened by HWX/HWBB/FSMS/Gooz and closed by opposite MTC only");
+<<<<<<< HEAD
    __TRGSTM_WriteLine(handle, "Post-Win Re-Entry Rule : After each executed WIN, no new trigger can become a trade until a fresh local " + __TRGSTM_WorkerLabel() + " signal-on event arrives after that win");
+=======
+   __TRGSTM_WriteLine(handle, "Post-Win Re-Entry Rule : DISABLED - after a WIN, the next valid Type-1 or Type-2 trigger may execute if shared limits allow it");
+>>>>>>> e5da32fe47c817fae05de25b108d1646fb695725
    __TRGSTM_WriteLine(handle, "Trend Seed (Major)     : " + major_seed_text);
    __TRGSTM_WriteLine(handle, "Trend Windows MAJ/MIN  : " + IntegerToString(major_window_count) + " / " + IntegerToString(minor_window_count));
    __TRGSTM_WriteLine(handle, "Aligned Trend Cycles   : " + IntegerToString(eligible_epoch_count));
@@ -3022,11 +3213,18 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "Bridge Source          : Trigger.mqh / " + __TRGSTM_ParentLabel() + " -> " + __TRGSTM_WorkerLabel() + " bridge events");
    __TRGSTM_WriteLine(handle, "Local Gate Source      : TriggerM15SignalGate.mqh / local " + __TRGSTM_WorkerLabel() + " signal on-off events");
    __TRGSTM_WriteLine(handle, "Output Path            : " + g_trgstmt_last_fullpath);
+   __TRGSTM_WriteLine(handle, "Output Folder Mode     : " + (used_common_folder ? "COMMON_FILES_FALLBACK" : "LOCAL_MQL5_FILES"));
    __TRGSTM_WriteLine(handle, "");
 
    __TRGSTM_WriteLine(handle, "SUMMARY");
    __TRGSTM_WriteLine(handle, "------------------------------------------------------------");
+   __TRGSTM_WriteLine(handle, "Raw Fired Triggers     : " + IntegerToString(raw_fired_triggers));
+   __TRGSTM_WriteLine(handle, "Raw Fired Type 1 / 2   : " + IntegerToString(raw_fired_type1) + " / " + IntegerToString(raw_fired_type2));
    __TRGSTM_WriteLine(handle, "Raw Valid Triggers     : " + IntegerToString(raw_valid_triggers));
+   __TRGSTM_WriteLine(handle, "Raw Valid Type 1 / 2   : " + IntegerToString(raw_valid_type1) + " / " + IntegerToString(raw_valid_type2));
+   __TRGSTM_WriteLine(handle, "Rejected Fired Triggers: " + IntegerToString(raw_rejected_triggers));
+   __TRGSTM_WriteLine(handle, "Valid Fire Events      : " + IntegerToString(raw_valid_fire_events));
+   __TRGSTM_WriteLine(handle, "Last Fired Trigger     : " + last_fired_text);
    __TRGSTM_WriteLine(handle, "Executed Trades        : " + IntegerToString(executed_trades));
    __TRGSTM_WriteLine(handle, "Execution Rate         : " + __TRGSTM_Pct(execution_rate));
    __TRGSTM_WriteLine(handle, "Ignored Valid Triggers : " + IntegerToString(ignored_valid_triggers) + " | " + __TRGSTM_Pct(ignored_rate));
@@ -3034,7 +3232,11 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "Ignored: Daily 4L Cap  : " + IntegerToString(skipped_daily_loss_cap));
    __TRGSTM_WriteLine(handle, "Engine Gate            : Parent/local gate enforced before TriggerSLTP records are created inside Trigger.mqh");
    __TRGSTM_WriteLine(handle, "Trend Context MAJ/MIN/B: " + IntegerToString(exec_trend_major_only) + " / " + IntegerToString(exec_trend_minor_only) + " / " + IntegerToString(exec_trend_both));
+<<<<<<< HEAD
    __TRGSTM_WriteLine(handle, "Ignored: Post-Win Wait : " + IntegerToString(skipped_post_win_wait));
+=======
+   __TRGSTM_WriteLine(handle, "Ignored: Post-Win Wait : " + IntegerToString(skipped_post_win_wait) + " (disabled)");
+>>>>>>> e5da32fe47c817fae05de25b108d1646fb695725
    __TRGSTM_WriteLine(handle, "Skipped Hypo W/L/O     : " + IntegerToString(skipped_hypo_wins) + " / " + IntegerToString(skipped_hypo_losses) + " / " + IntegerToString(skipped_hypo_open));
    __TRGSTM_WriteLine(handle, "Closed Trades          : " + IntegerToString(closed_trades));
    __TRGSTM_WriteLine(handle, "Open Trades            : " + IntegerToString(open_trades));
@@ -3061,6 +3263,10 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "Daily Cap Resets       : " + IntegerToString(daily_loss_cap_resets));
    __TRGSTM_WriteLine(handle, "Daily Cap Active End   : " + (daily_loss_cap_active_at_end ? "YES" : "NO"));
    __TRGSTM_WriteLine(handle, "Daily Losses End Day   : " + IntegerToString(daily_loss_count_at_end) + " | " + __TRGSTM_DayKeyText(daily_loss_day_key_at_end));
+<<<<<<< HEAD
+=======
+   __TRGSTM_WriteLine(handle, "Post-Win Re-entry Rule : DISABLED - next valid Type-1/Type-2 trigger may execute");
+>>>>>>> e5da32fe47c817fae05de25b108d1646fb695725
    __TRGSTM_WriteLine(handle, "Post-Win Wait Arms     : " + IntegerToString(post_win_wait_arms));
    __TRGSTM_WriteLine(handle, "Post-Win Wait Releases : " + IntegerToString(post_win_wait_releases));
    __TRGSTM_WriteLine(handle, "Post-Win Wait At End   : " + (post_win_wait_at_end ? "YES" : "NO"));
@@ -3076,12 +3282,60 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "Target Model           : 3R fixed from TriggerSLTP.mqh");
    __TRGSTM_WriteLine(handle, "");
 
+   __TRGSTM_WriteLine(handle, "FIRED TRIGGER LIVE LOG");
+   __TRGSTM_WriteLine(handle, "------------------------------------------------------------");
+
+   if(raw_fired_triggers <= 0)
+   {
+      __TRGSTM_WriteLine(handle, "No fired triggers have been detected yet in the active M1 statement window.");
+   }
+   else
+   {
+      for(int fe = 0; fe < raw_fired_triggers; ++fe)
+      {
+         TriggerSLTPFireEvent evt = fire_events[fe];
+         string serial_text = "n/a";
+         if(evt.valid_serial > 0)
+            serial_text = (evt.dir == DIR_UP ? "U" : "D") + IntegerToString(evt.valid_serial);
+
+         string line = "Fire#=" + IntegerToString(evt.event_index)
+                     + " | Serial=" + serial_text
+                     + " | Dir=" + __TRGSTM_DirName(evt.dir)
+                     + " | Type=" + IntegerToString(evt.type_id)
+                     + " | HitTime=" + __TRGSTM_SafeTime(evt.hit_time)
+                     + " | Breakout=" + DoubleToString(evt.breakout_level, digits)
+                     + " | LocalSeq=" + IntegerToString(evt.local_gate_seq)
+                     + " | LocalOn=" + __TRGSTM_SafeTime(evt.local_gate_time)
+                     + " | SLTP=" + __TRGSTM_FireEventSLTPStatus(evt)
+                     + " | Trade=" + __TRGSTM_FireEventExecStatus(evt);
+
+         if(evt.sltp_valid)
+         {
+            line += " | SL=" + DoubleToString(evt.sl_level, digits)
+                  + " | TP=" + DoubleToString(evt.tp_level, digits)
+                  + " | Risk=" + DoubleToString(evt.risk_pips, 1) + " pip";
+         }
+
+         if(evt.execution_index > 0)
+            line += " | Exec#=" + IntegerToString(evt.execution_index);
+
+         line += " | Reason=" + evt.decision_reason;
+         __TRGSTM_WriteLine(handle, line);
+      }
+   }
+
+   __TRGSTM_WriteLine(handle, "");
+
    __TRGSTM_WriteLine(handle, "EXECUTED TRADE LIST");
    __TRGSTM_WriteLine(handle, "------------------------------------------------------------");
 
    if(executed_trades <= 0)
    {
+<<<<<<< HEAD
       __TRGSTM_WriteLine(handle, "No executable trades were taken under the single-trade, daily 4-loss cap, engine-level parent/local gate enforcement, and post-win fresh-local-signal re-entry rules.");
+=======
+      __TRGSTM_WriteLine(handle, "No executable trades were taken under the single-trade, daily 4-loss cap, and engine-level parent/local gate enforcement rules.");
+>>>>>>> e5da32fe47c817fae05de25b108d1646fb695725
    }
    else
    {
@@ -3162,6 +3416,7 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "");
    __TRGSTM_WriteLine(handle, "USAGE NOTES");
    __TRGSTM_WriteLine(handle, "------------------------------------------------------------");
+<<<<<<< HEAD
    __TRGSTM_WriteLine(handle, "1) This statement first collects all valid TriggerSLTP triggers inside the scan window, then applies the execution model.");
    __TRGSTM_WriteLine(handle, "2) Only one trade can be active at a time; all later valid triggers are ignored until that trade reaches WIN, LOSS, or remains OPEN at scan end.");
    __TRGSTM_WriteLine(handle, "3) The executed-loss protection counter is calendar-day based; it resets automatically when a new trading day starts.");
@@ -3172,6 +3427,20 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "8) Skipped valid triggers are listed separately together with their hypothetical outcome so you can inspect missed opportunities.");
    __TRGSTM_WriteLine(handle, "9) Risk per executed trade is fixed on initial capital, not compounded trade-by-trade.");
    __TRGSTM_WriteLine(handle, "10) Ambiguous same-bar outcomes are counted conservatively as SL to avoid optimistic bias.");
+=======
+   __TRGSTM_WriteLine(handle, "1) This statement is created as soon as the M1 chart starts and is refreshed immediately after every fired trigger event.");
+   __TRGSTM_WriteLine(handle, "2) Fired-trigger events are logged even when SL/TP validation rejects them or execution rules block conversion to a trade.");
+   __TRGSTM_WriteLine(handle, "3) Only one trade can be active at a time; all later valid triggers are ignored until that trade reaches WIN, LOSS, or remains OPEN at scan end.");
+   __TRGSTM_WriteLine(handle, "4) The executed-loss protection counter is calendar-day based; it resets automatically when a new trading day starts.");
+   __TRGSTM_WriteLine(handle, "5) After 4 executed losses inside the same calendar day, new entries are blocked until the next calendar day begins.");
+   __TRGSTM_WriteLine(handle, "6) Trigger.mqh already enforces the active parent " + __TRGSTM_ParentLabel() + " -> " + __TRGSTM_WorkerLabel() + " bridge window together with the active local " + __TRGSTM_WorkerLabel() + " signal-on window before TriggerSLTP records are created.");
+   __TRGSTM_WriteLine(handle, "7) The reported " + __TRGSTM_WorkerLabel() + " major/minor trend windows are context statistics only; they no longer block execution by themselves.");
+   __TRGSTM_WriteLine(handle, "8) Post-win waiting is disabled: after a WIN, the next valid Type-1 or Type-2 trigger can become a trade if the shared execution limits allow it.");
+   __TRGSTM_WriteLine(handle, "9) Trigger Type=1 and Type=2 are detected by separate engines but share one execution/risk limit model.");
+   __TRGSTM_WriteLine(handle, "10) Skipped valid triggers are listed separately together with their hypothetical outcome so you can inspect missed opportunities.");
+   __TRGSTM_WriteLine(handle, "11) Risk per executed trade is fixed on initial capital, not compounded trade-by-trade.");
+   __TRGSTM_WriteLine(handle, "12) Ambiguous same-bar outcomes are counted conservatively as SL to avoid optimistic bias.");
+>>>>>>> e5da32fe47c817fae05de25b108d1646fb695725
 
    FileFlush(handle);
    FileClose(handle);
@@ -3179,6 +3448,7 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    if(InpDebugPrints)
    {
       Print("[TRG-STATEMENT] Written | path=", g_trgstmt_last_fullpath,
+            " | raw_fired=", raw_fired_triggers,
             " | raw_valid=", raw_valid_triggers,
             " | executed=", executed_trades,
             " | ignored=", ignored_valid_triggers,

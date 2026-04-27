@@ -1,3 +1,4 @@
+
 #ifndef WAVEBOT_API_MQH
 #define WAVEBOT_API_MQH
 

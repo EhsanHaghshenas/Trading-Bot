@@ -1,3 +1,7 @@
+<<<<<<< HEAD
+=======
+
+>>>>>>> e5da32fe47c817fae05de25b108d1646fb695725
 #ifndef WAVEBOT_FSMS_LIFECYCLE_MQH
 #define WAVEBOT_FSMS_LIFECYCLE_MQH
 
@@ -267,4 +271,7 @@ inline void FSMSLC_FinishTerminal(const datetime resume_after)
 }
 
 #endif // WAVEBOT_FSMS_LIFECYCLE_MQH
+<<<<<<< HEAD
 
+=======
+>>>>>>> e5da32fe47c817fae05de25b108d1646fb695725

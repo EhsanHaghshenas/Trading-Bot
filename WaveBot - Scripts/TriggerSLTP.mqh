@@ -1,3 +1,4 @@
+
 #ifndef WAVEBOT_TRIGGER_SLTP_MQH
 #define WAVEBOT_TRIGGER_SLTP_MQH
 
@@ -54,8 +55,44 @@ struct TriggerSLTPExecutionRecord
    TriggerSLTPRecord rec;
 };
 
+<<<<<<< HEAD
 static TriggerSLTPRecord          g_trgsl_records[];
 static TriggerSLTPExecutionRecord g_trgsl_exec_records[];
+=======
+struct TriggerSLTPFireEvent
+{
+   bool      valid;
+   int       event_index;
+   Direction dir;
+   int       type_id;
+   string    symbol;
+
+   int       src_idx;
+   datetime  src_time;
+   double    breakout_level;
+
+   int       hit_idx;
+   datetime  hit_time;
+
+   int       local_gate_seq;
+   datetime  local_gate_time;
+
+   bool      sltp_valid;
+   int       valid_serial;
+   double    sl_level;
+   double    tp_level;
+   double    risk_pips;
+
+   bool      execution_allowed;
+   bool      execution_opened;
+   int       execution_index;
+   string    decision_reason;
+};
+
+static TriggerSLTPRecord          g_trgsl_records[];
+static TriggerSLTPExecutionRecord g_trgsl_exec_records[];
+static TriggerSLTPFireEvent       g_trgsl_fire_events[];
+>>>>>>> e5da32fe47c817fae05de25b108d1646fb695725
 
 static int      g_trgsl_up_serial               = 0;
 static int      g_trgsl_dn_serial               = 0;
@@ -69,7 +106,14 @@ static int      g_trgsl_exec_daily_losses       = 0;
 static bool     g_trgsl_exec_post_win_wait      = false;
 static int      g_trgsl_exec_post_win_gate_seq  = -1;
 static datetime g_trgsl_exec_post_win_ref_time  = 0;
+<<<<<<< HEAD
 static bool     g_trgsl_stmt_dirty              = false;
+=======
+static int      g_trgsl_fire_counter            = 0;
+static bool     g_trgsl_stmt_dirty              = false;
+static int      g_trgsl_stmt_dirty_seq          = 0;
+static int      g_trgsl_stmt_clear_seq          = 0;
+>>>>>>> e5da32fe47c817fae05de25b108d1646fb695725
 
 inline void __TRGSL_ClearRecord(TriggerSLTPRecord &rec)
 {
@@ -107,6 +151,34 @@ inline void __TRGSL_ClearExecRecord(TriggerSLTPExecutionRecord &rec)
    rec.daily_losses_after    = 0;
    rec.note                  = "";
    __TRGSL_ClearRecord(rec.rec);
+<<<<<<< HEAD
+=======
+}
+
+inline void __TRGSL_ClearFireEvent(TriggerSLTPFireEvent &evt)
+{
+   evt.valid              = false;
+   evt.event_index        = 0;
+   evt.dir                = DIR_UP;
+   evt.type_id            = 0;
+   evt.symbol             = "";
+   evt.src_idx            = -1;
+   evt.src_time           = 0;
+   evt.breakout_level     = 0.0;
+   evt.hit_idx            = -1;
+   evt.hit_time           = 0;
+   evt.local_gate_seq     = -1;
+   evt.local_gate_time    = 0;
+   evt.sltp_valid         = false;
+   evt.valid_serial       = 0;
+   evt.sl_level           = 0.0;
+   evt.tp_level           = 0.0;
+   evt.risk_pips          = 0.0;
+   evt.execution_allowed  = false;
+   evt.execution_opened   = false;
+   evt.execution_index    = -1;
+   evt.decision_reason    = "";
+>>>>>>> e5da32fe47c817fae05de25b108d1646fb695725
 }
 
 inline int TriggerSLTP_RecordCount()
@@ -147,14 +219,49 @@ inline int TriggerSLTP_DailyLossCount()
    return g_trgsl_exec_daily_losses;
 }
 
+<<<<<<< HEAD
 inline bool TriggerSLTP_IsStatementDirty()
 {
    return g_trgsl_stmt_dirty;
+=======
+inline int TriggerSLTP_FireEventCount()
+{
+   return ArraySize(g_trgsl_fire_events);
+}
+
+inline bool TriggerSLTP_FireEventGet(const int index, TriggerSLTPFireEvent &out)
+{
+   if(index < 0 || index >= ArraySize(g_trgsl_fire_events))
+      return false;
+
+   out = g_trgsl_fire_events[index];
+   return true;
+}
+
+inline int TriggerSLTP_StatementDirtySeq()
+{
+   return g_trgsl_stmt_dirty_seq;
+}
+
+inline bool TriggerSLTP_IsStatementDirty()
+{
+   return (g_trgsl_stmt_dirty || g_trgsl_stmt_dirty_seq != g_trgsl_stmt_clear_seq);
+>>>>>>> e5da32fe47c817fae05de25b108d1646fb695725
 }
 
 inline void TriggerSLTP_ClearStatementDirty()
 {
    g_trgsl_stmt_dirty = false;
+<<<<<<< HEAD
+=======
+   g_trgsl_stmt_clear_seq = g_trgsl_stmt_dirty_seq;
+}
+
+inline void TriggerSLTP_MarkStatementDirty()
+{
+   g_trgsl_stmt_dirty = true;
+   ++g_trgsl_stmt_dirty_seq;
+>>>>>>> e5da32fe47c817fae05de25b108d1646fb695725
 }
 
 inline double __TRGSL_PointOf(const string sym)
@@ -246,6 +353,131 @@ inline void __TRGSL_StoreRecord(const TriggerSLTPRecord &rec)
    int pos = ArraySize(g_trgsl_records);
    ArrayResize(g_trgsl_records, pos + 1);
    g_trgsl_records[pos] = rec;
+   TriggerSLTP_MarkStatementDirty();
+}
+
+inline int __TRGSL_AppendFireEvent(const string    sym,
+                                   const Direction dir,
+                                   const int       type_id,
+                                   const int       src_idx,
+                                   const double    level,
+                                   const int       hit_idx,
+                                   const MqlRates &rates[],
+                                   const int       n,
+                                   const int       local_gate_seq,
+                                   const datetime  local_gate_time)
+{
+   TriggerSLTPFireEvent evt;
+   __TRGSL_ClearFireEvent(evt);
+
+   ++g_trgsl_fire_counter;
+   evt.valid           = true;
+   evt.event_index     = g_trgsl_fire_counter;
+   evt.dir             = dir;
+   evt.type_id         = type_id;
+   evt.symbol          = sym;
+   evt.src_idx         = src_idx;
+   evt.breakout_level  = level;
+   evt.hit_idx         = hit_idx;
+   evt.local_gate_seq  = local_gate_seq;
+   evt.local_gate_time = local_gate_time;
+   evt.decision_reason = "FIRED_WAITING_SLTP_VALIDATION";
+
+   if(src_idx >= 0 && src_idx < n)
+      evt.src_time = rates[src_idx].time;
+   if(hit_idx >= 0 && hit_idx < n)
+      evt.hit_time = rates[hit_idx].time;
+
+   int pos = ArraySize(g_trgsl_fire_events);
+   ArrayResize(g_trgsl_fire_events, pos + 1);
+   g_trgsl_fire_events[pos] = evt;
+
+   TriggerSLTP_MarkStatementDirty();
+   return pos;
+}
+
+inline void __TRGSL_UpdateFireEventInvalid(const int pos,
+                                           const string reason)
+{
+   if(pos < 0 || pos >= ArraySize(g_trgsl_fire_events))
+      return;
+
+   g_trgsl_fire_events[pos].sltp_valid        = false;
+   g_trgsl_fire_events[pos].valid_serial      = 0;
+   g_trgsl_fire_events[pos].execution_allowed = false;
+   g_trgsl_fire_events[pos].execution_opened  = false;
+   g_trgsl_fire_events[pos].execution_index   = -1;
+   g_trgsl_fire_events[pos].decision_reason   = reason;
+   TriggerSLTP_MarkStatementDirty();
+}
+
+inline void __TRGSL_UpdateFireEventValid(const int               pos,
+                                         const TriggerSLTPRecord &rec,
+                                         const bool              execution_allowed,
+                                         const bool              execution_opened,
+                                         const int               execution_index,
+                                         const string            reason)
+{
+   if(pos < 0 || pos >= ArraySize(g_trgsl_fire_events))
+      return;
+
+   g_trgsl_fire_events[pos].sltp_valid        = true;
+   g_trgsl_fire_events[pos].valid_serial      = rec.serial;
+   g_trgsl_fire_events[pos].sl_level          = rec.sl_level;
+   g_trgsl_fire_events[pos].tp_level          = rec.tp_level;
+   g_trgsl_fire_events[pos].risk_pips         = rec.risk_pips;
+   g_trgsl_fire_events[pos].execution_allowed = execution_allowed;
+   g_trgsl_fire_events[pos].execution_opened  = execution_opened;
+   g_trgsl_fire_events[pos].execution_index   = execution_index;
+   g_trgsl_fire_events[pos].decision_reason   = reason;
+   TriggerSLTP_MarkStatementDirty();
+}
+
+inline int __TRGSL_DayKey(const datetime t)
+{
+   if(t <= 0)
+      return 0;
+
+   MqlDateTime dt;
+   TimeToStruct(t, dt);
+   return (dt.year * 10000 + dt.mon * 100 + dt.day);
+}
+
+inline void __TRGSL_EnsureDailyBucket(const datetime t)
+{
+   if(t <= 0)
+      return;
+
+   int day_key = __TRGSL_DayKey(t);
+   if(day_key <= 0)
+      return;
+
+   if(g_trgsl_exec_day_key != day_key)
+   {
+      g_trgsl_exec_day_key      = day_key;
+      g_trgsl_exec_daily_losses = 0;
+   }
+}
+
+inline string __TRGSL_AppendNote(const string left_text,
+                                 const string right_text)
+{
+   if(right_text == "")
+      return left_text;
+   if(left_text == "")
+      return right_text;
+   return (left_text + "|" + right_text);
+}
+
+inline double __TRGSL_WinR(const TriggerSLTPRecord &rec)
+{
+   if(rec.risk_price <= 0.0)
+      return 0.0;
+
+   if(rec.dir == DIR_UP)
+      return ((rec.tp_level - rec.breakout_level) / rec.risk_price);
+
+   return ((rec.breakout_level - rec.tp_level) / rec.risk_price);
 }
 
 inline int __TRGSL_DayKey(const datetime t)
@@ -435,7 +667,11 @@ inline int __TRGSL_AppendExecutionRecord(const TriggerSLTPRecord &rec,
    g_trgsl_exec_active      = true;
    g_trgsl_exec_active_pos  = pos;
    g_trgsl_exec_block_until = 0;
+<<<<<<< HEAD
    g_trgsl_stmt_dirty       = true;
+=======
+   TriggerSLTP_MarkStatementDirty();
+>>>>>>> e5da32fe47c817fae05de25b108d1646fb695725
 
    return pos;
 }
@@ -478,22 +714,37 @@ inline void __TRGSL_CloseExecutionRecord(const int      pos,
       g_trgsl_exec_records[pos].daily_losses_after = g_trgsl_exec_daily_losses;
    }
 
+<<<<<<< HEAD
    if(result_status == TRGSL_EXEC_RESULT_WIN)
    {
       g_trgsl_exec_post_win_wait     = true;
       g_trgsl_exec_post_win_gate_seq = rec.local_gate_seq;
       g_trgsl_exec_post_win_ref_time = exit_time;
+=======
+   // Re-entry after a WIN is now allowed immediately on any later valid trigger.
+   // The historical post-win fresh-local-signal gate is intentionally disabled.
+   if(result_status == TRGSL_EXEC_RESULT_WIN)
+   {
+      g_trgsl_exec_post_win_wait     = false;
+      g_trgsl_exec_post_win_gate_seq = -1;
+      g_trgsl_exec_post_win_ref_time = 0;
+>>>>>>> e5da32fe47c817fae05de25b108d1646fb695725
    }
 
    g_trgsl_exec_active      = false;
    g_trgsl_exec_active_pos  = -1;
    g_trgsl_exec_block_until = exit_time;
+<<<<<<< HEAD
    g_trgsl_stmt_dirty       = true;
+=======
+   TriggerSLTP_MarkStatementDirty();
+>>>>>>> e5da32fe47c817fae05de25b108d1646fb695725
 }
 
 inline bool __TRGSL_AllowFreshLocalAfterWin(const int      local_gate_seq,
                                             const datetime local_gate_time)
 {
+<<<<<<< HEAD
    if(!g_trgsl_exec_post_win_wait)
       return true;
 
@@ -509,6 +760,17 @@ inline bool __TRGSL_AllowFreshLocalAfterWin(const int      local_gate_seq,
    g_trgsl_exec_post_win_wait     = false;
    g_trgsl_exec_post_win_gate_seq = local_gate_seq;
    g_trgsl_exec_post_win_ref_time = 0;
+=======
+   // This rule has been removed by design: after a WIN, the next valid
+   // Type-1 or Type-2 trigger may become a trade as long as the shared
+   // execution limits still allow it.
+   g_trgsl_exec_post_win_wait     = false;
+   g_trgsl_exec_post_win_gate_seq = -1;
+   g_trgsl_exec_post_win_ref_time = 0;
+
+   bool __unused = (local_gate_seq > 0 && local_gate_time > 0);
+   if(__unused) { /* keep MQL5 compiler quiet */ }
+>>>>>>> e5da32fe47c817fae05de25b108d1646fb695725
    return true;
 }
 
@@ -539,11 +801,15 @@ inline bool __TRGSL_CanOpenExecution(const datetime hit_time,
       return false;
    }
 
+<<<<<<< HEAD
    if(!__TRGSL_AllowFreshLocalAfterWin(local_gate_seq, local_gate_time))
    {
       reason = "WAIT_FRESH_LOCAL_SIGNAL_AFTER_WIN";
       return false;
    }
+=======
+   __TRGSL_AllowFreshLocalAfterWin(local_gate_seq, local_gate_time);
+>>>>>>> e5da32fe47c817fae05de25b108d1646fb695725
 
    return true;
 }
@@ -714,13 +980,24 @@ inline void TriggerSLTP_OnBarSync(const string    sym,
    g_trgsl_exec_last_sync_bar_time = bar_time;
 
    if(g_trgsl_exec_active)
+<<<<<<< HEAD
       __TRGSL_EvaluateActiveTradeOnBar(rates[bar_idx]);
+=======
+   {
+      __TRGSL_EvaluateActiveTradeOnBar(rates[bar_idx]);
+      TriggerSLTP_MarkStatementDirty();
+   }
+>>>>>>> e5da32fe47c817fae05de25b108d1646fb695725
 }
 
 inline void TriggerSLTP_ResetGlobals()
 {
    ArrayResize(g_trgsl_records, 0);
    ArrayResize(g_trgsl_exec_records, 0);
+<<<<<<< HEAD
+=======
+   ArrayResize(g_trgsl_fire_events, 0);
+>>>>>>> e5da32fe47c817fae05de25b108d1646fb695725
 
    g_trgsl_up_serial               = 0;
    g_trgsl_dn_serial               = 0;
@@ -734,7 +1011,14 @@ inline void TriggerSLTP_ResetGlobals()
    g_trgsl_exec_post_win_wait      = false;
    g_trgsl_exec_post_win_gate_seq  = -1;
    g_trgsl_exec_post_win_ref_time  = 0;
+<<<<<<< HEAD
    g_trgsl_stmt_dirty              = false;
+=======
+   g_trgsl_fire_counter            = 0;
+   g_trgsl_stmt_dirty              = false;
+   g_trgsl_stmt_dirty_seq          = 0;
+   g_trgsl_stmt_clear_seq          = 0;
+>>>>>>> e5da32fe47c817fae05de25b108d1646fb695725
 }
 
 inline void TriggerSLTP_OnTriggerFired(const string    sym,
@@ -752,6 +1036,17 @@ inline void TriggerSLTP_OnTriggerFired(const string    sym,
    if(use_sym == "")
       use_sym = _Symbol;
 
+   int fire_pos = __TRGSL_AppendFireEvent(use_sym,
+                                          dir,
+                                          type_id,
+                                          src_idx,
+                                          level,
+                                          hit_idx,
+                                          rates,
+                                          n,
+                                          local_gate_seq,
+                                          local_gate_time);
+
    TriggerSLTPRecord rec;
    bool ok = false;
 
@@ -762,6 +1057,8 @@ inline void TriggerSLTP_OnTriggerFired(const string    sym,
 
    if(!ok)
    {
+      __TRGSL_UpdateFireEventInvalid(fire_pos, "SLTP_REJECT_RISK_GT_25PIP_OR_BAD_RANGE");
+
       if(InpDebugPrints)
       {
          Print("[TRG-SLTP] Skip invalid ",
@@ -798,11 +1095,32 @@ inline void TriggerSLTP_OnTriggerFired(const string    sym,
    __TRGSL_DrawSegment(base + "_TP", rec.hit_time, end_t, rec.tp_level, clrGreen);
 
    string exec_reason = "";
+<<<<<<< HEAD
    if(__TRGSL_CanOpenExecution(rec.hit_time, local_gate_seq, local_gate_time, exec_reason))
    {
       int exec_pos = __TRGSL_AppendExecutionRecord(rec, local_gate_seq, local_gate_time);
       if(hit_idx >= 0 && hit_idx < n)
          __TRGSL_EvaluateEntryBar(exec_pos, rates[hit_idx]);
+=======
+   bool   exec_allowed = false;
+   bool   exec_opened  = false;
+   int    exec_index   = -1;
+
+   if(__TRGSL_CanOpenExecution(rec.hit_time, local_gate_seq, local_gate_time, exec_reason))
+   {
+      exec_allowed = true;
+      int exec_pos = __TRGSL_AppendExecutionRecord(rec, local_gate_seq, local_gate_time);
+      if(exec_pos >= 0 && exec_pos < ArraySize(g_trgsl_exec_records))
+      {
+         exec_opened = true;
+         exec_index  = g_trgsl_exec_records[exec_pos].exec_index;
+      }
+
+      if(hit_idx >= 0 && hit_idx < n)
+         __TRGSL_EvaluateEntryBar(exec_pos, rates[hit_idx]);
+
+      exec_reason = "EXECUTION_OPENED";
+>>>>>>> e5da32fe47c817fae05de25b108d1646fb695725
    }
    else if(InpDebugPrints)
    {
@@ -814,12 +1132,23 @@ inline void TriggerSLTP_OnTriggerFired(const string    sym,
             " | local_seq=", local_gate_seq);
    }
 
+<<<<<<< HEAD
+=======
+   __TRGSL_UpdateFireEventValid(fire_pos,
+                                rec,
+                                exec_allowed,
+                                exec_opened,
+                                exec_index,
+                                (exec_reason == "" ? "EXECUTION_SKIPPED" : exec_reason));
+
+>>>>>>> e5da32fe47c817fae05de25b108d1646fb695725
    if(InpDebugPrints)
    {
       int digits = __TRGSL_DigitsOf(use_sym);
       Print("[TRG-SLTP] ",
             (dir == DIR_UP ? "UP" : "DOWN"),
             " #", rec.serial,
+            " | type=", rec.type_id,
             " | breakout=", DoubleToString(rec.breakout_level, digits),
             " | SL=", DoubleToString(rec.sl_level, digits),
             " | TP=", DoubleToString(rec.tp_level, digits),
@@ -828,7 +1157,11 @@ inline void TriggerSLTP_OnTriggerFired(const string    sym,
             " | hit=", TimeToString(rec.hit_time, TIME_DATE|TIME_SECONDS),
             " | local_seq=", local_gate_seq,
             " | daily_losses=", g_trgsl_exec_daily_losses,
+<<<<<<< HEAD
             " | postwin_wait=", (g_trgsl_exec_post_win_wait ? "YES" : "NO"));
+=======
+            " | postwin_wait=DISABLED_REENTRY_ALLOWED");
+>>>>>>> e5da32fe47c817fae05de25b108d1646fb695725
    }
 }
 
