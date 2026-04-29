@@ -1,14 +1,18 @@
-
 #ifndef WAVEBOT_TRIGGER_SLTP_MQH
 #define WAVEBOT_TRIGGER_SLTP_MQH
 
 #include <WaveBot/Types.mqh>
 #include <WaveBot/Markers.mqh>
 
-#define TRGSL_MAX_RISK_PIPS       25.0
-#define TRGSL_R_MULTIPLE          3.0
-#define TRGSL_FORWARD_BARS        4
-#define TRGSL_MAX_LOSSES_PER_DAY  4
+#define TRGSL_MAX_RISK_PIPS             15.0
+#define TRGSL_MIN_RISK_PIPS             1.5
+#define TRGSL_R_MULTIPLE                2.0
+#define TRGSL_FORWARD_BARS              4
+#define TRGSL_MAX_LOSSES_PER_DAY        4
+#define TRGSL_DAILY_MAX_LOSS_PERCENT    3.0
+
+#define TRGSL_BERLIN_BLOCK_START_MINUTE 1410   // 23:30 Berlin time
+#define TRGSL_BERLIN_BLOCK_END_MINUTE   330    // 05:30 Berlin time
 
 #define TRGSL_EXEC_RESULT_OPEN 0
 #define TRGSL_EXEC_RESULT_WIN  1
@@ -51,6 +55,9 @@ struct TriggerSLTPExecutionRecord
    int               bars_held;
    int               daily_losses_before;
    int               daily_losses_after;
+   double            daily_loss_money_before;
+   double            daily_loss_money_after;
+   double            daily_loss_limit_money;
    string            note;
    TriggerSLTPRecord rec;
 };
@@ -98,6 +105,8 @@ static datetime g_trgsl_exec_block_until        = 0;
 static datetime g_trgsl_exec_last_sync_bar_time = 0;
 static int      g_trgsl_exec_day_key            = 0;
 static int      g_trgsl_exec_daily_losses       = 0;
+static double   g_trgsl_exec_daily_loss_money   = 0.0;
+static double   g_trgsl_exec_daily_loss_limit   = 0.0;
 static bool     g_trgsl_exec_post_win_wait      = false;
 static int      g_trgsl_exec_post_win_gate_seq  = -1;
 static datetime g_trgsl_exec_post_win_ref_time  = 0;
@@ -138,9 +147,12 @@ inline void __TRGSL_ClearExecRecord(TriggerSLTPExecutionRecord &rec)
    rec.exit_price            = 0.0;
    rec.result_r              = 0.0;
    rec.bars_held             = 0;
-   rec.daily_losses_before   = 0;
-   rec.daily_losses_after    = 0;
-   rec.note                  = "";
+   rec.daily_losses_before     = 0;
+   rec.daily_losses_after      = 0;
+   rec.daily_loss_money_before = 0.0;
+   rec.daily_loss_money_after  = 0.0;
+   rec.daily_loss_limit_money  = 0.0;
+   rec.note                    = "";
    __TRGSL_ClearRecord(rec.rec);
 }
 
@@ -205,6 +217,16 @@ inline bool TriggerSLTP_HasActiveExecutedTrade()
 inline int TriggerSLTP_DailyLossCount()
 {
    return g_trgsl_exec_daily_losses;
+}
+
+inline double TriggerSLTP_DailyLossMoney()
+{
+   return g_trgsl_exec_daily_loss_money;
+}
+
+inline double TriggerSLTP_DailyLossLimitMoney()
+{
+   return g_trgsl_exec_daily_loss_limit;
 }
 
 inline int TriggerSLTP_FireEventCount()
@@ -278,6 +300,220 @@ inline double __TRGSL_ToPips(const string sym, const double price_distance)
 
    return (price_distance / pip);
 }
+
+
+inline bool __TRGSL_IsLeapYear(const int y)
+{
+   if((y % 400) == 0) return true;
+   if((y % 100) == 0) return false;
+   return ((y % 4) == 0);
+}
+
+inline int __TRGSL_DaysInMonth(const int y, const int m)
+{
+   if(m == 1 || m == 3 || m == 5 || m == 7 || m == 8 || m == 10 || m == 12)
+      return 31;
+   if(m == 4 || m == 6 || m == 9 || m == 11)
+      return 30;
+   return (__TRGSL_IsLeapYear(y) ? 29 : 28);
+}
+
+inline datetime __TRGSL_DateTimeUTCStyle(const int year,
+                                         const int mon,
+                                         const int day,
+                                         const int hour,
+                                         const int minute,
+                                         const int second)
+{
+   MqlDateTime dt;
+   dt.year = year;
+   dt.mon  = mon;
+   dt.day  = day;
+   dt.hour = hour;
+   dt.min  = minute;
+   dt.sec  = second;
+   return StructToTime(dt);
+}
+
+inline int __TRGSL_LastSundayDay(const int year, const int mon)
+{
+   int last_day = __TRGSL_DaysInMonth(year, mon);
+
+   MqlDateTime dt;
+   dt.year = year;
+   dt.mon  = mon;
+   dt.day  = last_day;
+   dt.hour = 0;
+   dt.min  = 0;
+   dt.sec  = 0;
+
+   datetime t = StructToTime(dt);
+
+   MqlDateTime out;
+   TimeToStruct(t, out);
+
+   // MQL5: Sunday=0, Monday=1, ... Saturday=6
+   return (last_day - out.day_of_week);
+}
+
+inline bool __TRGSL_BerlinDSTFromUTC(const datetime utc_time)
+{
+   if(utc_time <= 0)
+      return false;
+
+   MqlDateTime dt;
+   TimeToStruct(utc_time, dt);
+
+   int y = dt.year;
+
+   int march_last_sunday = __TRGSL_LastSundayDay(y, 3);
+   int oct_last_sunday   = __TRGSL_LastSundayDay(y, 10);
+
+   datetime dst_start_utc = __TRGSL_DateTimeUTCStyle(y, 3,  march_last_sunday, 1, 0, 0);
+   datetime dst_end_utc   = __TRGSL_DateTimeUTCStyle(y, 10, oct_last_sunday,   1, 0, 0);
+
+   return (utc_time >= dst_start_utc && utc_time < dst_end_utc);
+}
+
+inline int __TRGSL_BerlinUTCOffsetSeconds(const datetime utc_time)
+{
+   return (__TRGSL_BerlinDSTFromUTC(utc_time) ? 7200 : 3600);
+}
+
+inline int __TRGSL_ServerGMTOffsetSeconds()
+{
+   datetime server_now = TimeCurrent();
+   datetime gmt_now    = TimeGMT();
+
+   if(server_now <= 0 || gmt_now <= 0)
+      return 0;
+
+   return (int)(server_now - gmt_now);
+}
+
+inline datetime __TRGSL_ServerTimeToUTC(const datetime server_time)
+{
+   if(server_time <= 0)
+      return 0;
+
+   return (server_time - (datetime)__TRGSL_ServerGMTOffsetSeconds());
+}
+
+inline datetime TriggerSLTP_ServerTimeToBerlinTime(const datetime server_time)
+{
+   datetime utc_time = __TRGSL_ServerTimeToUTC(server_time);
+   if(utc_time <= 0)
+      return 0;
+
+   int berlin_offset = __TRGSL_BerlinUTCOffsetSeconds(utc_time);
+   return (utc_time + (datetime)berlin_offset);
+}
+
+inline int TriggerSLTP_BerlinDayKey(const datetime server_time)
+{
+   datetime berlin_time = TriggerSLTP_ServerTimeToBerlinTime(server_time);
+   if(berlin_time <= 0)
+      return 0;
+
+   MqlDateTime dt;
+   TimeToStruct(berlin_time, dt);
+
+   return (dt.year * 10000 + dt.mon * 100 + dt.day);
+}
+
+inline string TriggerSLTP_BerlinTimeText(const datetime server_time)
+{
+   datetime berlin_time = TriggerSLTP_ServerTimeToBerlinTime(server_time);
+   if(berlin_time <= 0)
+      return "n/a";
+
+   return TimeToString(berlin_time, TIME_DATE|TIME_SECONDS);
+}
+
+inline datetime TriggerSLTP_NextBerlinDayStartServerTime(const datetime server_time)
+{
+   datetime berlin_time = TriggerSLTP_ServerTimeToBerlinTime(server_time);
+   if(berlin_time <= 0)
+      return 0;
+
+   MqlDateTime dt;
+   TimeToStruct(berlin_time, dt);
+   dt.hour = 0;
+   dt.min  = 0;
+   dt.sec  = 0;
+
+   datetime next_berlin_midnight = StructToTime(dt) + 86400;
+
+   datetime utc_guess = next_berlin_midnight - 3600;
+   int berlin_offset = __TRGSL_BerlinUTCOffsetSeconds(utc_guess);
+   utc_guess = next_berlin_midnight - (datetime)berlin_offset;
+
+   // Re-check once because the next midnight may be on a DST boundary.
+   berlin_offset = __TRGSL_BerlinUTCOffsetSeconds(utc_guess);
+   utc_guess = next_berlin_midnight - (datetime)berlin_offset;
+
+   return (utc_guess + (datetime)__TRGSL_ServerGMTOffsetSeconds());
+}
+
+inline bool TriggerSLTP_IsBerlinNoTradeTime(const datetime server_time)
+{
+   datetime berlin_time = TriggerSLTP_ServerTimeToBerlinTime(server_time);
+   if(berlin_time <= 0)
+      return false;
+
+   MqlDateTime dt;
+   TimeToStruct(berlin_time, dt);
+
+   int minute_of_day = (dt.hour * 60) + dt.min;
+
+   if(TRGSL_BERLIN_BLOCK_START_MINUTE > TRGSL_BERLIN_BLOCK_END_MINUTE)
+      return (minute_of_day >= TRGSL_BERLIN_BLOCK_START_MINUTE ||
+              minute_of_day <  TRGSL_BERLIN_BLOCK_END_MINUTE);
+
+   return (minute_of_day >= TRGSL_BERLIN_BLOCK_START_MINUTE &&
+           minute_of_day <  TRGSL_BERLIN_BLOCK_END_MINUTE);
+}
+
+inline double __TRGSL_InitialCapital()
+{
+   double capital = InpTriggerStatementInitialCapital;
+   if(capital <= 0.0)
+      capital = AccountInfoDouble(ACCOUNT_BALANCE);
+   if(capital <= 0.0)
+      capital = 10000.0;
+
+   return capital;
+}
+
+inline double __TRGSL_RiskPercent()
+{
+   double pct = InpTriggerStatementRiskPercent;
+   if(pct <= 0.0)
+      pct = 1.0;
+
+   return pct;
+}
+
+inline double __TRGSL_RiskMoney()
+{
+   double capital = __TRGSL_InitialCapital();
+   double pct     = __TRGSL_RiskPercent();
+
+   if(capital <= 0.0 || pct <= 0.0)
+      return 0.0;
+
+   return (capital * (pct / 100.0));
+}
+
+inline double __TRGSL_DailyLossLimitMoney()
+{
+   double capital = __TRGSL_InitialCapital();
+   if(capital <= 0.0)
+      return 0.0;
+
+   return (capital * (TRGSL_DAILY_MAX_LOSS_PERCENT / 100.0));
+}
+
 
 inline datetime __TRGSL_ForwardEndTime(const datetime start_t)
 {
@@ -414,12 +650,7 @@ inline void __TRGSL_UpdateFireEventValid(const int               pos,
 
 inline int __TRGSL_DayKey(const datetime t)
 {
-   if(t <= 0)
-      return 0;
-
-   MqlDateTime dt;
-   TimeToStruct(t, dt);
-   return (dt.year * 10000 + dt.mon * 100 + dt.day);
+   return TriggerSLTP_BerlinDayKey(t);
 }
 
 inline void __TRGSL_EnsureDailyBucket(const datetime t)
@@ -433,8 +664,14 @@ inline void __TRGSL_EnsureDailyBucket(const datetime t)
 
    if(g_trgsl_exec_day_key != day_key)
    {
-      g_trgsl_exec_day_key      = day_key;
-      g_trgsl_exec_daily_losses = 0;
+      g_trgsl_exec_day_key          = day_key;
+      g_trgsl_exec_daily_losses     = 0;
+      g_trgsl_exec_daily_loss_money = 0.0;
+      g_trgsl_exec_daily_loss_limit = __TRGSL_DailyLossLimitMoney();
+   }
+   else
+   {
+      g_trgsl_exec_daily_loss_limit = __TRGSL_DailyLossLimitMoney();
    }
 }
 
@@ -586,9 +823,14 @@ inline int __TRGSL_AppendExecutionRecord(const TriggerSLTPRecord &rec,
    exec_rec.local_gate_seq      = local_gate_seq;
    exec_rec.local_gate_time     = local_gate_time;
    exec_rec.result_status       = TRGSL_EXEC_RESULT_OPEN;
-   exec_rec.daily_losses_before = g_trgsl_exec_daily_losses;
-   exec_rec.daily_losses_after  = g_trgsl_exec_daily_losses;
-   exec_rec.bars_held           = 1;
+   __TRGSL_EnsureDailyBucket(rec.hit_time);
+
+   exec_rec.daily_losses_before     = g_trgsl_exec_daily_losses;
+   exec_rec.daily_losses_after      = g_trgsl_exec_daily_losses;
+   exec_rec.daily_loss_money_before = g_trgsl_exec_daily_loss_money;
+   exec_rec.daily_loss_money_after  = g_trgsl_exec_daily_loss_money;
+   exec_rec.daily_loss_limit_money  = __TRGSL_DailyLossLimitMoney();
+   exec_rec.bars_held               = 1;
    exec_rec.rec                 = rec;
 
    int pos = ArraySize(g_trgsl_exec_records);
@@ -635,11 +877,17 @@ inline void __TRGSL_CloseExecutionRecord(const int      pos,
    {
       __TRGSL_EnsureDailyBucket(exit_time);
       g_trgsl_exec_daily_losses++;
-      g_trgsl_exec_records[pos].daily_losses_after = g_trgsl_exec_daily_losses;
+      g_trgsl_exec_daily_loss_money += __TRGSL_RiskMoney();
+
+      g_trgsl_exec_records[pos].daily_losses_after     = g_trgsl_exec_daily_losses;
+      g_trgsl_exec_records[pos].daily_loss_money_after = g_trgsl_exec_daily_loss_money;
+      g_trgsl_exec_records[pos].daily_loss_limit_money = __TRGSL_DailyLossLimitMoney();
    }
    else
    {
-      g_trgsl_exec_records[pos].daily_losses_after = g_trgsl_exec_daily_losses;
+      g_trgsl_exec_records[pos].daily_losses_after     = g_trgsl_exec_daily_losses;
+      g_trgsl_exec_records[pos].daily_loss_money_after = g_trgsl_exec_daily_loss_money;
+      g_trgsl_exec_records[pos].daily_loss_limit_money = __TRGSL_DailyLossLimitMoney();
    }
 
    // Re-entry after a WIN is now allowed immediately on any later valid trigger.
@@ -672,13 +920,14 @@ inline bool __TRGSL_AllowFreshLocalAfterWin(const int      local_gate_seq,
    return true;
 }
 
-inline bool __TRGSL_CanOpenExecution(const datetime hit_time,
-                                     const int      local_gate_seq,
-                                     const datetime local_gate_time,
-                                     string        &reason)
+inline bool __TRGSL_CanOpenExecution(const TriggerSLTPRecord &rec,
+                                      const int               local_gate_seq,
+                                      const datetime          local_gate_time,
+                                      string                 &reason)
 {
    reason = "";
 
+   datetime hit_time = rec.hit_time;
    __TRGSL_EnsureDailyBucket(hit_time);
 
    if(g_trgsl_exec_active)
@@ -697,6 +946,38 @@ inline bool __TRGSL_CanOpenExecution(const datetime hit_time,
    {
       reason = "DAILY_4L_CAP_REACHED";
       return false;
+   }
+
+   if(rec.risk_pips < TRGSL_MIN_RISK_PIPS)
+   {
+      reason = "SL_RISK_UNDER_1_5_PIPS";
+      return false;
+   }
+
+   if(TriggerSLTP_IsBerlinNoTradeTime(hit_time))
+   {
+      reason = "BERLIN_NO_TRADE_WINDOW_23_30_TO_05_30";
+      return false;
+   }
+
+   double risk_money  = __TRGSL_RiskMoney();
+   double daily_limit = __TRGSL_DailyLossLimitMoney();
+
+   if(daily_limit > 0.0 && risk_money > 0.0)
+   {
+      g_trgsl_exec_daily_loss_limit = daily_limit;
+
+      if(g_trgsl_exec_daily_loss_money >= daily_limit)
+      {
+         reason = "DAILY_3PCT_LOSS_CAP_REACHED";
+         return false;
+      }
+
+      if((g_trgsl_exec_daily_loss_money + risk_money) > (daily_limit + 0.0000001))
+      {
+         reason = "DAILY_3PCT_LOSS_CAP_WOULD_BE_EXCEEDED";
+         return false;
+      }
    }
 
    __TRGSL_AllowFreshLocalAfterWin(local_gate_seq, local_gate_time);
@@ -891,6 +1172,8 @@ inline void TriggerSLTP_ResetGlobals()
    g_trgsl_exec_last_sync_bar_time = 0;
    g_trgsl_exec_day_key            = 0;
    g_trgsl_exec_daily_losses       = 0;
+   g_trgsl_exec_daily_loss_money   = 0.0;
+   g_trgsl_exec_daily_loss_limit   = 0.0;
    g_trgsl_exec_post_win_wait      = false;
    g_trgsl_exec_post_win_gate_seq  = -1;
    g_trgsl_exec_post_win_ref_time  = 0;
@@ -978,7 +1261,7 @@ inline void TriggerSLTP_OnTriggerFired(const string    sym,
    bool   exec_opened  = false;
    int    exec_index   = -1;
 
-   if(__TRGSL_CanOpenExecution(rec.hit_time, local_gate_seq, local_gate_time, exec_reason))
+   if(__TRGSL_CanOpenExecution(rec, local_gate_seq, local_gate_time, exec_reason))
    {
       exec_allowed = true;
       int exec_pos = __TRGSL_AppendExecutionRecord(rec, local_gate_seq, local_gate_time);

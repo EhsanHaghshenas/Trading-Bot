@@ -1,4 +1,3 @@
-
 #ifndef WAVEBOT_TRIGGER_STATEMENT_MQH
 #define WAVEBOT_TRIGGER_STATEMENT_MQH
 
@@ -25,6 +24,9 @@
 #define TRGSTMT_SKIP_TREND_FILTER  3
 #define TRGSTMT_SKIP_LOCAL_GATE    4
 #define TRGSTMT_SKIP_POST_WIN_WAIT 5
+#define TRGSTMT_SKIP_MIN_SL_PIPS   6
+#define TRGSTMT_SKIP_BERLIN_WINDOW 7
+#define TRGSTMT_SKIP_DAILY_PCT_CAP 8
 
 #define TRGSTMT_NS_MAJ             0
 #define TRGSTMT_NS_MIN             1
@@ -184,6 +186,12 @@ inline string __TRGSTM_SkipReasonName(const int skip_reason)
       return (__TRGSTM_WorkerLabel() + "_LOCAL_SIGNAL_WINDOW_NOT_OPEN");
    if(skip_reason == TRGSTMT_SKIP_POST_WIN_WAIT)
       return "POST_WIN_WAIT_DISABLED";
+   if(skip_reason == TRGSTMT_SKIP_MIN_SL_PIPS)
+      return "SL_RISK_UNDER_1_5_PIPS";
+   if(skip_reason == TRGSTMT_SKIP_BERLIN_WINDOW)
+      return "BERLIN_NO_TRADE_23_30_TO_05_30";
+   if(skip_reason == TRGSTMT_SKIP_DAILY_PCT_CAP)
+      return "DAILY_3PCT_LOSS_CAP_REACHED";
    return "-";
 }
 
@@ -451,12 +459,7 @@ inline int __TRGSTM_FindLastBarAtOrBefore(const MqlRates &rates[],
 
 inline int __TRGSTM_DayKey(const datetime t)
 {
-   if(t <= 0)
-      return 0;
-
-   MqlDateTime dt;
-   TimeToStruct(t, dt);
-   return (dt.year * 10000 + dt.mon * 100 + dt.day);
+   return TriggerSLTP_BerlinDayKey(t);
 }
 
 inline string __TRGSTM_DayKeyText(const int day_key)
@@ -473,24 +476,17 @@ inline string __TRGSTM_DayKeyText(const int day_key)
 
 inline datetime __TRGSTM_NextDayStart(const datetime t)
 {
-   if(t <= 0)
-      return 0;
-
-   MqlDateTime dt;
-   TimeToStruct(t, dt);
-   dt.hour = 0;
-   dt.min  = 0;
-   dt.sec  = 0;
-
-   datetime base = StructToTime(dt);
-   return (base + 86400);
+   return TriggerSLTP_NextBerlinDayStartServerTime(t);
 }
 
 inline void __TRGSTM_EnsureDailyLossBucket(const datetime t,
                                            int           &day_key,
                                            int           &daily_losses,
-                                           bool          &cap_active,
-                                           int           &cap_resets)
+                                           double        &daily_loss_money,
+                                           bool          &loss_count_cap_active,
+                                           bool          &loss_pct_cap_active,
+                                           int           &count_cap_resets,
+                                           int           &pct_cap_resets)
 {
    int current_key = __TRGSTM_DayKey(t);
    if(current_key <= 0)
@@ -499,13 +495,18 @@ inline void __TRGSTM_EnsureDailyLossBucket(const datetime t,
    if(day_key == current_key)
       return;
 
-   if(day_key > 0 && cap_active)
-      cap_resets++;
+   if(day_key > 0 && loss_count_cap_active)
+      count_cap_resets++;
+   if(day_key > 0 && loss_pct_cap_active)
+      pct_cap_resets++;
 
-   day_key      = current_key;
-   daily_losses = 0;
-   cap_active   = false;
+   day_key              = current_key;
+   daily_losses         = 0;
+   daily_loss_money     = 0.0;
+   loss_count_cap_active = false;
+   loss_pct_cap_active   = false;
 }
+
 
 inline int __TRGSTM_CompareRecord(const TriggerSLTPRecord &a,
                                   const TriggerSLTPRecord &b)
@@ -2610,6 +2611,9 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    int ignored_valid_triggers  = 0;
    int skipped_active_trade    = 0;
    int skipped_daily_loss_cap  = 0;
+   int skipped_daily_pct_cap   = 0;
+   int skipped_min_sl_pips     = 0;
+   int skipped_berlin_window   = 0;
    int skipped_post_win_wait   = 0;
    int skipped_hypo_wins       = 0;
    int skipped_hypo_losses     = 0;
@@ -2634,11 +2638,16 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    int max_win_streak      = 0;
    int max_loss_streak     = 0;
 
-   int  daily_loss_count         = 0;
-   int  daily_loss_day_key       = 0;
-   bool daily_loss_cap_active    = false;
+   int  daily_loss_count           = 0;
+   int  daily_loss_day_key         = 0;
+   bool daily_loss_cap_active      = false;
+   double daily_loss_money         = 0.0;
+   double daily_loss_limit_money   = initial_capital * (TRGSL_DAILY_MAX_LOSS_PERCENT / 100.0);
+   bool daily_pct_cap_active       = false;
    int  daily_loss_cap_activations = 0;
+   int  daily_pct_cap_activations  = 0;
    int  daily_loss_cap_resets      = 0;
+   int  daily_pct_cap_resets       = 0;
    int  post_win_wait_arms         = 0;
    int  post_win_wait_releases     = 0;
 
@@ -2739,8 +2748,11 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
       __TRGSTM_EnsureDailyLossBucket(trades[i].rec.hit_time,
                                      daily_loss_day_key,
                                      daily_loss_count,
+                                     daily_loss_money,
                                      daily_loss_cap_active,
-                                     daily_loss_cap_resets);
+                                     daily_pct_cap_active,
+                                     daily_loss_cap_resets,
+                                     daily_pct_cap_resets);
 
       if(active_trade_open)
       {
@@ -2781,6 +2793,61 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
                                            skipped_hypo_losses,
                                            skipped_hypo_open);
          continue;
+      }
+
+      if(trades[i].rec.risk_pips < TRGSL_MIN_RISK_PIPS)
+      {
+         __TRGSTM_SetSkip(trades[i],
+                          TRGSTMT_SKIP_MIN_SL_PIPS,
+                          equity,
+                          __TRGSTM_AppendNote(trades[i].note,
+                                              "SKIPPED_SL_RISK_UNDER_1_5_PIPS|RiskPips=" + DoubleToString(trades[i].rec.risk_pips, 2)));
+         ignored_valid_triggers++;
+         skipped_min_sl_pips++;
+         __TRGSTM_BumpHypotheticalCounters(trades[i],
+                                           skipped_hypo_wins,
+                                           skipped_hypo_losses,
+                                           skipped_hypo_open);
+         continue;
+      }
+
+      if(TriggerSLTP_IsBerlinNoTradeTime(trades[i].rec.hit_time))
+      {
+         __TRGSTM_SetSkip(trades[i],
+                          TRGSTMT_SKIP_BERLIN_WINDOW,
+                          equity,
+                          __TRGSTM_AppendNote(trades[i].note,
+                                              "SKIPPED_BERLIN_NO_TRADE_23_30_TO_05_30|BerlinTime=" + TriggerSLTP_BerlinTimeText(trades[i].rec.hit_time)));
+         ignored_valid_triggers++;
+         skipped_berlin_window++;
+         __TRGSTM_BumpHypotheticalCounters(trades[i],
+                                           skipped_hypo_wins,
+                                           skipped_hypo_losses,
+                                           skipped_hypo_open);
+         continue;
+      }
+
+      if(daily_loss_limit_money > 0.0)
+      {
+         if(daily_pct_cap_active || daily_loss_money >= daily_loss_limit_money ||
+            (daily_loss_money + risk_money) > (daily_loss_limit_money + 0.0000001))
+         {
+            trades[i].unlock_on_time = __TRGSTM_NextDayStart(trades[i].rec.hit_time);
+            __TRGSTM_SetSkip(trades[i],
+                             TRGSTMT_SKIP_DAILY_PCT_CAP,
+                             equity,
+                             __TRGSTM_AppendNote(trades[i].note,
+                                                 "SKIPPED_DAILY_3PCT_CAP_UNTIL_" + __TRGSTM_SafeTime(trades[i].unlock_on_time)
+                                                 + "|DailyLoss=" + __TRGSTM_Money(daily_loss_money)
+                                                 + "|Limit=" + __TRGSTM_Money(daily_loss_limit_money)));
+            ignored_valid_triggers++;
+            skipped_daily_pct_cap++;
+            __TRGSTM_BumpHypotheticalCounters(trades[i],
+                                              skipped_hypo_wins,
+                                              skipped_hypo_losses,
+                                              skipped_hypo_open);
+            continue;
+         }
       }
 
       Direction major_dir = DIR_UP;
@@ -2950,12 +3017,24 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
                trigger_bar_ambiguous++;
 
             daily_loss_count++;
+            daily_loss_money += MathAbs(trades[i].pnl_money);
+
             if(daily_loss_count >= TRGSTMT_LOCK_AFTER_LOSSES)
             {
                daily_loss_cap_active = true;
                daily_loss_cap_activations++;
                trades[i].note = __TRGSTM_AppendNote(trades[i].note,
                                                     "DAILY_4L_CAP_ACTIVE_UNTIL_" + __TRGSTM_SafeTime(__TRGSTM_NextDayStart(trades[i].exit_time > 0 ? trades[i].exit_time : trades[i].rec.hit_time)));
+            }
+
+            if(daily_loss_limit_money > 0.0 && daily_loss_money >= daily_loss_limit_money)
+            {
+               daily_pct_cap_active = true;
+               daily_pct_cap_activations++;
+               trades[i].note = __TRGSTM_AppendNote(trades[i].note,
+                                                    "DAILY_3PCT_CAP_ACTIVE_UNTIL_" + __TRGSTM_SafeTime(__TRGSTM_NextDayStart(trades[i].exit_time > 0 ? trades[i].exit_time : trades[i].rec.hit_time))
+                                                    + "|DailyLoss=" + __TRGSTM_Money(daily_loss_money)
+                                                    + "|Limit=" + __TRGSTM_Money(daily_loss_limit_money));
             }
          }
 
@@ -3011,9 +3090,12 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    }
 
    bool daily_loss_cap_active_at_end = daily_loss_cap_active;
+   bool daily_pct_cap_active_at_end  = daily_pct_cap_active;
    bool post_win_wait_at_end         = post_win_wait_active;
    int  daily_loss_count_at_end      = daily_loss_count;
    int  daily_loss_day_key_at_end    = daily_loss_day_key;
+   double daily_loss_money_at_end    = daily_loss_money;
+   double daily_loss_limit_at_end    = daily_loss_limit_money;
 
    if(executed_trades <= 0)
    {
@@ -3163,8 +3245,8 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "Initial Capital        : " + __TRGSTM_Money(initial_capital));
    __TRGSTM_WriteLine(handle, "Fixed Risk Per Trade   : " + __TRGSTM_Pct(risk_percent) + " = " + __TRGSTM_Money(risk_money));
    __TRGSTM_WriteLine(handle, "Trigger Log Source     : TriggerSLTP.mqh fired-trigger events; valid SL/TP records are still used for execution statistics");
-   __TRGSTM_WriteLine(handle, "Execution Model        : Single active trade only | entry at breakout level | touch-based TP/SL | conservative same-bar ambiguity = SL | Trigger.mqh enforces the parent " + __TRGSTM_ParentLabel() + " -> " + __TRGSTM_WorkerLabel() + " window plus the active local " + __TRGSTM_WorkerLabel() + " signal gate | max 4 executed losses per calendar day | post-win wait disabled");
-   __TRGSTM_WriteLine(handle, "Protection Rule        : After 4 executed losses on the same calendar day, no more trades are allowed until the next calendar day starts");
+   __TRGSTM_WriteLine(handle, "Execution Model        : Single active trade only | entry at breakout level | touch-based TP/SL | conservative same-bar ambiguity = SL | Trigger.mqh enforces the parent " + __TRGSTM_ParentLabel() + " -> " + __TRGSTM_WorkerLabel() + " window plus the active local " + __TRGSTM_WorkerLabel() + " signal gate | max 4 executed losses per Berlin day | daily max realized loss 3% | post-win wait disabled");
+   __TRGSTM_WriteLine(handle, "Protection Rule        : No trade below 1.5 SL pips | no trade 23:30-05:30 Berlin | daily max loss 3% | max 4 executed losses per Berlin day");
    if(__FSMS_SW_ShouldRunMinorWorldOnThisChart())
       __TRGSTM_WriteLine(handle, "Trend Context          : " + __TRGSTM_WorkerLabel() + " major/minor windows are reported as context only; execution itself follows Trigger.mqh parent/local gate rules");
    else
@@ -3201,6 +3283,9 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "Ignored Valid Triggers : " + IntegerToString(ignored_valid_triggers) + " | " + __TRGSTM_Pct(ignored_rate));
    __TRGSTM_WriteLine(handle, "Ignored: Active Trade  : " + IntegerToString(skipped_active_trade));
    __TRGSTM_WriteLine(handle, "Ignored: Daily 4L Cap  : " + IntegerToString(skipped_daily_loss_cap));
+   __TRGSTM_WriteLine(handle, "Ignored: Daily 3% Cap  : " + IntegerToString(skipped_daily_pct_cap));
+   __TRGSTM_WriteLine(handle, "Ignored: SL < 1.5 Pips : " + IntegerToString(skipped_min_sl_pips));
+   __TRGSTM_WriteLine(handle, "Ignored: Berlin Window : " + IntegerToString(skipped_berlin_window));
    __TRGSTM_WriteLine(handle, "Engine Gate            : Parent/local gate enforced before TriggerSLTP records are created inside Trigger.mqh");
    __TRGSTM_WriteLine(handle, "Trend Context MAJ/MIN/B: " + IntegerToString(exec_trend_major_only) + " / " + IntegerToString(exec_trend_minor_only) + " / " + IntegerToString(exec_trend_both));
    __TRGSTM_WriteLine(handle, "Ignored: Post-Win Wait : " + IntegerToString(skipped_post_win_wait) + " (disabled)");
@@ -3226,10 +3311,14 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "Max Win Streak         : " + IntegerToString(max_win_streak));
    __TRGSTM_WriteLine(handle, "Max Loss Streak        : " + IntegerToString(max_loss_streak));
    __TRGSTM_WriteLine(handle, "Daily 4L Threshold     : " + IntegerToString(TRGSTMT_LOCK_AFTER_LOSSES));
-   __TRGSTM_WriteLine(handle, "Daily Cap Activations  : " + IntegerToString(daily_loss_cap_activations));
-   __TRGSTM_WriteLine(handle, "Daily Cap Resets       : " + IntegerToString(daily_loss_cap_resets));
-   __TRGSTM_WriteLine(handle, "Daily Cap Active End   : " + (daily_loss_cap_active_at_end ? "YES" : "NO"));
+   __TRGSTM_WriteLine(handle, "Daily 4L Activations   : " + IntegerToString(daily_loss_cap_activations));
+   __TRGSTM_WriteLine(handle, "Daily 3% Activations   : " + IntegerToString(daily_pct_cap_activations));
+   __TRGSTM_WriteLine(handle, "Daily 4L Resets        : " + IntegerToString(daily_loss_cap_resets));
+   __TRGSTM_WriteLine(handle, "Daily 3% Resets        : " + IntegerToString(daily_pct_cap_resets));
+   __TRGSTM_WriteLine(handle, "Daily 4L Active End    : " + (daily_loss_cap_active_at_end ? "YES" : "NO"));
+   __TRGSTM_WriteLine(handle, "Daily 3% Active End    : " + (daily_pct_cap_active_at_end ? "YES" : "NO"));
    __TRGSTM_WriteLine(handle, "Daily Losses End Day   : " + IntegerToString(daily_loss_count_at_end) + " | " + __TRGSTM_DayKeyText(daily_loss_day_key_at_end));
+   __TRGSTM_WriteLine(handle, "Daily Loss Money End   : " + __TRGSTM_Money(daily_loss_money_at_end) + " / " + __TRGSTM_Money(daily_loss_limit_at_end));
    __TRGSTM_WriteLine(handle, "Post-Win Re-entry Rule : DISABLED - next valid Type-1/Type-2 trigger may execute");
    __TRGSTM_WriteLine(handle, "Post-Win Wait Arms     : " + IntegerToString(post_win_wait_arms));
    __TRGSTM_WriteLine(handle, "Post-Win Wait Releases : " + IntegerToString(post_win_wait_releases));
@@ -3295,7 +3384,7 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
 
    if(executed_trades <= 0)
    {
-      __TRGSTM_WriteLine(handle, "No executable trades were taken under the single-trade, daily 4-loss cap, and engine-level parent/local gate enforcement rules.");
+      __TRGSTM_WriteLine(handle, "No executable trades were taken under the single-trade, 1.5-pip minimum SL, Berlin no-trade window, daily 3% cap, daily 4-loss cap, and engine-level parent/local gate enforcement rules.");
    }
    else
    {
@@ -3379,15 +3468,16 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "1) This statement is created as soon as the M1 chart starts and is refreshed immediately after every fired trigger event.");
    __TRGSTM_WriteLine(handle, "2) Fired-trigger events are logged even when SL/TP validation rejects them or execution rules block conversion to a trade.");
    __TRGSTM_WriteLine(handle, "3) Only one trade can be active at a time; all later valid triggers are ignored until that trade reaches WIN, LOSS, or remains OPEN at scan end.");
-   __TRGSTM_WriteLine(handle, "4) The executed-loss protection counter is calendar-day based; it resets automatically when a new trading day starts.");
-   __TRGSTM_WriteLine(handle, "5) After 4 executed losses inside the same calendar day, new entries are blocked until the next calendar day begins.");
-   __TRGSTM_WriteLine(handle, "6) Trigger.mqh already enforces the active parent " + __TRGSTM_ParentLabel() + " -> " + __TRGSTM_WorkerLabel() + " bridge window together with the active local " + __TRGSTM_WorkerLabel() + " signal-on window before TriggerSLTP records are created.");
-   __TRGSTM_WriteLine(handle, "7) The reported " + __TRGSTM_WorkerLabel() + " major/minor trend windows are context statistics only; they no longer block execution by themselves.");
-   __TRGSTM_WriteLine(handle, "8) Post-win waiting is disabled: after a WIN, the next valid Type-1 or Type-2 trigger can become a trade if the shared execution limits allow it.");
-   __TRGSTM_WriteLine(handle, "9) Trigger Type=1 and Type=2 are detected by separate engines but share one execution/risk limit model.");
-   __TRGSTM_WriteLine(handle, "10) Skipped valid triggers are listed separately together with their hypothetical outcome so you can inspect missed opportunities.");
-   __TRGSTM_WriteLine(handle, "11) Risk per executed trade is fixed on initial capital, not compounded trade-by-trade.");
-   __TRGSTM_WriteLine(handle, "12) Ambiguous same-bar outcomes are counted conservatively as SL to avoid optimistic bias.");
+   __TRGSTM_WriteLine(handle, "4) The executed-loss protection counter is Berlin-calendar-day based; it resets automatically when a new Berlin trading day starts.");
+   __TRGSTM_WriteLine(handle, "5) After 4 executed losses or 3% realized daily loss inside the same Berlin day, new entries are blocked until the next Berlin day begins.");
+   __TRGSTM_WriteLine(handle, "6) Execution is blocked when SL risk is below 1.5 pips or when trigger hit time is inside 23:30-05:30 Berlin time.");
+   __TRGSTM_WriteLine(handle, "7) Trigger.mqh already enforces the active parent " + __TRGSTM_ParentLabel() + " -> " + __TRGSTM_WorkerLabel() + " bridge window together with the active local " + __TRGSTM_WorkerLabel() + " signal-on window before TriggerSLTP records are created.");
+   __TRGSTM_WriteLine(handle, "8) The reported " + __TRGSTM_WorkerLabel() + " major/minor trend windows are context statistics only; they no longer block execution by themselves.");
+   __TRGSTM_WriteLine(handle, "9) Post-win waiting is disabled: after a WIN, the next valid Type-1 or Type-2 trigger can become a trade if the shared execution limits allow it.");
+   __TRGSTM_WriteLine(handle, "10) Trigger Type=1 and Type=2 are detected by separate engines but share one execution/risk limit model.");
+   __TRGSTM_WriteLine(handle, "11) Skipped valid triggers are listed separately together with their hypothetical outcome so you can inspect missed opportunities.");
+   __TRGSTM_WriteLine(handle, "12) Risk per executed trade is fixed on initial capital, not compounded trade-by-trade.");
+   __TRGSTM_WriteLine(handle, "13) Ambiguous same-bar outcomes are counted conservatively as SL to avoid optimistic bias.");
 
    FileFlush(handle);
    FileClose(handle);
@@ -3399,14 +3489,18 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
             " | raw_valid=", raw_valid_triggers,
             " | executed=", executed_trades,
             " | ignored=", ignored_valid_triggers,
-            " | daily_cap_skips=", skipped_daily_loss_cap,
+            " | daily_4l_skips=", skipped_daily_loss_cap,
+            " | daily_3pct_skips=", skipped_daily_pct_cap,
+            " | min_sl_skips=", skipped_min_sl_pips,
+            " | berlin_skips=", skipped_berlin_window,
             " | postwin_skips=", skipped_post_win_wait,
             " | major_windows=", major_window_count,
             " | minor_windows=", minor_window_count,
             " | closed=", closed_trades,
             " | open=", open_trades,
             " | net=", __TRGSTM_Money(net_profit),
-            " | daily_caps=", daily_loss_cap_activations);
+            " | daily_4l_caps=", daily_loss_cap_activations,
+            " | daily_3pct_caps=", daily_pct_cap_activations);
    }
 
    return true;
