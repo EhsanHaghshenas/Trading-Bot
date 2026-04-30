@@ -1,4 +1,3 @@
-
 #property strict
 #property description "WaveBot – W2/W3 + Hunter + ExtLQ + SW (Bootstrap Direction Race)"
 
@@ -56,9 +55,11 @@ input string            InpTriggerStatementFileTag         = "WaveBot_TriggerSta
 #include <WaveBot/ShadowBreaker.mqh>
 #include <WaveBot/FSMS_SW.mqh>   // ???? FSMS_SW_Session_* ? FSMS_SW_MinorSession
 #include <WaveBot/W3ChainGuard.mqh>   // ???? W3CG_ResetGlobals()
+#include <WaveBot/WaveBotConcepts.mqh>   // NEW: independent MFVG/Flip/Majic Flip scanner
 
 // ===== Lifecycle =====
 bool g_once=false;
+bool g_concepts_early_once=false;
 
 // --- Unique scan namespace for all markers in a single run ---
 int g_scan_id = 0;
@@ -331,6 +332,8 @@ inline void __WB_ResetMinorWorldGlobals()
    FSMS_ResetGlobals();
    FSMS_SW_ResetGlobals();
 
+   // Independent concept scanner is MAJ-only and must not be reset by MIN sessions.
+
    // SR stack
    SR_ResetGlobals();
    SRMIT_ResetGlobals();
@@ -419,6 +422,8 @@ void ResolveWindow(datetime &start, datetime &stop)
 int OnInit()
 {
    g_role = __WB_DetectRole();
+   g_once = false;
+   g_concepts_early_once = false;
 
    // Ensure WorldManager captures clean baselines before any scan starts
    Markers_SetNamespace("MAJ");
@@ -484,6 +489,9 @@ void SB_RunOneShot()
 
    const ENUM_TIMEFRAMES tf = __WB_EffectiveTF();
 
+   // Independent visual concepts must not depend on the active UP/DOWN wave scan.
+   WaveBotConcepts_RunAllDirections(InpSymbol, tf, start, stop);
+
    // ????? ???? ?? ?? ?? ???? Shadow Breaker ???? API ?? ????? ??????
    int upPairs   = API_RunScanSequential_W2W3_Hunter(InpSymbol, tf, start, stop);
    int downPairs = API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, tf, start, stop);
@@ -532,7 +540,25 @@ void OnTimer()
       return;
    }
 
-   // Readiness / lifecycle across the 3 charts
+   datetime start = 0;
+   datetime stop  = 0;
+   ResolveWindow(start, stop);
+   __WB_RememberTriggerStatementWindow(start, stop);
+
+   ENUM_TIMEFRAMES tf = __WB_EffectiveTF();
+
+   // Independent visual concepts must also run at least once before the
+   // parent/child readiness gates, so H4, M15 and M1 can display MFVG, Flip and
+   // Majic Flip even when the normal wave scan is not allowed to continue yet.
+   if(!g_concepts_early_once)
+   {
+      WaveBotConcepts_RunAllDirections(InpSymbol, tf, start, stop);
+      g_concepts_early_once = true;
+   }
+
+   // Readiness / lifecycle across the 3 charts. These gates only control the
+   // normal W2/W3 wave scan; the visual concept scan above is intentionally
+   // independent from them.
    if(__WB_IsRoleH4())
    {
       WB15_MasterBegin(InpSymbol);
@@ -550,12 +576,10 @@ void OnTimer()
          return;
    }
 
-   datetime start = 0;
-   datetime stop  = 0;
-   ResolveWindow(start, stop);
-   __WB_RememberTriggerStatementWindow(start, stop);
-
-   ENUM_TIMEFRAMES tf = __WB_EffectiveTF();
+   // Final concept scan for the actual normal-scan window. If the pre-readiness
+   // scan above already used the same window, WaveBotConcepts_RunAllDirections
+   // returns immediately through its own request cache.
+   WaveBotConcepts_RunAllDirections(InpSymbol, tf, start, stop);
 
    // 1) بوت‌استرپ: تعیین جهت اولیه با اولین جفت کامل‌شده
    BootOutcome boot = Bootstrap_RaceDetect(InpSymbol, tf, start, stop);

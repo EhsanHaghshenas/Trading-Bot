@@ -7,7 +7,7 @@
 
 // ============================================================================
 // Majical FVG
-// Scope: visual detection only on H4 and M15 major worlds.
+// Scope: visual detection on H4, M15 and M1 major worlds.
 // UP  : bearish mother candle -> inside cluster -> bullish body break -> first
 //       penetration into the break-body zone -> reference-high break.
 // DOWN: bullish mother candle -> inside cluster -> bearish body break -> first
@@ -32,6 +32,8 @@ struct MajicalFVGTrack
    double   zone_far_level;   // UP: body high of breaker | DOWN: body low of breaker
    double   ref_level;        // UP: highest high before first entry | DOWN: lowest low before first entry
    double   deepest_level;    // UP: lowest valid penetration | DOWN: highest valid penetration
+   double   mother_low_level; // stored at final MFVG confirmation; UP uses Low(red mother)
+   double   mother_high_level;// stored at final MFVG confirmation; DOWN uses High(green mother)
 };
 
 struct MajicalFVGZone
@@ -51,15 +53,95 @@ struct MajicalFVGZone
    double   zone_far_level;
    double   ref_level;
    double   deepest_level;
+   double   mother_low_level;
+   double   mother_high_level;
 };
+
+// Confirmed/drawn MFVG records are kept after the scan so other modules can
+// read the mother extreme that belongs to the confirmed MFVG.
+static MajicalFVGZone g_mfvg_up_confirmed[];
+static MajicalFVGZone g_mfvg_dn_confirmed[];
+static int            g_mfvg_up_confirmed_count = 0;
+static int            g_mfvg_dn_confirmed_count = 0;
+
+inline void __MFVG_ResetConfirmedUP()
+{
+   ArrayResize(g_mfvg_up_confirmed, 0);
+   g_mfvg_up_confirmed_count = 0;
+}
+
+inline void __MFVG_ResetConfirmedDOWN()
+{
+   ArrayResize(g_mfvg_dn_confirmed, 0);
+   g_mfvg_dn_confirmed_count = 0;
+}
+
+inline void __MFVG_SaveConfirmedUP(const MajicalFVGZone &z)
+{
+   int pos = g_mfvg_up_confirmed_count;
+   ArrayResize(g_mfvg_up_confirmed, pos + 1);
+   g_mfvg_up_confirmed[pos] = z;
+   g_mfvg_up_confirmed_count = pos + 1;
+}
+
+inline void __MFVG_SaveConfirmedDOWN(const MajicalFVGZone &z)
+{
+   int pos = g_mfvg_dn_confirmed_count;
+   ArrayResize(g_mfvg_dn_confirmed, pos + 1);
+   g_mfvg_dn_confirmed[pos] = z;
+   g_mfvg_dn_confirmed_count = pos + 1;
+}
+
+inline int MajicalFVG_UP_ConfirmedCount()
+{
+   return g_mfvg_up_confirmed_count;
+}
+
+inline int MajicalFVG_DOWN_ConfirmedCount()
+{
+   return g_mfvg_dn_confirmed_count;
+}
+
+inline bool MajicalFVG_UP_GetConfirmed(const int index, MajicalFVGZone &out)
+{
+   if(index < 0 || index >= g_mfvg_up_confirmed_count) return false;
+   out = g_mfvg_up_confirmed[index];
+   return true;
+}
+
+inline bool MajicalFVG_DOWN_GetConfirmed(const int index, MajicalFVGZone &out)
+{
+   if(index < 0 || index >= g_mfvg_dn_confirmed_count) return false;
+   out = g_mfvg_dn_confirmed[index];
+   return true;
+}
+
+inline double MajicalFVG_UP_MotherLowAt(const int index)
+{
+   if(index < 0 || index >= g_mfvg_up_confirmed_count) return 0.0;
+   return g_mfvg_up_confirmed[index].mother_low_level;
+}
+
+inline double MajicalFVG_DOWN_MotherHighAt(const int index)
+{
+   if(index < 0 || index >= g_mfvg_dn_confirmed_count) return 0.0;
+   return g_mfvg_dn_confirmed[index].mother_high_level;
+}
+
+inline void MajicalFVG_ResetGlobals()
+{
+   __MFVG_ResetConfirmedUP();
+   __MFVG_ResetConfirmedDOWN();
+}
 
 inline bool __MFVG_ShouldRunOnTF(const ENUM_TIMEFRAMES tf)
 {
-   if(tf != PERIOD_H4 && tf != PERIOD_M15)
+   if(tf != PERIOD_H4 && tf != PERIOD_M15 && tf != PERIOD_M1)
       return false;
 
-   // The user requested H4/M15 chart detection only.  Minor-world scans on H4
-   // are intentionally skipped so local minor sessions do not create MFVGs.
+   // MFVG is a major visual concept on every supported execution chart:
+   // H4, M15 and M1.  Minor-world scans are intentionally skipped so local
+   // minor sessions do not create duplicate MFVG rectangles.
    if(Markers_GetNamespace() == "MIN")
       return false;
 
@@ -194,6 +276,8 @@ inline bool __MFVG_BuildCandidateUP(const MqlRates &rates[], const int n,
    out.zone_far_level = zone_far;
    out.ref_level      = __MFVG_HighestHigh(rates, mother_idx, j);
    out.deepest_level  = 0.0;
+   out.mother_low_level  = rates[mother_idx].low;
+   out.mother_high_level = rates[mother_idx].high;
 
    return true;
 }
@@ -240,6 +324,8 @@ inline bool __MFVG_BuildCandidateDOWN(const MqlRates &rates[], const int n,
    out.zone_far_level = zone_far;
    out.ref_level      = __MFVG_LowestLow(rates, mother_idx, j);
    out.deepest_level  = 0.0;
+   out.mother_low_level  = rates[mother_idx].low;
+   out.mother_high_level = rates[mother_idx].high;
 
    return true;
 }
@@ -324,6 +410,8 @@ inline void __MFVG_AddZone(MajicalFVGZone &zones[], int &count, const MajicalFVG
    zones[pos].zone_far_level = z.zone_far_level;
    zones[pos].ref_level      = z.ref_level;
    zones[pos].deepest_level  = z.deepest_level;
+   zones[pos].mother_low_level  = z.mother_low_level;
+   zones[pos].mother_high_level = z.mother_high_level;
 
    count++;
 }
@@ -416,7 +504,8 @@ inline void __MFVG_DrawStoredUP(const MajicalFVGZone &z,
             " | entry=", T(z.entry_time),
             " | base=", DoubleToString(z.base_level, _Digits),
             " | deepest=", DoubleToString(top, _Digits),
-            " | refH=", DoubleToString(z.ref_level, _Digits));
+            " | refH=", DoubleToString(z.ref_level, _Digits),
+            " | motherLow=", DoubleToString(z.mother_low_level, _Digits));
    }
 }
 
@@ -437,7 +526,8 @@ inline void __MFVG_DrawStoredDOWN(const MajicalFVGZone &z,
             " | entry=", T(z.entry_time),
             " | base=", DoubleToString(z.base_level, _Digits),
             " | deepest=", DoubleToString(bottom, _Digits),
-            " | refL=", DoubleToString(z.ref_level, _Digits));
+            " | refL=", DoubleToString(z.ref_level, _Digits),
+            " | motherHigh=", DoubleToString(z.mother_high_level, _Digits));
    }
 }
 
@@ -446,12 +536,14 @@ inline void __MFVG_DrawStoredZonesUP(MajicalFVGZone &zones[],
                                      int &draw_count)
 {
    __MFVG_FilterNestedMotherPriority(zones, zone_count);
+   __MFVG_ResetConfirmedUP();
 
    for(int i = 0; i < zone_count; ++i)
    {
       if(!zones[i].used) continue;
       if(!zones[i].keep) continue;
 
+      __MFVG_SaveConfirmedUP(zones[i]);
       __MFVG_DrawStoredUP(zones[i], draw_count);
    }
 }
@@ -461,12 +553,14 @@ inline void __MFVG_DrawStoredZonesDOWN(MajicalFVGZone &zones[],
                                        int &draw_count)
 {
    __MFVG_FilterNestedMotherPriority(zones, zone_count);
+   __MFVG_ResetConfirmedDOWN();
 
    for(int i = 0; i < zone_count; ++i)
    {
       if(!zones[i].used) continue;
       if(!zones[i].keep) continue;
 
+      __MFVG_SaveConfirmedDOWN(zones[i]);
       __MFVG_DrawStoredDOWN(zones[i], draw_count);
    }
 }
@@ -607,6 +701,7 @@ inline void MajicalFVG_RunScan_UP(const string sym,
                                   const datetime to_time)
 {
    if(!__MFVG_ShouldRunOnTF(tf)) return;
+   __MFVG_ResetConfirmedUP();
    if(n < 4) return;
 
    __MFVG_ClearDirectionVisuals("MFVG_U_");
@@ -654,6 +749,7 @@ inline void MajicalFVG_RunScan_DOWN(const string sym,
                                     const datetime to_time)
 {
    if(!__MFVG_ShouldRunOnTF(tf)) return;
+   __MFVG_ResetConfirmedDOWN();
    if(n < 4) return;
 
    __MFVG_ClearDirectionVisuals("MFVG_D_");

@@ -21,7 +21,9 @@
 #include <WaveBot/SR_Gate.mqh>   // NEW: gating/cleanup for Strong Range
 #include <WaveBot/SR_Mitigator.mqh>   // NEW
 #include <WaveBot/SR_GoozBaghali.mqh>  // NEW: ????? ???? gooz baghali ?? unmitigated SR
-#include <WaveBot/MajicalFVG.mqh>   // NEW: Majical FVG visual zones (H4/M15 only)
+#include <WaveBot/MajicalFVG.mqh>   // NEW: Majical FVG visual zones (H4/M15/M1)
+#include <WaveBot/Flip.mqh>         // NEW: Flip visual zones (UP/DOWN)
+#include <WaveBot/MajicFlip.mqh>    // NEW: Majic Flip visual zones (UP/DOWN)
 #include <WaveBot/ExtLQ_Down.mqh>   // ???? ???? ???? ??? ????? ????? init-extLQ
 #include <WaveBot/WorldManager.mqh>
 
@@ -202,8 +204,6 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
 
    double bodyLowEff[], bodyHighEff[]; BuildEffectiveBodies(rates, n, bodyLowEff, bodyHighEff);
    bool insideHL[];                   BuildInsideClusterFlagsHL(rates, n, insideHL);
-
-   MajicalFVG_RunScan_UP(sym, tf, rates, n, effective_start, to_time);
 
    int first_eff=0; while(first_eff<n && rates[first_eff].time<effective_start) first_eff++;
    int idx = MathMax(0, first_eff-2);
