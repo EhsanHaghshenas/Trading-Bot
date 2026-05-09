@@ -7,7 +7,7 @@
 // M15 publishes START/STOP signals; M1 draws ON/OFF markers as an overlay.
 // ============================================================================
 
-// NOTE: This module is intentionally standalone (no extra includes).
+// NOTE: This module is intentionally standalone and implements the M15 three-stage signal gate.
 
 // ---- Signal namespace (world) ----
 enum WB15_NS
@@ -51,6 +51,8 @@ struct WB15ActiveState
 static int             g_wb15_processed_seq = 0;
 static double          g_wb15_run_seen      = 0.0;
 static WB15ActiveState g_wb15_state;
+
+
 
 // ============================================================================
 // Helpers (GV naming / packing)
@@ -151,6 +153,65 @@ inline string __WB15_StartTypeText(const int kind, const int ns, const Direction
 }
 
 // ============================================================================
+// MASTER (M15): strict three-stage gate before publishing M1 START
+// Stage-1: primary M15 seed (HWX / HWBB / FSMS / GoozBaghali)
+// Stage-2: M15 Flip or MajicFlip forms before the original OFF
+// Stage-3: price retouches the registered Flip/MajicFlip zone
+// Only Stage-3 publishes the actual START event to M1.
+// ============================================================================
+
+struct WB15StageState
+{
+   bool      active;          // Stage-1 is active
+   bool      zone_active;     // Stage-2 is active
+   bool      on_sent;         // Stage-3 already published to M1
+
+   int       start_kind;
+   int       start_ns;
+   Direction start_dir;
+   datetime  start_time;      // real M1-mapped Stage-1 event time
+   datetime  start_bar_time;  // M15 candle open time that produced Stage-1
+
+   int       zone_source;     // 1=Flip, 2=MajicFlip
+   int       zone_kind;       // Flip kind or 0 for MajicFlip
+   datetime  zone_anchor_time;
+   datetime  zone_flip_time;
+   double    zone_top;
+   double    zone_bottom;
+   double    invalid_level;   // UP: below Flip/MajicFlip low | DOWN: above Flip/MajicFlip high
+};
+
+static WB15StageState g_wb15_stage_maj;
+static WB15StageState g_wb15_stage_min;
+
+inline void __WB15_StageReset(WB15StageState &st)
+{
+   st.active           = false;
+   st.zone_active      = false;
+   st.on_sent          = false;
+   st.start_kind       = 0;
+   st.start_ns         = WB15_NS_NONE;
+   st.start_dir        = DIR_UP;
+   st.start_time       = 0;
+   st.start_bar_time   = 0;
+   st.zone_source      = 0;
+   st.zone_kind        = 0;
+   st.zone_anchor_time = 0;
+   st.zone_flip_time   = 0;
+   st.zone_top         = 0.0;
+   st.zone_bottom      = 0.0;
+   st.invalid_level    = 0.0;
+}
+
+inline void __WB15_StageResetAll()
+{
+   __WB15_StageReset(g_wb15_stage_maj);
+   __WB15_StageReset(g_wb15_stage_min);
+}
+
+
+
+// ============================================================================
 // MASTER: lifecycle + push events
 // ============================================================================
 
@@ -173,6 +234,8 @@ inline void WB15_MasterBegin(const string sym)
    const double run_id = (double)TimeCurrent();
    GlobalVariableSet(__WB15_Key(sym, "RUN"), run_id);
    GlobalVariableSet(__WB15_Key(sym, "SEQ"), 0.0);
+
+   __WB15_StageResetAll();
 }
 
 inline void WB15_MasterPushEvent(const string sym,
@@ -451,6 +514,542 @@ inline bool __WB15_FindFirstRangeTouchIntrabarTime(const string sym,
    return false;
 }
 
+inline string __WB15_StageSourceLabel(const int source, const int kind)
+{
+   if(source == 1)
+      return "Flip T" + IntegerToString(kind);
+   if(source == 2)
+      return "MajicFlip";
+   return "NA";
+}
+
+inline datetime __WB15_M15CloseTime(const datetime m15_open_time)
+{
+   if(m15_open_time <= 0) return 0;
+   int sec = PeriodSeconds(PERIOD_M15);
+   if(sec <= 0) sec = 900;
+   return (m15_open_time + (datetime)sec);
+}
+
+inline bool __WB15_IsClosedM15Bar(const MqlRates &bar)
+{
+   const datetime close_time = __WB15_M15CloseTime(bar.time);
+   if(close_time <= 0) return false;
+   return (TimeCurrent() >= close_time);
+}
+
+inline bool __WB15_StageIsBull(const MqlRates &r)
+{
+   return (r.close > r.open);
+}
+
+inline bool __WB15_StageIsBear(const MqlRates &r)
+{
+   return (r.close < r.open);
+}
+
+inline bool __WB15_StageInsideMotherHL(const MqlRates &mother, const MqlRates &r)
+{
+   return (r.high <= mother.high && r.low >= mother.low);
+}
+
+inline double __WB15_StageEps()
+{
+   double eps = 2.0 * _Point;
+   if(eps <= 0.0) eps = 0.00000001;
+   return eps;
+}
+
+inline void __WB15_StageNormalizeZone(WB15StageState &st)
+{
+   if(st.zone_bottom > st.zone_top)
+   {
+      double tmp = st.zone_bottom;
+      st.zone_bottom = st.zone_top;
+      st.zone_top = tmp;
+   }
+}
+
+inline void __WB15_StageClearZone(WB15StageState &st)
+{
+   st.zone_active      = false;
+   st.on_sent          = false;
+   st.zone_source      = 0;
+   st.zone_kind        = 0;
+   st.zone_anchor_time = 0;
+   st.zone_flip_time   = 0;
+   st.zone_top         = 0.0;
+   st.zone_bottom      = 0.0;
+   st.invalid_level    = 0.0;
+}
+
+inline void __WB15_StageStartState(WB15StageState &st,
+                                   const int kind,
+                                   const int ns,
+                                   const Direction dir,
+                                   const datetime event_time,
+                                   const datetime stage1_bar_time)
+{
+   st.active           = true;
+   st.zone_active      = false;
+   st.on_sent          = false;
+   st.start_kind       = kind;
+   st.start_ns         = ns;
+   st.start_dir        = dir;
+   st.start_time       = event_time;
+   st.start_bar_time   = stage1_bar_time;
+   st.zone_source      = 0;
+   st.zone_kind        = 0;
+   st.zone_anchor_time = 0;
+   st.zone_flip_time   = 0;
+   st.zone_top         = 0.0;
+   st.zone_bottom      = 0.0;
+   st.invalid_level    = 0.0;
+
+   if(InpDebugPrints)
+      Print("[WB15-STAGE] Stage-1 armed | kind=", __WB15_StartKindLabel(kind),
+            " | ns=", __WB15_NSLabel(ns),
+            " | dir=", (dir==DIR_UP ? "UP" : "DOWN"),
+            " | t=", TimeToString(event_time, TIME_DATE|TIME_SECONDS),
+            " | bar=", TimeToString(stage1_bar_time, TIME_DATE|TIME_SECONDS));
+}
+
+inline void __WB15_StageStart(const string sym,
+                              const int kind,
+                              const int ns,
+                              const Direction dir,
+                              const datetime event_time,
+                              const datetime stage1_bar_time)
+{
+   if(!__WB15_IsMaster()) return;
+   if(event_time <= 0) return;
+   if(stage1_bar_time <= 0) return;
+   if(ns == WB15_NS_MAJ)
+      __WB15_StageStartState(g_wb15_stage_maj, kind, ns, dir, event_time, stage1_bar_time);
+   else if(ns == WB15_NS_MIN)
+      __WB15_StageStartState(g_wb15_stage_min, kind, ns, dir, event_time, stage1_bar_time);
+}
+
+inline void __WB15_StageStopState(WB15StageState &st,
+                                  const Direction stop_dir,
+                                  const datetime stop_time)
+{
+   if(!st.active) return;
+   if(stop_dir != __WB15_Opposite(st.start_dir)) return;
+
+   if(InpDebugPrints)
+      Print("[WB15-STAGE] Reset by original OFF | active_kind=", __WB15_StartKindLabel(st.start_kind),
+            " | dir=", (st.start_dir==DIR_UP ? "UP" : "DOWN"),
+            " | off=", TimeToString(stop_time, TIME_DATE|TIME_SECONDS));
+
+   __WB15_StageReset(st);
+}
+
+inline void __WB15_StageStop(const Direction stop_dir, const datetime stop_time)
+{
+   __WB15_StageStopState(g_wb15_stage_maj, stop_dir, stop_time);
+   __WB15_StageStopState(g_wb15_stage_min, stop_dir, stop_time);
+}
+
+inline bool __WB15_StageBreakerAfterStart(const WB15StageState &st,
+                                          const datetime breaker_open_time)
+{
+   if(!st.active) return false;
+   if(breaker_open_time <= 0) return false;
+
+   const datetime breaker_close_time = __WB15_M15CloseTime(breaker_open_time);
+   if(breaker_close_time <= 0) return false;
+
+   // Stage-2 must happen after the M15 candle that produced Stage-1.
+   // This prevents the primary seed candle itself from also becoming the
+   // Flip/MajicFlip confirmation candle.
+   if(st.start_bar_time > 0 && breaker_open_time <= st.start_bar_time)
+      return false;
+
+   // Close-based seeds such as FSMS are activated at the next M15 open; keep
+   // the event-time guard as an additional safety rule.
+   return (breaker_close_time > st.start_time);
+}
+
+inline bool __WB15_StageBuildDirectFlipUP(const MqlRates &rates[],
+                                          const int n,
+                                          const int idx,
+                                          const WB15StageState &st,
+                                          WB15StageState &out)
+{
+   if(idx <= 0 || idx >= n) return false;
+   if(!__WB15_StageBreakerAfterStart(st, rates[idx].time)) return false;
+   if(!__WB15_StageIsBull(rates[idx])) return false;
+   if(rates[idx].low   >= rates[idx-1].low)  return false;
+   if(rates[idx].close <= rates[idx-1].high) return false;
+
+   out = st;
+   out.zone_active      = true;
+   out.on_sent          = false;
+   out.zone_source      = 1;
+   out.zone_kind        = 1;
+   out.zone_anchor_time = rates[idx-1].time;
+   out.zone_flip_time   = rates[idx].time;
+   out.zone_top         = rates[idx-1].high;
+   out.zone_bottom      = rates[idx].low;
+   out.invalid_level    = rates[idx].low;
+   __WB15_StageNormalizeZone(out);
+   return true;
+}
+
+inline bool __WB15_StageBuildDirectFlipDOWN(const MqlRates &rates[],
+                                            const int n,
+                                            const int idx,
+                                            const WB15StageState &st,
+                                            WB15StageState &out)
+{
+   if(idx <= 0 || idx >= n) return false;
+   if(!__WB15_StageBreakerAfterStart(st, rates[idx].time)) return false;
+   if(!__WB15_StageIsBear(rates[idx])) return false;
+   if(rates[idx].high  <= rates[idx-1].high) return false;
+   if(rates[idx].close >= rates[idx-1].low)  return false;
+
+   out = st;
+   out.zone_active      = true;
+   out.on_sent          = false;
+   out.zone_source      = 1;
+   out.zone_kind        = 1;
+   out.zone_anchor_time = rates[idx-1].time;
+   out.zone_flip_time   = rates[idx].time;
+   out.zone_top         = rates[idx].high;
+   out.zone_bottom      = rates[idx-1].low;
+   out.invalid_level    = rates[idx].high;
+   __WB15_StageNormalizeZone(out);
+   return true;
+}
+
+inline bool __WB15_StageBuildMotherFlipUP(const MqlRates &rates[],
+                                          const int n,
+                                          const int idx,
+                                          const WB15StageState &st,
+                                          const bool majic,
+                                          WB15StageState &out)
+{
+   if(idx < 2 || idx >= n) return false;
+   if(!__WB15_StageBreakerAfterStart(st, rates[idx].time)) return false;
+   if(!__WB15_StageIsBull(rates[idx])) return false;
+
+   for(int m = idx - 2; m >= 0; --m)
+   {
+      if(!__WB15_StageIsBear(rates[m]))
+         continue;
+
+      int inside_count = 0;
+      bool all_inside = true;
+      for(int k = m + 1; k < idx; ++k)
+      {
+         if(!__WB15_StageInsideMotherHL(rates[m], rates[k]))
+         {
+            all_inside = false;
+            break;
+         }
+         inside_count++;
+      }
+
+      if(!all_inside || inside_count <= 0)
+         continue;
+
+      if(rates[idx].close <= rates[m].high)
+         continue;
+      if(majic && rates[idx].low >= rates[m].low)
+         continue;
+
+      out = st;
+      out.zone_active      = true;
+      out.on_sent          = false;
+      out.zone_source      = (majic ? 2 : 1);
+      out.zone_kind        = (majic ? 0 : 2);
+      out.zone_anchor_time = rates[m].time;
+      out.zone_flip_time   = rates[idx].time;
+      out.zone_top         = rates[m].high;
+      out.zone_bottom      = rates[idx].low;
+      out.invalid_level    = rates[idx].low;
+      __WB15_StageNormalizeZone(out);
+      return true;
+   }
+
+   return false;
+}
+
+inline bool __WB15_StageBuildMotherFlipDOWN(const MqlRates &rates[],
+                                            const int n,
+                                            const int idx,
+                                            const WB15StageState &st,
+                                            const bool majic,
+                                            WB15StageState &out)
+{
+   if(idx < 2 || idx >= n) return false;
+   if(!__WB15_StageBreakerAfterStart(st, rates[idx].time)) return false;
+   if(!__WB15_StageIsBear(rates[idx])) return false;
+
+   for(int m = idx - 2; m >= 0; --m)
+   {
+      if(!__WB15_StageIsBull(rates[m]))
+         continue;
+
+      int inside_count = 0;
+      bool all_inside = true;
+      for(int k = m + 1; k < idx; ++k)
+      {
+         if(!__WB15_StageInsideMotherHL(rates[m], rates[k]))
+         {
+            all_inside = false;
+            break;
+         }
+         inside_count++;
+      }
+
+      if(!all_inside || inside_count <= 0)
+         continue;
+
+      if(rates[idx].close >= rates[m].low)
+         continue;
+      if(majic && rates[idx].high <= rates[m].high)
+         continue;
+
+      out = st;
+      out.zone_active      = true;
+      out.on_sent          = false;
+      out.zone_source      = (majic ? 2 : 1);
+      out.zone_kind        = (majic ? 0 : 2);
+      out.zone_anchor_time = rates[m].time;
+      out.zone_flip_time   = rates[idx].time;
+      out.zone_top         = rates[idx].high;
+      out.zone_bottom      = rates[m].low;
+      out.invalid_level    = rates[idx].high;
+      __WB15_StageNormalizeZone(out);
+      return true;
+   }
+
+   return false;
+}
+
+inline bool __WB15_StageBuildZoneOnClosedBar(const MqlRates &rates[],
+                                             const int n,
+                                             const int idx,
+                                             const WB15StageState &st,
+                                             WB15StageState &out)
+{
+   if(!st.active) return false;
+   if(st.zone_active) return false;
+   if(st.on_sent) return false;
+   if(idx < 0 || idx >= n) return false;
+   if(!__WB15_IsClosedM15Bar(rates[idx])) return false;
+
+   // Prefer MajicFlip when both patterns complete on the same M15 candle,
+   // then fall back to normal Flip. The Stage-3 zone always follows the new
+   // user rule: breaker-candle extreme to the body-broken candle level.
+   if(st.start_dir == DIR_UP)
+   {
+      if(__WB15_StageBuildMotherFlipUP(rates, n, idx, st, true, out))  return true;
+      if(__WB15_StageBuildDirectFlipUP(rates, n, idx, st, out))        return true;
+      if(__WB15_StageBuildMotherFlipUP(rates, n, idx, st, false, out)) return true;
+   }
+   else
+   {
+      if(__WB15_StageBuildMotherFlipDOWN(rates, n, idx, st, true, out))  return true;
+      if(__WB15_StageBuildDirectFlipDOWN(rates, n, idx, st, out))        return true;
+      if(__WB15_StageBuildMotherFlipDOWN(rates, n, idx, st, false, out)) return true;
+   }
+
+   return false;
+}
+
+inline bool __WB15_StageM1TouchInvalidTimes(const string sym,
+                                            const Direction dir,
+                                            const datetime m15_open_time,
+                                            const double zone_top,
+                                            const double zone_bottom,
+                                            const double invalid_level,
+                                            datetime &touch_time,
+                                            datetime &invalid_time)
+{
+   touch_time   = 0;
+   invalid_time = 0;
+
+   datetime from_time = 0;
+   datetime to_time   = 0;
+   if(!__WB15_BuildIntrabarSearchWindow(m15_open_time, from_time, to_time))
+      return false;
+
+   MqlRates bars[];
+   int n = __WB15_LoadIntrabarM15(sym, from_time, to_time, bars);
+   if(n <= 0) return false;
+
+   const double eps = __WB15_StageEps();
+   double top = zone_top;
+   double bottom = zone_bottom;
+   if(bottom > top)
+   {
+      double tmp = bottom;
+      bottom = top;
+      top = tmp;
+   }
+
+   for(int i = 0; i < n; ++i)
+   {
+      bool touched = (bars[i].low <= (top + eps) && bars[i].high >= (bottom - eps));
+      bool invalid = false;
+
+      if(dir == DIR_UP)
+         invalid = (bars[i].low < (invalid_level - eps));
+      else
+         invalid = (bars[i].high > (invalid_level + eps));
+
+      if(touched && touch_time <= 0)
+         touch_time = __WB15_StableM15IntrabarTime(bars[i].time);
+
+      if(invalid && invalid_time <= 0)
+         invalid_time = __WB15_StableM15IntrabarTime(bars[i].time);
+
+      if(touch_time > 0 || invalid_time > 0)
+         return true;
+   }
+
+   return false;
+}
+
+inline void __WB15_StagePublishON(const string sym,
+                                  WB15StageState &st,
+                                  const datetime touch_time)
+{
+   if(!st.active) return;
+   if(!st.zone_active) return;
+   if(st.on_sent) return;
+   if(touch_time <= 0) return;
+
+   // The SignalGate record must represent the real M1 activation time,
+   // not the Stage-1 seed candle.
+   TriggerM15SignalGate_RecordExact(sym, st.start_kind, st.start_ns, st.start_dir, touch_time);
+
+   WB15_MasterPushEvent(sym, st.start_kind, st.start_ns, st.start_dir, touch_time);
+   st.on_sent = true;
+
+   if(InpDebugPrints)
+      Print("[WB15-STAGE] Stage-3 retouch -> M1 ON | kind=", __WB15_StartKindLabel(st.start_kind),
+            " | zone=", __WB15_StageSourceLabel(st.zone_source, st.zone_kind),
+            " | dir=", (st.start_dir==DIR_UP ? "UP" : "DOWN"),
+            " | touch=", TimeToString(touch_time, TIME_DATE|TIME_SECONDS));
+}
+
+inline void __WB15_StageProcessZoneRetouch(const string sym,
+                                           WB15StageState &st,
+                                           const MqlRates &bar)
+{
+   if(!st.active) return;
+   if(!st.zone_active) return;
+   if(st.on_sent) return;
+   if(bar.time <= st.zone_flip_time) return;
+
+   datetime touch_time = 0;
+   datetime invalid_time = 0;
+   bool got_m1 = __WB15_StageM1TouchInvalidTimes(sym,
+                                                 st.start_dir,
+                                                 bar.time,
+                                                 st.zone_top,
+                                                 st.zone_bottom,
+                                                 st.invalid_level,
+                                                 touch_time,
+                                                 invalid_time);
+
+   if(got_m1)
+   {
+      if(touch_time > 0)
+      {
+         __WB15_StagePublishON(sym, st, touch_time);
+         return;
+      }
+
+      if(invalid_time > 0)
+      {
+         if(InpDebugPrints)
+            Print("[WB15-STAGE] Stage-2 zone invalidated before retouch | zone=",
+                  __WB15_StageSourceLabel(st.zone_source, st.zone_kind),
+                  " | t=", TimeToString(invalid_time, TIME_DATE|TIME_SECONDS));
+         __WB15_StageClearZone(st);
+         return;
+      }
+   }
+
+   // Fallback when M1 intrabar data is unavailable.
+   const double eps = __WB15_StageEps();
+   bool touched_fallback = (bar.low <= (st.zone_top + eps) && bar.high >= (st.zone_bottom - eps));
+   bool invalid_fallback = false;
+
+   if(st.start_dir == DIR_UP)
+      invalid_fallback = (bar.low < (st.invalid_level - eps));
+   else
+      invalid_fallback = (bar.high > (st.invalid_level + eps));
+
+   if(touched_fallback)
+   {
+      datetime te = 0;
+      if(!__WB15_FindFirstRangeTouchIntrabarTime(sym, bar.time, st.zone_bottom, st.zone_top, te))
+         te = __WB15_StableM15IntrabarTime(bar.time);
+      __WB15_StagePublishON(sym, st, te);
+      return;
+   }
+
+   if(invalid_fallback)
+   {
+      if(InpDebugPrints)
+         Print("[WB15-STAGE] Stage-2 zone invalidated | zone=",
+               __WB15_StageSourceLabel(st.zone_source, st.zone_kind),
+               " | M15=", TimeToString(bar.time, TIME_DATE|TIME_SECONDS));
+      __WB15_StageClearZone(st);
+   }
+}
+
+inline void __WB15_StageProcessStateOnBar(const string sym,
+                                          WB15StageState &st,
+                                          const MqlRates &rates[],
+                                          const int n,
+                                          const int bar_idx)
+{
+   if(!__WB15_IsMaster()) return;
+   if(!st.active) return;
+   if(bar_idx < 0 || bar_idx >= n) return;
+
+   if(!st.zone_active && !st.on_sent)
+   {
+      WB15StageState candidate;
+      if(__WB15_StageBuildZoneOnClosedBar(rates, n, bar_idx, st, candidate))
+      {
+         st = candidate;
+
+         if(InpDebugPrints)
+            Print("[WB15-STAGE] Stage-2 zone armed | kind=", __WB15_StartKindLabel(st.start_kind),
+                  " | zone=", __WB15_StageSourceLabel(st.zone_source, st.zone_kind),
+                  " | top=", DoubleToString(st.zone_top, _Digits),
+                  " | bottom=", DoubleToString(st.zone_bottom, _Digits),
+                  " | invalid=", DoubleToString(st.invalid_level, _Digits),
+                  " | flip=", TimeToString(st.zone_flip_time, TIME_DATE|TIME_SECONDS));
+      }
+   }
+
+   __WB15_StageProcessZoneRetouch(sym, st, rates[bar_idx]);
+}
+
+inline void WB15_MasterOnM15Bar(const string sym,
+                                const MqlRates &rates[],
+                                const int n,
+                                const int bar_idx)
+{
+   if(!__WB15_IsMaster()) return;
+   if(n <= 0) return;
+   if(bar_idx < 0 || bar_idx >= n) return;
+
+   __WB15_StageProcessStateOnBar(sym, g_wb15_stage_maj, rates, n, bar_idx);
+   __WB15_StageProcessStateOnBar(sym, g_wb15_stage_min, rates, n, bar_idx);
+}
+
+
+
 // START (EXACT FORMATION MOMENT): HWX
 inline void WB15_PublishStartHWX(const string sym,
                                  const Direction dir,
@@ -458,8 +1057,6 @@ inline void WB15_PublishStartHWX(const string sym,
                                  const double level)
 {
    const int ns = __WB15_NS_FromMarkers();
-   if(ns != WB15_NS_NONE)
-      TriggerM15SignalGate_RecordExact(sym, WB15_KIND_START_HWX, ns, dir, h4_open_time);
 
    datetime te = 0;
    if(!__WB15_FindFirstHWXIntrabarTime(sym, dir, h4_open_time, level, te))
@@ -467,17 +1064,14 @@ inline void WB15_PublishStartHWX(const string sym,
 
    if(te <= 0) return;
 
-   WB15_MasterPushEvent(sym, WB15_KIND_START_HWX, ns, dir, te);
+   __WB15_StageStart(sym, WB15_KIND_START_HWX, ns, dir, te, h4_open_time);
 }
 
 // Legacy fallback overload (kept for compatibility)
 inline void WB15_PublishStartHWX(const string sym, const Direction dir, const datetime t)
 {
    const int ns = __WB15_NS_FromMarkers();
-   if(ns != WB15_NS_NONE)
-      TriggerM15SignalGate_RecordExact(sym, WB15_KIND_START_HWX, ns, dir, t);
-
-   WB15_MasterPushEvent(sym, WB15_KIND_START_HWX, ns, dir, t);
+   __WB15_StageStart(sym, WB15_KIND_START_HWX, ns, dir, t, t);
 }
 
 // START (EXACT FORMATION MOMENT): HWBB
@@ -488,8 +1082,6 @@ inline void WB15_PublishStartHWBB(const string sym,
                                   const datetime seed_h4_open_time)
 {
    const int ns = __WB15_NS_FromMarkers();
-   if(ns != WB15_NS_NONE)
-      TriggerM15SignalGate_RecordExact(sym, WB15_KIND_START_HWBB, ns, dir, h4_open_time);
 
    datetime te = 0;
    if(!__WB15_FindFirstHWBBIntrabarTime(sym, dir, h4_open_time, start_level, seed_h4_open_time, te))
@@ -497,20 +1089,18 @@ inline void WB15_PublishStartHWBB(const string sym,
 
    if(te <= 0) return;
 
-   WB15_MasterPushEvent(sym, WB15_KIND_START_HWBB, ns, dir, te);
+   __WB15_StageStart(sym, WB15_KIND_START_HWBB, ns, dir, te, h4_open_time);
 }
 
 // Legacy fallback overload (kept for compatibility)
 inline void WB15_PublishStartHWBB(const string sym, const Direction dir, const datetime t)
 {
    const int ns = __WB15_NS_FromMarkers();
-   if(ns != WB15_NS_NONE)
-      TriggerM15SignalGate_RecordClose(sym, WB15_KIND_START_HWBB, ns, dir, t);
 
    const datetime te = __WB15_CloseBasedEventTimeOrZero(t);
    if(te <= 0) return;
 
-   WB15_MasterPushEvent(sym, WB15_KIND_START_HWBB, ns, dir, te);
+   __WB15_StageStart(sym, WB15_KIND_START_HWBB, ns, dir, te, t);
 }
 
 // START (ON M15 CLOSE): FSMS
@@ -521,12 +1111,10 @@ inline void WB15_PublishStartFSMS_MAJONLY(const string sym, const Direction dir,
    const int ns = __WB15_NS_FromMarkers();
    if(ns == WB15_NS_NONE) return;
 
-   TriggerM15SignalGate_RecordClose(sym, WB15_KIND_START_FSMS, ns, dir, t);
-
    const datetime te = __WB15_CloseBasedEventTimeOrZero(t);
    if(te <= 0) return;
 
-   WB15_MasterPushEvent(sym, WB15_KIND_START_FSMS, ns, dir, te);
+   __WB15_StageStart(sym, WB15_KIND_START_FSMS, ns, dir, te, t);
 }
 
 // START (EXACT FORMATION MOMENT): GOOZBAGHALI
@@ -537,8 +1125,6 @@ inline void WB15_PublishStartGooz(const string sym,
                                   const double price_b)
 {
    const int ns = __WB15_NS_FromMarkers();
-   if(ns != WB15_NS_NONE)
-      TriggerM15SignalGate_RecordExact(sym, WB15_KIND_START_GOOZBAGHALI, ns, dir, h4_open_time);
 
    datetime te = 0;
    if(!__WB15_FindFirstRangeTouchIntrabarTime(sym, h4_open_time, price_a, price_b, te))
@@ -546,17 +1132,14 @@ inline void WB15_PublishStartGooz(const string sym,
 
    if(te <= 0) return;
 
-   WB15_MasterPushEvent(sym, WB15_KIND_START_GOOZBAGHALI, ns, dir, te);
+   __WB15_StageStart(sym, WB15_KIND_START_GOOZBAGHALI, ns, dir, te, h4_open_time);
 }
 
 // Legacy fallback overload (kept for compatibility)
 inline void WB15_PublishStartGooz(const string sym, const Direction dir, const datetime t)
 {
    const int ns = __WB15_NS_FromMarkers();
-   if(ns != WB15_NS_NONE)
-      TriggerM15SignalGate_RecordExact(sym, WB15_KIND_START_GOOZBAGHALI, ns, dir, t);
-
-   WB15_MasterPushEvent(sym, WB15_KIND_START_GOOZBAGHALI, ns, dir, t);
+   __WB15_StageStart(sym, WB15_KIND_START_GOOZBAGHALI, ns, dir, t, t);
 }
 
 // STOP (ON CLOSE): MTC must wait for M15 close
@@ -569,6 +1152,8 @@ inline void WB15_PublishStopMTC(const string sym, const Direction dir, const dat
    const datetime te = __WB15_CloseBasedEventTimeOrZero(t);
    if(te <= 0) return;
 
+   __WB15_StageStop(dir, te);
+
    WB15_MasterPushEvent(sym, WB15_KIND_STOP_MTC, ns, dir, te);
 }
 
@@ -579,6 +1164,8 @@ inline void WB15_PublishStopMinorStarter(const string sym, const Direction dir, 
 
    const datetime te = __WB15_CloseBasedEventTimeOrZero(t);
    if(te <= 0) return;
+
+   __WB15_StageStop(dir, te);
 
    WB15_MasterPushEvent(sym, WB15_KIND_STOP_MINORSTARTER, WB15_NS_MAJ, dir, te);
 }
@@ -593,6 +1180,8 @@ inline void WB15_PublishStopMinorOffZone_MAJONLY(const string sym, const Directi
 
    const datetime te = __WB15_CloseBasedEventTimeOrZero(t);
    if(te <= 0) return;
+
+   __WB15_StageStop(dir, te);
 
    WB15_MasterPushEvent(sym, WB15_KIND_STOP_MINOROFF_ZONE, WB15_NS_MAJ, dir, te);
 }

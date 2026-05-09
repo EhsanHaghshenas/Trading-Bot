@@ -2504,56 +2504,9 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
 
    for(int i = 0; i < raw_valid_triggers; ++i)
    {
-      Direction major_dir = DIR_UP;
-      Direction minor_dir = DIR_UP;
-      string    major_tag = "";
-      string    minor_tag = "";
-
-      bool major_active = __TRGSTM_FindActiveTrend(major_windows,
-                                                   trades[i].rec.hit_time,
-                                                   major_dir,
-                                                   major_tag);
-
-      bool minor_active = __TRGSTM_FindActiveTrend(minor_windows,
-                                                   trades[i].rec.hit_time,
-                                                   minor_dir,
-                                                   minor_tag);
-
-      bool major_match = (major_active && major_dir == trades[i].rec.dir);
-      bool minor_match = (minor_active && minor_dir == trades[i].rec.dir);
-
-      if(!major_match && !minor_match)
-      {
-         string skip_note = __TRGSTM_BuildTrendSkipNote(trades[i].rec.dir,
-                                                        major_active,
-                                                        major_dir,
-                                                        major_tag,
-                                                        minor_active,
-                                                        minor_dir,
-                                                        minor_tag);
-         skip_note = __TRGSTM_AppendNote(skip_note,
-                                         "IMPORTED_M15_SIGNAL_ACTIVE_BUT_M1_TREND_NOT_ALIGNED");
-
-         __TRGSTM_SetSkip(trades[i],
-                          TRGSTMT_SKIP_TREND_FILTER,
-                          equity,
-                          __TRGSTM_AppendNote(trades[i].note, skip_note));
-         ignored_valid_triggers++;
-         skipped_trend_filter++;
-         __TRGSTM_BumpHypotheticalCounters(trades[i],
-                                           skipped_hypo_wins,
-                                           skipped_hypo_losses,
-                                           skipped_hypo_open);
-         continue;
-      }
-
-      if(major_match && minor_match)
-         exec_trend_both++;
-      else if(major_match)
-         exec_trend_major_only++;
-      else
-         exec_trend_minor_only++;
-
+      // New execution model: every valid Flip/MajicFlip trigger becomes a trade.
+      // The imported M15->M1 bridge already limits which worker candles can create
+      // raw valid triggers; no M1 trend-alignment gate is applied here.
       trades[i].unlock_on_time = 0;
       trades[i].taken          = true;
       trades[i].exec_index     = (executed_trades + 1);
@@ -2561,17 +2514,9 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
       executed_trades++;
 
       trades[i].note = __TRGSTM_AppendNote(trades[i].note,
-                                           "EXECUTED_IMPORTED_M15_SIGNAL_PLUS_M1_TREND_ALIGNMENT_ONLY");
+                                           "EXECUTED_ALL_VALID_FLIP_OR_MAJICFLIP_TRIGGERS_NO_M1_ALIGNMENT_GATE");
       trades[i].note = __TRGSTM_AppendNote(trades[i].note,
-                                           __TRGSTM_BuildTrendMatchNote(trades[i].rec.dir,
-                                                                        major_match,
-                                                                        major_dir,
-                                                                        major_tag,
-                                                                        minor_match,
-                                                                        minor_dir,
-                                                                        minor_tag));
-      trades[i].note = __TRGSTM_AppendNote(trades[i].note,
-                                           "MULTI_TRADE_ALLOWED_NO_ACTIVE_TRADE_LOCKOUT_LOCAL_GATE_OR_POST_WIN_WAIT");
+                                           "MULTI_TRADE_ALLOWED_NO_ACTIVE_TRADE_LOCKOUT_LOCAL_GATE_TREND_FILTER_OR_POST_WIN_WAIT");
 
       if(trades[i].rec.dir == DIR_UP)
          buy_total++;
@@ -2789,19 +2734,20 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "Scan To                : " + __TRGSTM_SafeTime(use_scan_to));
    __TRGSTM_WriteLine(handle, "Initial Capital        : " + __TRGSTM_Money(initial_capital));
    __TRGSTM_WriteLine(handle, "Fixed Risk Per Trade   : " + __TRGSTM_Pct(risk_percent) + " = " + __TRGSTM_Money(risk_money));
-   __TRGSTM_WriteLine(handle, "SL/TP Source           : TriggerSLTP.mqh valid triggers only");
-   __TRGSTM_WriteLine(handle, "Execution Model        : Imported M15->M1 signal window + M1 trend alignment only | if M1 MAJ or MIN trend matches the imported M15 signal direction, every valid trigger becomes a trade | multiple simultaneous trades allowed | touch-based TP/SL | conservative same-bar ambiguity = SL");
+   __TRGSTM_WriteLine(handle, "SL/TP Source           : TriggerSLTP.mqh valid triggers only (SL from Flip/MajicFlip candle High/Low)");
+   __TRGSTM_WriteLine(handle, "Trigger Source         : Type-1 = Flip.mqh | Type-2 = Majicflip.mqh");
+   __TRGSTM_WriteLine(handle, "Execution Model        : Imported M15->M1 signal window only | every valid Flip/MajicFlip trigger becomes a trade | multiple simultaneous trades allowed | touch-based TP/SL | conservative same-bar ambiguity = SL");
    __TRGSTM_WriteLine(handle, "Protection Rule        : DISABLED");
-   __TRGSTM_WriteLine(handle, "Trend Filter           : ENABLED (the only execution gate: active M1 MAJ or MIN trend must align with the imported M15 signal direction)");
+   __TRGSTM_WriteLine(handle, "Trend Filter           : DISABLED (M1 trend alignment is not used as an execution gate)");
    __TRGSTM_WriteLine(handle, "Local M1 Signal Gate   : DISABLED (diagnostic only)");
    __TRGSTM_WriteLine(handle, "Post-Win Re-Entry Rule : DISABLED");
    __TRGSTM_WriteLine(handle, "Trend Seed (Major)     : " + major_seed_text);
    __TRGSTM_WriteLine(handle, "Trend Windows MAJ/MIN  : " + IntegerToString(major_window_count) + " / " + IntegerToString(minor_window_count));
-   __TRGSTM_WriteLine(handle, "Aligned Trend Cycles   : " + IntegerToString(eligible_epoch_count));
+   __TRGSTM_WriteLine(handle, "M1 Trend Cycles (Diag): " + IntegerToString(eligible_epoch_count));
    __TRGSTM_WriteLine(handle, "Minor Sessions Seen    : " + IntegerToString(minor_session_count));
    __TRGSTM_WriteLine(handle, "MTC Marker Events      : " + IntegerToString(mtc_count));
    __TRGSTM_WriteLine(handle, "Local Gate Events      : " + IntegerToString(local_gate_count));
-   __TRGSTM_WriteLine(handle, "Bridge Source          : Trigger.mqh / raw valid triggers already come from active imported M15->M1 signal windows");
+   __TRGSTM_WriteLine(handle, "Bridge Source          : Trigger.mqh / raw valid Flip/MajicFlip triggers already come from active imported M15->M1 signal windows");
    __TRGSTM_WriteLine(handle, "Local Gate Source      : TriggerM15SignalGate.mqh (diagnostic only; not used by the execution model)");
    __TRGSTM_WriteLine(handle, "Output Path            : " + g_trgstmt_last_fullpath);
    __TRGSTM_WriteLine(handle, "");
@@ -2812,8 +2758,8 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "Executed Trades        : " + IntegerToString(executed_trades));
    __TRGSTM_WriteLine(handle, "Execution Rate         : " + __TRGSTM_Pct(execution_rate));
    __TRGSTM_WriteLine(handle, "Ignored Valid Triggers : " + IntegerToString(ignored_valid_triggers) + " | " + __TRGSTM_Pct(ignored_rate));
-   __TRGSTM_WriteLine(handle, "Extra Execution Gates  : NONE (only the M1 trend-alignment gate is active)");
-   __TRGSTM_WriteLine(handle, "Direction Source       : imported M15->M1 signal window + matching active M1 trend window");
+   __TRGSTM_WriteLine(handle, "Extra Execution Gates  : NONE (all valid triggers execute)");
+   __TRGSTM_WriteLine(handle, "Direction Source       : imported M15->M1 signal window direction only");
    __TRGSTM_WriteLine(handle, "Closed Trades          : " + IntegerToString(closed_trades));
    __TRGSTM_WriteLine(handle, "Open Trades            : " + IntegerToString(open_trades));
    __TRGSTM_WriteLine(handle, "Wins / Losses          : " + IntegerToString(wins) + " / " + IntegerToString(losses));
@@ -2852,7 +2798,7 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
 
    if(executed_trades <= 0)
    {
-      __TRGSTM_WriteLine(handle, "No valid triggers passed the imported M15->M1 signal window + M1 trend-alignment execution rule in the selected scan range.");
+      __TRGSTM_WriteLine(handle, "No valid Flip/MajicFlip triggers were available for execution in the selected scan range.");
    }
    else
    {
@@ -2899,7 +2845,7 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
 
    if(ignored_valid_triggers <= 0)
    {
-      __TRGSTM_WriteLine(handle, "No valid triggers were ignored by the execution model; every raw valid trigger had matching M1 trend alignment.");
+      __TRGSTM_WriteLine(handle, "No valid triggers were ignored by the execution model; every raw valid Flip/MajicFlip trigger was executed.");
    }
    else
    {
@@ -2934,13 +2880,13 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "USAGE NOTES");
    __TRGSTM_WriteLine(handle, "------------------------------------------------------------");
    __TRGSTM_WriteLine(handle, "1) This statement only evaluates triggers and state that already exist up to Scan To; in synchronized live updates, Scan To is the current trigger bar reached by the normal M1 scan.");
-   __TRGSTM_WriteLine(handle, "2) Every valid TriggerSLTP trigger is executed only when its direction is aligned with the active M1 trend while the imported M15->M1 signal window is active.");
-   __TRGSTM_WriteLine(handle, "3) When that alignment exists, multiple trades may remain open at the same time; there is no single-active-trade limit.");
+   __TRGSTM_WriteLine(handle, "2) Every valid TriggerSLTP trigger produced by Flip/MajicFlip is executed; M1 trend alignment is not checked.");
+   __TRGSTM_WriteLine(handle, "3) Multiple trades may remain open at the same time; there is no single-active-trade limit.");
    __TRGSTM_WriteLine(handle, "4) The old 4-loss lockout is disabled; losing streaks are reported only as statistics.");
-   __TRGSTM_WriteLine(handle, "5) The only execution gate is M1 trend alignment against the imported M15 signal direction; a match in either MAJ or MIN trend window is sufficient.");
+   __TRGSTM_WriteLine(handle, "5) There is no M1 trend-alignment execution gate; the imported M15->M1 signal window only controls trigger creation upstream.");
    __TRGSTM_WriteLine(handle, "6) The local M1 signal-on gate from TriggerM15SignalGate.mqh is diagnostic only and does not block execution.");
-   __TRGSTM_WriteLine(handle, "7) No post-WIN waiting rule is applied; the next aligned valid trigger can trade immediately.");
-   __TRGSTM_WriteLine(handle, "8) No active-trade limit is applied; aligned triggers are not blocked by already-open trades.");
+   __TRGSTM_WriteLine(handle, "7) No post-WIN waiting rule is applied; the next valid trigger can trade immediately.");
+   __TRGSTM_WriteLine(handle, "8) No active-trade limit is applied; valid triggers are not blocked by already-open trades.");
    __TRGSTM_WriteLine(handle, "9) Risk per executed trade is fixed on initial capital, not compounded trade-by-trade.");
    __TRGSTM_WriteLine(handle, "10) Ambiguous same-bar outcomes are counted conservatively as SL to avoid optimistic bias.");
 
@@ -2950,7 +2896,7 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    if(InpDebugPrints)
    {
       Print("[TRG-STATEMENT] Written | path=", g_trgstmt_last_fullpath,
-            " | mode=M15_SIGNAL_PLUS_M1_TREND_ALIGNMENT",
+            " | mode=FLIP_MAJICFLIP_ALL_VALID_TRIGGERS",
             " | raw_valid=", raw_valid_triggers,
             " | executed=", executed_trades,
             " | ignored=", ignored_valid_triggers,

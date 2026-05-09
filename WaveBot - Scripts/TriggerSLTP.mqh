@@ -179,21 +179,15 @@ inline bool __TRGSL_BuildBull(const string    sym,
    if(hit_idx < 0 || hit_idx >= n)
       return false;
 
-   int from = src_idx;
-   int to   = hit_idx;
-   if(from > to)
-   {
-      int tmp = from;
-      from = to;
-      to   = tmp;
-   }
+   // New Flip/MajicFlip SL rule:
+   // Bullish trigger => SL below the Low of the same Flip/MajicFlip candle.
+   double buffer = __TRGSL_PointOf(sym);
+   if(buffer <= 0.0)
+      buffer = _Point;
+   if(buffer <= 0.0)
+      buffer = 0.00000001;
 
-   double sl = rates[from].low;
-   for(int i = from + 1; i <= to; ++i)
-   {
-      if(rates[i].low < sl)
-         sl = rates[i].low;
-   }
+   double sl = rates[hit_idx].low - buffer;
 
    double risk = (level - sl);
    if(risk <= 0.0)
@@ -236,21 +230,15 @@ inline bool __TRGSL_BuildBear(const string    sym,
    if(hit_idx < 0 || hit_idx >= n)
       return false;
 
-   int from = src_idx;
-   int to   = hit_idx;
-   if(from > to)
-   {
-      int tmp = from;
-      from = to;
-      to   = tmp;
-   }
+   // New Flip/MajicFlip SL rule:
+   // Bearish trigger => SL above the High of the same Flip/MajicFlip candle.
+   double buffer = __TRGSL_PointOf(sym);
+   if(buffer <= 0.0)
+      buffer = _Point;
+   if(buffer <= 0.0)
+      buffer = 0.00000001;
 
-   double sl = rates[from].high;
-   for(int i = from + 1; i <= to; ++i)
-   {
-      if(rates[i].high > sl)
-         sl = rates[i].high;
-   }
+   double sl = rates[hit_idx].high + buffer;
 
    double risk = (sl - level);
    if(risk <= 0.0)
@@ -307,7 +295,7 @@ inline void TriggerSLTP_OnTriggerFired(const string    sym,
                " trigger | breakout=", DoubleToString(level, __TRGSL_DigitsOf(use_sym)),
                " | src_idx=", src_idx,
                " | hit_idx=", hit_idx,
-               " | reason=risk>25pip_or_bad_range");
+               " | reason=risk>25pip_or_bad_flip_candle_range");
       }
       return;
    }
