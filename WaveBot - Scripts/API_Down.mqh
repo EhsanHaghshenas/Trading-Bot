@@ -1,3 +1,4 @@
+
 #ifndef WAVEBOT_API_DOWN_MQH
 #define WAVEBOT_API_DOWN_MQH
 
@@ -273,9 +274,7 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
             FSMS_SW_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);   // NEW: parallel guard for FSMS–SW^
             WBWM_ProcessMinorStarterEvents(rates, n, i, to_time);
             if(Race_ShouldAllowFSMS())
-            {
                FSMS_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);
-            }
             WB15_MasterOnM15Bar(sym, rates, n, i);
             if(insideHL[i]) continue;
             
@@ -294,9 +293,7 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
                FSMS_SW_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);   // NEW
                WBWM_ProcessMinorStarterEvents(rates, n, i, to_time);
                if(Race_ShouldAllowFSMS())
-               {
                   FSMS_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);
-               }
                WB15_MasterOnM15Bar(sym, rates, n, i);
                continue;
             }
@@ -393,9 +390,7 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
             FSMS_SW_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, j);   // NEW: parallel guard for FSMS–SW
             WBWM_ProcessMinorStarterEvents(rates, n, j, to_time);
             if(Race_ShouldAllowFSMS())
-            {
                FSMS_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, j);
-            }
             WB15_MasterOnM15Bar(sym, rates, n, j);
             // --- NEW: Chain invalidation after ShadowBreaker (DOWN) --------------
             if(SB_DN_InvalidatorReady())
@@ -652,3 +647,4 @@ void API_Down_ShowMostRecent_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES
 }
 
 #endif // WAVEBOT_API_DOWN_MQH
+

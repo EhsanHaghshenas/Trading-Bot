@@ -1,3 +1,4 @@
+
 #ifndef WAVEBOT_DATA_MQH
 #define WAVEBOT_DATA_MQH
 
@@ -73,3 +74,4 @@ datetime ResolveScanStart(const bool useMonthsAgo, const int monthsAgo, const da
 }
 
 #endif // WAVEBOT_DATA_MQH
+

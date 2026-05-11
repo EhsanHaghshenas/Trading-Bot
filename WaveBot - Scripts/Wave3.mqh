@@ -1,3 +1,4 @@
+
 #ifndef WAVEBOT_WAVE3_MQH
 #define WAVEBOT_WAVE3_MQH
 
@@ -178,3 +179,4 @@ inline bool CheckWave3CountOnly_Local_Major(
 }
 
 #endif // WAVEBOT_WAVE3_MQH
+

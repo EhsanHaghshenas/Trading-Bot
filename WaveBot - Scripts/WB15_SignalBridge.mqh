@@ -7,7 +7,9 @@
 // M15 publishes START/STOP signals; M1 draws ON/OFF markers as an overlay.
 // ============================================================================
 
-// NOTE: This module is intentionally standalone and implements the M15 three-stage signal gate.
+#include <WaveBot/AnalysisLogger.mqh>
+
+// NOTE: This module is intentionally standalone except for AnalysisLogger hooks and implements the M15 three-stage signal gate.
 
 // ---- Signal namespace (world) ----
 enum WB15_NS
@@ -166,6 +168,9 @@ struct WB15StageState
    bool      zone_active;     // Stage-2 is active
    bool      on_sent;         // Stage-3 already published to M1
 
+   int       stage_seq;       // Analysis context id for Stage-1/2/3 logs
+   int       zone_seq;        // Analysis zone id for this Stage-2 zone
+
    int       start_kind;
    int       start_ns;
    Direction start_dir;
@@ -179,16 +184,26 @@ struct WB15StageState
    double    zone_top;
    double    zone_bottom;
    double    invalid_level;   // UP: below Flip/MajicFlip low | DOWN: above Flip/MajicFlip high
+   double    zone_flip_low;
+   double    zone_flip_high;
+   double    zone_anchor_low;
+   double    zone_anchor_high;
+   int       zone_anchor_idx;
+   int       zone_flip_idx;
 };
 
 static WB15StageState g_wb15_stage_maj;
 static WB15StageState g_wb15_stage_min;
+static int            g_wb15_stage_context_counter = 0;
+static int            g_wb15_stage_zone_counter    = 0;
 
 inline void __WB15_StageReset(WB15StageState &st)
 {
    st.active           = false;
    st.zone_active      = false;
    st.on_sent          = false;
+   st.stage_seq        = -1;
+   st.zone_seq         = -1;
    st.start_kind       = 0;
    st.start_ns         = WB15_NS_NONE;
    st.start_dir        = DIR_UP;
@@ -201,12 +216,20 @@ inline void __WB15_StageReset(WB15StageState &st)
    st.zone_top         = 0.0;
    st.zone_bottom      = 0.0;
    st.invalid_level    = 0.0;
+   st.zone_flip_low    = 0.0;
+   st.zone_flip_high   = 0.0;
+   st.zone_anchor_low  = 0.0;
+   st.zone_anchor_high = 0.0;
+   st.zone_anchor_idx  = -1;
+   st.zone_flip_idx    = -1;
 }
 
 inline void __WB15_StageResetAll()
 {
    __WB15_StageReset(g_wb15_stage_maj);
    __WB15_StageReset(g_wb15_stage_min);
+   g_wb15_stage_context_counter = 0;
+   g_wb15_stage_zone_counter    = 0;
 }
 
 
@@ -272,6 +295,25 @@ inline void WB15_MasterPushEvent(const string sym,
    const int code = kind * 100 + ns * 10 + __WB15_DirCode(dir);
    GlobalVariableSet(__WB15_KeyT(sym, seq), (double)t);
    GlobalVariableSet(__WB15_KeyC(sym, seq), (double)code);
+
+   bool is_start = (kind == WB15_KIND_START_HWX ||
+                    kind == WB15_KIND_START_HWBB ||
+                    kind == WB15_KIND_START_FSMS ||
+                    kind == WB15_KIND_START_GOOZBAGHALI);
+   bool is_stop  = (kind == WB15_KIND_STOP_MTC ||
+                    kind == WB15_KIND_STOP_MINORSTARTER ||
+                    kind == WB15_KIND_STOP_MINOROFF_ZONE);
+
+   if(is_start || is_stop)
+   {
+      AnalysisLogger_LogBridgeMaster(sym,
+                                     seq,
+                                     kind,
+                                     ns,
+                                     dir,
+                                     t,
+                                     (is_start ? "stage3_start_sent_to_m1" : "off_sent_to_m1"));
+   }
 }
 
 // Convenience wrappers (called from signal detection points)
@@ -581,9 +623,46 @@ inline void __WB15_StageClearZone(WB15StageState &st)
    st.zone_top         = 0.0;
    st.zone_bottom      = 0.0;
    st.invalid_level    = 0.0;
+   st.zone_flip_low    = 0.0;
+   st.zone_flip_high   = 0.0;
+   st.zone_anchor_low  = 0.0;
+   st.zone_anchor_high = 0.0;
+   st.zone_anchor_idx  = -1;
+   st.zone_flip_idx    = -1;
+   st.zone_seq         = -1;
 }
 
-inline void __WB15_StageStartState(WB15StageState &st,
+inline int __WB15_StageFindBarIndexByTime(const MqlRates &rates[], const int n, const datetime t)
+{
+   if(t <= 0) return -1;
+   for(int i = 0; i < n; ++i)
+   {
+      if(rates[i].time == t)
+         return i;
+   }
+   return -1;
+}
+
+inline void __WB15_StageGetBarOHLC(const MqlRates &rates[], const int n, const int idx,
+                                   double &o, double &h, double &l, double &c, datetime &t)
+{
+   o = 0.0;
+   h = 0.0;
+   l = 0.0;
+   c = 0.0;
+   t = 0;
+
+   if(idx < 0 || idx >= n) return;
+
+   o = rates[idx].open;
+   h = rates[idx].high;
+   l = rates[idx].low;
+   c = rates[idx].close;
+   t = rates[idx].time;
+}
+
+inline void __WB15_StageStartState(const string sym,
+                                   WB15StageState &st,
                                    const int kind,
                                    const int ns,
                                    const Direction dir,
@@ -593,6 +672,8 @@ inline void __WB15_StageStartState(WB15StageState &st,
    st.active           = true;
    st.zone_active      = false;
    st.on_sent          = false;
+   st.stage_seq        = ++g_wb15_stage_context_counter;
+   st.zone_seq         = -1;
    st.start_kind       = kind;
    st.start_ns         = ns;
    st.start_dir        = dir;
@@ -605,6 +686,47 @@ inline void __WB15_StageStartState(WB15StageState &st,
    st.zone_top         = 0.0;
    st.zone_bottom      = 0.0;
    st.invalid_level    = 0.0;
+   st.zone_flip_low    = 0.0;
+   st.zone_flip_high   = 0.0;
+   st.zone_anchor_low  = 0.0;
+   st.zone_anchor_high = 0.0;
+   st.zone_anchor_idx  = -1;
+   st.zone_flip_idx    = -1;
+
+   AnalysisLogger_LogM15MainSignal(sym,
+                                   st.stage_seq,
+                                   kind,
+                                   ns,
+                                   dir,
+                                   event_time,
+                                   true,
+                                   "WB15_StageStart",
+                                   "",
+                                   "stage1_detected_waiting_for_flip_or_majicflip_zone");
+
+   AnalysisLogger_LogM15StageDetailed(sym,
+                                      st.stage_seq,
+                                      -1,
+                                      kind,
+                                      ns,
+                                      dir,
+                                      event_time,
+                                      -1,
+                                      "STAGE1_MAIN_SIGNAL_STARTED",
+                                      0,
+                                      0,
+                                      -1,
+                                      0,
+                                      0,0,0,0,
+                                      -1,
+                                      stage1_bar_time,
+                                      0,0,0,0,
+                                      0,0,
+                                      0,
+                                      0,
+                                      0,
+                                      "",
+                                      "stage1_context_opened_by_main_signal");
 
    if(InpDebugPrints)
       Print("[WB15-STAGE] Stage-1 armed | kind=", __WB15_StartKindLabel(kind),
@@ -624,18 +746,89 @@ inline void __WB15_StageStart(const string sym,
    if(!__WB15_IsMaster()) return;
    if(event_time <= 0) return;
    if(stage1_bar_time <= 0) return;
+   if(ns == WB15_NS_NONE) return;
    if(ns == WB15_NS_MAJ)
-      __WB15_StageStartState(g_wb15_stage_maj, kind, ns, dir, event_time, stage1_bar_time);
+      __WB15_StageStartState(sym, g_wb15_stage_maj, kind, ns, dir, event_time, stage1_bar_time);
    else if(ns == WB15_NS_MIN)
-      __WB15_StageStartState(g_wb15_stage_min, kind, ns, dir, event_time, stage1_bar_time);
+      __WB15_StageStartState(sym, g_wb15_stage_min, kind, ns, dir, event_time, stage1_bar_time);
 }
 
-inline void __WB15_StageStopState(WB15StageState &st,
+inline void __WB15_StageStopState(const string sym,
+                                  WB15StageState &st,
+                                  const int stop_kind,
                                   const Direction stop_dir,
                                   const datetime stop_time)
 {
    if(!st.active) return;
    if(stop_dir != __WB15_Opposite(st.start_dir)) return;
+
+   AnalysisLogger_LogM15MainSignal(sym,
+                                   st.stage_seq,
+                                   stop_kind,
+                                   st.start_ns,
+                                   stop_dir,
+                                   stop_time,
+                                   false,
+                                   "WB15_StageStop",
+                                   "MAIN_OFF",
+                                   "original_off_resets_three_stage_context");
+
+   AnalysisLogger_LogM15StageDetailed(sym,
+                                      st.stage_seq,
+                                      st.zone_seq,
+                                      st.start_kind,
+                                      st.start_ns,
+                                      st.start_dir,
+                                      stop_time,
+                                      -1,
+                                      "MAIN_OFF_FULL_RESET",
+                                      st.zone_source,
+                                      st.zone_kind,
+                                      st.zone_flip_idx,
+                                      st.zone_flip_time,
+                                      0,0,0,0,
+                                      st.zone_anchor_idx,
+                                      st.zone_anchor_time,
+                                      0,0,0,0,
+                                      st.zone_bottom,
+                                      st.zone_top,
+                                      st.invalid_level,
+                                      0,
+                                      0,
+                                      "MAIN_OFF",
+                                      "original_off_resets_active_context");
+
+   if(st.zone_active)
+   {
+      AnalysisLogger_LogM15ZoneSnapshot(sym,
+                                        st.stage_seq,
+                                        st.zone_seq,
+                                        st.start_dir,
+                                        st.start_kind,
+                                        st.zone_source,
+                                        st.zone_kind,
+                                        st.zone_flip_time,
+                                        st.zone_flip_idx,
+                                        st.zone_flip_low,
+                                        st.zone_flip_high,
+                                        st.zone_anchor_time,
+                                        st.zone_anchor_idx,
+                                        st.zone_anchor_low,
+                                        st.zone_anchor_high,
+                                        st.zone_bottom,
+                                        st.zone_top,
+                                        st.invalid_level,
+                                        st.zone_flip_time,
+                                        0,
+                                        -1,
+                                        st.on_sent,
+                                        0,
+                                        false,
+                                        0,
+                                        "",
+                                        stop_time,
+                                        (st.on_sent ? "MAIN_OFF_AFTER_SENT" : "MAIN_OFF_BEFORE_RETOUCH"));
+   }
 
    if(InpDebugPrints)
       Print("[WB15-STAGE] Reset by original OFF | active_kind=", __WB15_StartKindLabel(st.start_kind),
@@ -645,10 +838,10 @@ inline void __WB15_StageStopState(WB15StageState &st,
    __WB15_StageReset(st);
 }
 
-inline void __WB15_StageStop(const Direction stop_dir, const datetime stop_time)
+inline void __WB15_StageStop(const string sym, const int stop_kind, const Direction stop_dir, const datetime stop_time)
 {
-   __WB15_StageStopState(g_wb15_stage_maj, stop_dir, stop_time);
-   __WB15_StageStopState(g_wb15_stage_min, stop_dir, stop_time);
+   __WB15_StageStopState(sym, g_wb15_stage_maj, stop_kind, stop_dir, stop_time);
+   __WB15_StageStopState(sym, g_wb15_stage_min, stop_kind, stop_dir, stop_time);
 }
 
 inline bool __WB15_StageBreakerAfterStart(const WB15StageState &st,
@@ -690,6 +883,12 @@ inline bool __WB15_StageBuildDirectFlipUP(const MqlRates &rates[],
    out.zone_kind        = 1;
    out.zone_anchor_time = rates[idx-1].time;
    out.zone_flip_time   = rates[idx].time;
+   out.zone_anchor_idx  = idx - 1;
+   out.zone_flip_idx    = idx;
+   out.zone_flip_low    = rates[idx].low;
+   out.zone_flip_high   = rates[idx].high;
+   out.zone_anchor_low  = rates[idx-1].low;
+   out.zone_anchor_high = rates[idx-1].high;
    out.zone_top         = rates[idx-1].high;
    out.zone_bottom      = rates[idx].low;
    out.invalid_level    = rates[idx].low;
@@ -716,6 +915,12 @@ inline bool __WB15_StageBuildDirectFlipDOWN(const MqlRates &rates[],
    out.zone_kind        = 1;
    out.zone_anchor_time = rates[idx-1].time;
    out.zone_flip_time   = rates[idx].time;
+   out.zone_anchor_idx  = idx - 1;
+   out.zone_flip_idx    = idx;
+   out.zone_flip_low    = rates[idx].low;
+   out.zone_flip_high   = rates[idx].high;
+   out.zone_anchor_low  = rates[idx-1].low;
+   out.zone_anchor_high = rates[idx-1].high;
    out.zone_top         = rates[idx].high;
    out.zone_bottom      = rates[idx-1].low;
    out.invalid_level    = rates[idx].high;
@@ -766,6 +971,12 @@ inline bool __WB15_StageBuildMotherFlipUP(const MqlRates &rates[],
       out.zone_kind        = (majic ? 0 : 2);
       out.zone_anchor_time = rates[m].time;
       out.zone_flip_time   = rates[idx].time;
+      out.zone_anchor_idx  = m;
+      out.zone_flip_idx    = idx;
+      out.zone_flip_low    = rates[idx].low;
+      out.zone_flip_high   = rates[idx].high;
+      out.zone_anchor_low  = rates[m].low;
+      out.zone_anchor_high = rates[m].high;
       out.zone_top         = rates[m].high;
       out.zone_bottom      = rates[idx].low;
       out.invalid_level    = rates[idx].low;
@@ -819,6 +1030,12 @@ inline bool __WB15_StageBuildMotherFlipDOWN(const MqlRates &rates[],
       out.zone_kind        = (majic ? 0 : 2);
       out.zone_anchor_time = rates[m].time;
       out.zone_flip_time   = rates[idx].time;
+      out.zone_anchor_idx  = m;
+      out.zone_flip_idx    = idx;
+      out.zone_flip_low    = rates[idx].low;
+      out.zone_flip_high   = rates[idx].high;
+      out.zone_anchor_low  = rates[m].low;
+      out.zone_anchor_high = rates[m].high;
       out.zone_top         = rates[idx].high;
       out.zone_bottom      = rates[m].low;
       out.invalid_level    = rates[idx].high;
@@ -927,6 +1144,85 @@ inline void __WB15_StagePublishON(const string sym,
    // not the Stage-1 seed candle.
    TriggerM15SignalGate_RecordExact(sym, st.start_kind, st.start_ns, st.start_dir, touch_time);
 
+   AnalysisLogger_LogM15StageDetailed(sym,
+                                      st.stage_seq,
+                                      st.zone_seq,
+                                      st.start_kind,
+                                      st.start_ns,
+                                      st.start_dir,
+                                      touch_time,
+                                      -1,
+                                      "ZONE_RETOUCHED",
+                                      st.zone_source,
+                                      st.zone_kind,
+                                      st.zone_flip_idx,
+                                      st.zone_flip_time,
+                                      0,0,0,0,
+                                      st.zone_anchor_idx,
+                                      st.zone_anchor_time,
+                                      0,0,0,0,
+                                      st.zone_bottom,
+                                      st.zone_top,
+                                      st.invalid_level,
+                                      st.zone_bottom,
+                                      touch_time,
+                                      "",
+                                      "price_returned_to_m15_zone");
+
+   AnalysisLogger_LogM15StageDetailed(sym,
+                                      st.stage_seq,
+                                      st.zone_seq,
+                                      st.start_kind,
+                                      st.start_ns,
+                                      st.start_dir,
+                                      touch_time,
+                                      -1,
+                                      "START_SENT_TO_M1",
+                                      st.zone_source,
+                                      st.zone_kind,
+                                      st.zone_flip_idx,
+                                      st.zone_flip_time,
+                                      0,0,0,0,
+                                      st.zone_anchor_idx,
+                                      st.zone_anchor_time,
+                                      0,0,0,0,
+                                      st.zone_bottom,
+                                      st.zone_top,
+                                      st.invalid_level,
+                                      st.zone_bottom,
+                                      touch_time,
+                                      "",
+                                      "stage3_confirmed_bridge_start_published_to_m1");
+
+   AnalysisLogger_LogM15ZoneSnapshot(sym,
+                                     st.stage_seq,
+                                     st.zone_seq,
+                                     st.start_dir,
+                                     st.start_kind,
+                                     st.zone_source,
+                                     st.zone_kind,
+                                     st.zone_flip_time,
+                                     st.zone_flip_idx,
+                                     st.zone_flip_low,
+                                     st.zone_flip_high,
+                                     st.zone_anchor_time,
+                                     st.zone_anchor_idx,
+                                     st.zone_anchor_low,
+                                     st.zone_anchor_high,
+                                     st.zone_bottom,
+                                     st.zone_top,
+                                     st.invalid_level,
+                                     st.zone_flip_time,
+                                     touch_time,
+                                     -1,
+                                     true,
+                                     touch_time,
+                                     false,
+                                     0,
+                                     "",
+                                     0,
+                                     "RETOUCHED_AND_SENT");
+
    WB15_MasterPushEvent(sym, st.start_kind, st.start_ns, st.start_dir, touch_time);
    st.on_sent = true;
 
@@ -935,6 +1231,97 @@ inline void __WB15_StagePublishON(const string sym,
             " | zone=", __WB15_StageSourceLabel(st.zone_source, st.zone_kind),
             " | dir=", (st.start_dir==DIR_UP ? "UP" : "DOWN"),
             " | touch=", TimeToString(touch_time, TIME_DATE|TIME_SECONDS));
+}
+
+
+inline void __WB15_StageLogInvalidAndClear(const string sym, WB15StageState &st, const datetime invalid_time, const string reason)
+{
+   if(!st.active || !st.zone_active)
+   {
+      __WB15_StageClearZone(st);
+      return;
+   }
+
+   AnalysisLogger_LogM15StageDetailed(sym,
+                                      st.stage_seq,
+                                      st.zone_seq,
+                                      st.start_kind,
+                                      st.start_ns,
+                                      st.start_dir,
+                                      invalid_time,
+                                      -1,
+                                      "ZONE_INVALIDATED",
+                                      st.zone_source,
+                                      st.zone_kind,
+                                      st.zone_flip_idx,
+                                      st.zone_flip_time,
+                                      0,0,0,0,
+                                      st.zone_anchor_idx,
+                                      st.zone_anchor_time,
+                                      0,0,0,0,
+                                      st.zone_bottom,
+                                      st.zone_top,
+                                      st.invalid_level,
+                                      0,
+                                      0,
+                                      reason,
+                                      "zone_invalidated_before_m1_start");
+
+   AnalysisLogger_LogM15StageDetailed(sym,
+                                      st.stage_seq,
+                                      st.zone_seq,
+                                      st.start_kind,
+                                      st.start_ns,
+                                      st.start_dir,
+                                      invalid_time,
+                                      -1,
+                                      "STAGE2_RESET",
+                                      st.zone_source,
+                                      st.zone_kind,
+                                      st.zone_flip_idx,
+                                      st.zone_flip_time,
+                                      0,0,0,0,
+                                      st.zone_anchor_idx,
+                                      st.zone_anchor_time,
+                                      0,0,0,0,
+                                      st.zone_bottom,
+                                      st.zone_top,
+                                      st.invalid_level,
+                                      0,
+                                      0,
+                                      reason,
+                                      "stage2_and_stage3_reset_waiting_for_new_flip_or_majicflip");
+
+   AnalysisLogger_LogM15ZoneSnapshot(sym,
+                                     st.stage_seq,
+                                     st.zone_seq,
+                                     st.start_dir,
+                                     st.start_kind,
+                                     st.zone_source,
+                                     st.zone_kind,
+                                     st.zone_flip_time,
+                                     st.zone_flip_idx,
+                                     st.zone_flip_low,
+                                     st.zone_flip_high,
+                                     st.zone_anchor_time,
+                                     st.zone_anchor_idx,
+                                     st.zone_anchor_low,
+                                     st.zone_anchor_high,
+                                     st.zone_bottom,
+                                     st.zone_top,
+                                     st.invalid_level,
+                                     st.zone_flip_time,
+                                     0,
+                                     -1,
+                                     false,
+                                     0,
+                                     true,
+                                     invalid_time,
+                                     reason,
+                                     0,
+                                     "INVALIDATED_BEFORE_RETOUCH");
+
+   __WB15_StageClearZone(st);
 }
 
 inline void __WB15_StageProcessZoneRetouch(const string sym,
@@ -971,7 +1358,7 @@ inline void __WB15_StageProcessZoneRetouch(const string sym,
             Print("[WB15-STAGE] Stage-2 zone invalidated before retouch | zone=",
                   __WB15_StageSourceLabel(st.zone_source, st.zone_kind),
                   " | t=", TimeToString(invalid_time, TIME_DATE|TIME_SECONDS));
-         __WB15_StageClearZone(st);
+         __WB15_StageLogInvalidAndClear(sym, st, invalid_time, "INVALID_LEVEL_BROKEN_BEFORE_RETOUCH");
          return;
       }
    }
@@ -1001,7 +1388,7 @@ inline void __WB15_StageProcessZoneRetouch(const string sym,
          Print("[WB15-STAGE] Stage-2 zone invalidated | zone=",
                __WB15_StageSourceLabel(st.zone_source, st.zone_kind),
                " | M15=", TimeToString(bar.time, TIME_DATE|TIME_SECONDS));
-      __WB15_StageClearZone(st);
+      __WB15_StageLogInvalidAndClear(sym, st, bar.time, "INVALID_LEVEL_BROKEN_BEFORE_RETOUCH");
    }
 }
 
@@ -1021,6 +1408,91 @@ inline void __WB15_StageProcessStateOnBar(const string sym,
       if(__WB15_StageBuildZoneOnClosedBar(rates, n, bar_idx, st, candidate))
       {
          st = candidate;
+         st.zone_seq = ++g_wb15_stage_zone_counter;
+
+         double fo=0.0, fh=0.0, fl=0.0, fc=0.0; datetime ft=0;
+         double bo=0.0, bh=0.0, bl=0.0, bc=0.0; datetime bt=0;
+         __WB15_StageGetBarOHLC(rates, n, st.zone_flip_idx, fo, fh, fl, fc, ft);
+         __WB15_StageGetBarOHLC(rates, n, st.zone_anchor_idx, bo, bh, bl, bc, bt);
+
+         AnalysisLogger_LogM15StageDetailed(sym,
+                                            st.stage_seq,
+                                            st.zone_seq,
+                                            st.start_kind,
+                                            st.start_ns,
+                                            st.start_dir,
+                                            st.zone_flip_time,
+                                            st.zone_flip_idx,
+                                            (st.zone_source == 2 ? "STAGE2_MAJICFLIP_FOUND" : "STAGE2_FLIP_FOUND"),
+                                            st.zone_source,
+                                            st.zone_kind,
+                                            st.zone_flip_idx,
+                                            st.zone_flip_time,
+                                            fo, fh, fl, fc,
+                                            st.zone_anchor_idx,
+                                            st.zone_anchor_time,
+                                            bo, bh, bl, bc,
+                                            st.zone_bottom,
+                                            st.zone_top,
+                                            st.invalid_level,
+                                            0,
+                                            0,
+                                            "",
+                                            "stage2_zone_registered");
+
+         AnalysisLogger_LogM15StageDetailed(sym,
+                                            st.stage_seq,
+                                            st.zone_seq,
+                                            st.start_kind,
+                                            st.start_ns,
+                                            st.start_dir,
+                                            st.zone_flip_time,
+                                            st.zone_flip_idx,
+                                            "ZONE_CREATED",
+                                            st.zone_source,
+                                            st.zone_kind,
+                                            st.zone_flip_idx,
+                                            st.zone_flip_time,
+                                            fo, fh, fl, fc,
+                                            st.zone_anchor_idx,
+                                            st.zone_anchor_time,
+                                            bo, bh, bl, bc,
+                                            st.zone_bottom,
+                                            st.zone_top,
+                                            st.invalid_level,
+                                            0,
+                                            0,
+                                            "",
+                                            "m15_flip_majicflip_zone_created_and_waiting_for_retouch");
+
+         AnalysisLogger_LogM15ZoneSnapshot(sym,
+                                           st.stage_seq,
+                                           st.zone_seq,
+                                           st.start_dir,
+                                           st.start_kind,
+                                           st.zone_source,
+                                           st.zone_kind,
+                                           st.zone_flip_time,
+                                           st.zone_flip_idx,
+                                           fl,
+                                           fh,
+                                           st.zone_anchor_time,
+                                           st.zone_anchor_idx,
+                                           bl,
+                                           bh,
+                                           st.zone_bottom,
+                                           st.zone_top,
+                                           st.invalid_level,
+                                           st.zone_flip_time,
+                                           0,
+                                           -1,
+                                           false,
+                                           0,
+                                           false,
+                                           0,
+                                           "",
+                                           0,
+                                           "ACTIVE_WAITING_RETOUCH");
 
          if(InpDebugPrints)
             Print("[WB15-STAGE] Stage-2 zone armed | kind=", __WB15_StartKindLabel(st.start_kind),
@@ -1152,7 +1624,7 @@ inline void WB15_PublishStopMTC(const string sym, const Direction dir, const dat
    const datetime te = __WB15_CloseBasedEventTimeOrZero(t);
    if(te <= 0) return;
 
-   __WB15_StageStop(dir, te);
+   __WB15_StageStop(sym, WB15_KIND_STOP_MTC, dir, te);
 
    WB15_MasterPushEvent(sym, WB15_KIND_STOP_MTC, ns, dir, te);
 }
@@ -1165,7 +1637,7 @@ inline void WB15_PublishStopMinorStarter(const string sym, const Direction dir, 
    const datetime te = __WB15_CloseBasedEventTimeOrZero(t);
    if(te <= 0) return;
 
-   __WB15_StageStop(dir, te);
+   __WB15_StageStop(sym, WB15_KIND_STOP_MINORSTARTER, dir, te);
 
    WB15_MasterPushEvent(sym, WB15_KIND_STOP_MINORSTARTER, WB15_NS_MAJ, dir, te);
 }
@@ -1181,7 +1653,7 @@ inline void WB15_PublishStopMinorOffZone_MAJONLY(const string sym, const Directi
    const datetime te = __WB15_CloseBasedEventTimeOrZero(t);
    if(te <= 0) return;
 
-   __WB15_StageStop(dir, te);
+   __WB15_StageStop(sym, WB15_KIND_STOP_MINOROFF_ZONE, dir, te);
 
    WB15_MasterPushEvent(sym, WB15_KIND_STOP_MINOROFF_ZONE, WB15_NS_MAJ, dir, te);
 }
@@ -1599,6 +2071,19 @@ inline void WB15_Slave_OnTimer(const string sym)
                }
 
                __WB15_DrawSignalMarker(sym, run_id, i, t, false, g_wb15_state.start_dir, 0, 0);
+               AnalysisLogger_LogBridgeSlave(sym,
+                                             i,
+                                             kind,
+                                             ns,
+                                             dir,
+                                             t,
+                                             on_bar_time,
+                                             iBarShift(sym, PERIOD_M1, on_bar_time, false),
+                                             false,
+                                             g_wb15_state.start_bar_time,
+                                             on_bar_time,
+                                             "AUTO_RESTART_ON_NEW_START",
+                                             "slave_auto_closed_previous_window_on_new_start");
                g_wb15_state.active = false;
             }
 
@@ -1636,6 +2121,20 @@ inline void WB15_Slave_OnTimer(const string sym)
 
             // Draw ON marker + type line
             __WB15_DrawSignalMarker(sym, run_id, i, t, true, dir, kind, ns);
+
+            AnalysisLogger_LogBridgeSlave(sym,
+                                          i,
+                                          kind,
+                                          ns,
+                                          dir,
+                                          t,
+                                          on_bar_time,
+                                          iBarShift(sym, PERIOD_M1, on_bar_time, false),
+                                          true,
+                                          on_bar_time,
+                                          0,
+                                          "",
+                                          "slave_received_start_and_activated_window");
          }
          else if(__WB15_IsStopKind(kind))
          {
@@ -1660,7 +2159,25 @@ inline void WB15_Slave_OnTimer(const string sym)
                   }
                }
 
+               datetime off_bar_time_log = 0;
+               if(!__WB15_ResolveM15BarTime(sym, t, off_bar_time_log))
+                  off_bar_time_log = t;
+
                __WB15_DrawSignalMarker(sym, run_id, i, t, false, g_wb15_state.start_dir, 0, 0);
+
+               AnalysisLogger_LogBridgeSlave(sym,
+                                             i,
+                                             kind,
+                                             ns,
+                                             dir,
+                                             t,
+                                             off_bar_time_log,
+                                             iBarShift(sym, PERIOD_M1, off_bar_time_log, false),
+                                             false,
+                                             g_wb15_state.start_bar_time,
+                                             off_bar_time_log,
+                                             AnalysisLogger_SignalKindName(kind),
+                                             "slave_received_stop_and_deactivated_window");
 
                g_wb15_state.active = false;
             }

@@ -1,3 +1,4 @@
+
 #ifndef WAVEBOT_WORLDMANAGER_MQH
 #define WAVEBOT_WORLDMANAGER_MQH
 
@@ -651,3 +652,4 @@ inline void WBWM_ProcessMinorStarterEvents(const MqlRates &rates[],
 }
 
 #endif // WAVEBOT_WORLDMANAGER_MQH
+

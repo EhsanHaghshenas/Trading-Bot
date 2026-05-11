@@ -1,3 +1,4 @@
+
 #ifndef WAVEBOT_TRIGGER_M15_SIGNAL_GATE_MQH
 #define WAVEBOT_TRIGGER_M15_SIGNAL_GATE_MQH
 
@@ -188,3 +189,4 @@ inline void TriggerM15SignalGate_RecordClose(const string    sym,
 }
 
 #endif // WAVEBOT_TRIGGER_M15_SIGNAL_GATE_MQH
+

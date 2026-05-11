@@ -1,3 +1,4 @@
+
 #property strict
 #property description "WaveBot – W2/W3 + Hunter + ExtLQ + SW (Bootstrap Direction Race)"
 
@@ -20,7 +21,7 @@ input Direction         InpDirection           = DIR_DOWN;
 input bool              InpMostRecentOnly      = false;
 input bool              InpUseMonthsAgo        = false;
 input int               InpMonthsAgo           = 40;
-input datetime          InpScanFromDate        = D'2026.01.00 00:00';
+input datetime          InpScanFromDate        = D'2026.01.01 00:00';
 
 // --- ???? ????????? ????? ????? (???? ?????) ---
 input bool              InpRequireCloseBreakAboveW2H1 = true;
@@ -36,10 +37,31 @@ input double            InpTriggerStatementInitialCapital  = 10000.0;
 input double            InpTriggerStatementRiskPercent     = 1.0;
 input string            InpTriggerStatementFileTag         = "WaveBot_TriggerStatement";
 
+// ===== Analysis logger (CSV research package) =====
+input bool              InpAnalysisLogEnabled              = true;
+input bool              InpAnalysisOverrideScanStart       = true;
+input datetime          InpAnalysisStartDate               = D'2026.01.01 00:00';
+input string            InpAnalysisRunTag                  = "RUN_001";
+input string            InpAnalysisCodeVersionTag          = "WaveBot_AnalysisLogger";
+input bool              InpAnalysisResetFilesOnInit        = true;
+input bool              InpAnalysisExportCandles           = true;
+input bool              InpAnalysisLogTradePath            = true;
+input bool              InpAnalysisDebugRawLog             = true;
+
+// ===== Strict trade execution filters (research-backed hard gate) =====
+input bool              InpStrictTradeGateEnabled          = true;
+input bool              InpStrictAllowOnlyFSMSAndHWX       = true;
+input double            InpStrictMinRiskPips               = 3.0;
+input double            InpStrictMaxSpreadRiskRatio        = 0.15;
+input bool              InpStrictAvoidWeakHours            = true;
+input bool              InpStrictNoDuplicateSameContextBar = true;
+input bool              InpStrictPreferType1OnDuplicate    = true;
+
 // ===== Includes (??? ?? Inputs) =====
 #include <WaveBot/Utils.mqh>
 #include <WaveBot/Data.mqh>
 #include <WaveBot/Markers.mqh>
+#include <WaveBot/AnalysisLogger.mqh>
 // NEW: Simple M15->M1 bridge (signals + candle counting)
 #include <WaveBot/WB15_SignalBridge.mqh>
 #include <WaveBot/Trigger.mqh>
@@ -361,6 +383,14 @@ inline void __WB_RunOneMinorSession(const FSMS_SW_MinorSession &s)
 void ResolveWindow(datetime &start, datetime &stop)
 {
    if(InpMostRecentOnly){ start=0; stop=TimeCurrent(); return; }
+
+   if(InpAnalysisLogEnabled && InpAnalysisOverrideScanStart && InpAnalysisStartDate > 0)
+   {
+      start = InpAnalysisStartDate;
+      stop  = TimeCurrent();
+      return;
+   }
+
    start = ResolveScanStart(InpUseMonthsAgo, InpMonthsAgo, InpScanFromDate);
    stop  = TimeCurrent();
 }
@@ -368,6 +398,15 @@ void ResolveWindow(datetime &start, datetime &stop)
 int OnInit()
 {
    g_role = __WB_DetectRole();
+
+   datetime analysis_start = 0;
+   datetime analysis_stop  = 0;
+   ResolveWindow(analysis_start, analysis_stop);
+   AnalysisLogger_Init(InpSymbol,
+                       analysis_start,
+                       analysis_stop,
+                       InpTriggerStatementInitialCapital,
+                       InpTriggerStatementRiskPercent);
 
    // Ensure WorldManager captures clean baselines before any scan starts
    Markers_SetNamespace("MAJ");
@@ -394,6 +433,7 @@ void OnDeinit(const int reason)
    __WB_ApplyHiddenVisualPolicies();
    __WB_DeleteAllM15NumberingObjects();
    __WB_WriteTriggerStatementReport();
+   AnalysisLogger_Finalize();
    Trigger_ResetGlobals();
    TriggerStatement_ResetGlobals();
    EventKillTimer();
@@ -424,6 +464,8 @@ void SB_RunOneShot()
 // --- OnTimer: ??????? ????? + ????? ??? ?? Mode ????? + ????? Minor sessions ---
 void OnTimer()
 {
+   AnalysisLogger_UpdateCandles(InpSymbol);
+
    // M1 keeps listening to the M15 bridge on every timer tick.
    // Local MIN-world execution on the slave is disabled and any old
    // local-minor artifacts are purged from the chart.

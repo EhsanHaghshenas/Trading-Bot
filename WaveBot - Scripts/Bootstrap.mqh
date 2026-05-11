@@ -1,3 +1,4 @@
+
 #ifndef WAVEBOT_BOOTSTRAP_MQH
 #define WAVEBOT_BOOTSTRAP_MQH
 
@@ -419,3 +420,4 @@ BootOutcome Bootstrap_RaceDetect(const string sym, const ENUM_TIMEFRAMES tf,
 }
 
 #endif // WAVEBOT_BOOTSTRAP_MQH
+

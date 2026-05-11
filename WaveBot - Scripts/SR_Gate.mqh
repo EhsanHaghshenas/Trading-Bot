@@ -1,3 +1,4 @@
+
 // WaveBot/SR_Gate.mqh
 #ifndef WAVEBOT_SR_GATE_MQH
 #define WAVEBOT_SR_GATE_MQH
@@ -90,3 +91,4 @@ inline void SR_DeleteAllObjects()
    SR_GoozBaghali_ResetAll();
 }
 #endif // WAVEBOT_SR_GATE_MQH
+

@@ -281,6 +281,36 @@
       "path":"MQL5\\Include\\WaveBot\\TriggerM15SignalGate.mqh",
       "compile":false,
       "relative_to_project":false
+    },
+    {
+      "path":"MQL5\\Include\\WaveBot\\AnalysisLogger.mqh",
+      "compile":false,
+      "relative_to_project":false
+    },
+    {
+      "path":"MQL5\\Include\\WaveBot\\Trigger_Type1.mqh",
+      "compile":false,
+      "relative_to_project":false
+    },
+    {
+      "path":"MQL5\\Include\\WaveBot\\Trigger_Type2.mqh",
+      "compile":false,
+      "relative_to_project":false
+    },
+    {
+      "path":"MQL5\\Include\\WaveBot\\Flip.mqh",
+      "compile":false,
+      "relative_to_project":false
+    },
+    {
+      "path":"MQL5\\Include\\WaveBot\\Majicflip.mqh",
+      "compile":false,
+      "relative_to_project":false
+    },
+    {
+      "path":"MQL5\\Include\\WaveBot\\BalancedTradeGate.mqh",
+      "compile":false,
+      "relative_to_project":false
     }
   ]
 }

@@ -1,3 +1,4 @@
+
 #ifndef WAVEBOT_UTILS_MQH
 #define WAVEBOT_UTILS_MQH
 
@@ -9,3 +10,4 @@ inline bool IsBearish(const MqlRates &r){ return (r.close < r.open); }
 inline string T(datetime t){ return TimeToString(t, TIME_DATE|TIME_MINUTES); }
 
 #endif // WAVEBOT_UTILS_MQH
+

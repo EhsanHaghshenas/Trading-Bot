@@ -1,3 +1,4 @@
+
 #ifndef WAVEBOT_RACECOORDINATOR_MQH
 #define WAVEBOT_RACECOORDINATOR_MQH
 
@@ -1415,3 +1416,4 @@ inline bool Race_CheckActiveRefBreak_Global(const MqlRates &rates[], const int n
 }
 
 #endif // WAVEBOT_RACECOORDINATOR_MQH
+

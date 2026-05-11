@@ -1,3 +1,4 @@
+
 #ifndef WAVEBOT_WAVE2_DOWN_MQH
 #define WAVEBOT_WAVE2_DOWN_MQH
 
@@ -289,3 +290,4 @@ inline bool CheckWave2FromIndex_Hunter_Down_Major(
 }
 
 #endif // WAVEBOT_WAVE2_DOWN_MQH
+
