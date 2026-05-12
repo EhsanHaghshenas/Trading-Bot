@@ -106,12 +106,13 @@ static const int WBLOG_FLUSH_EVERY_ROWS = 250;
 static bool   g_wblog_snapshot_dirty_contexts = false;
 static bool   g_wblog_snapshot_dirty_zones    = false;
 
-// Optional one-shot output scheduler for the M1 chart.
-// When enabled, diagnostic files are not updated continuously. Low-frequency
-// rows are buffered in memory, high-frequency candle/feature/equity/path rows
-// are skipped until the scheduled write. The scheduled write opens the files,
-// writes buffered rows plus snapshot files once, then freezes further output.
+// Deferred output mode for the M1 chart. When enabled, diagnostic files are
+// not updated continuously. Low-frequency rows are buffered in memory,
+// high-frequency candle/feature/equity/path rows are skipped until the final
+// output write. The final write opens the files, writes buffered rows plus
+// snapshot files once, then freezes further output.
 static bool     g_wblog_scheduled_output_enabled = false;
+static bool     g_wblog_final_only_output_enabled = false;
 static datetime g_wblog_scheduled_output_at      = 0;
 static bool     g_wblog_scheduled_output_done    = false;
 static bool     g_wblog_scheduled_output_writing = false;
@@ -227,17 +228,29 @@ inline int WBLOG_FindOpenFile(const string filename)
 
 inline void WBLOG_SetScheduledOutput(const datetime update_at, const bool enabled)
 {
-   g_wblog_scheduled_output_enabled = (enabled && update_at > 0);
-   g_wblog_scheduled_output_at      = (g_wblog_scheduled_output_enabled ? update_at : 0);
-   g_wblog_scheduled_output_done    = false;
-   g_wblog_scheduled_output_writing = false;
+   g_wblog_scheduled_output_enabled  = (enabled && update_at > 0);
+   g_wblog_final_only_output_enabled = false;
+   g_wblog_scheduled_output_at       = (g_wblog_scheduled_output_enabled ? update_at : 0);
+   g_wblog_scheduled_output_done     = false;
+   g_wblog_scheduled_output_writing  = false;
+   ArrayResize(g_wblog_deferred_names, 0);
+   ArrayResize(g_wblog_deferred_rows, 0);
+}
+
+inline void WBLOG_SetFinalOnlyOutput(const bool enabled)
+{
+   g_wblog_scheduled_output_enabled  = false;
+   g_wblog_final_only_output_enabled = enabled;
+   g_wblog_scheduled_output_at       = 0;
+   g_wblog_scheduled_output_done     = false;
+   g_wblog_scheduled_output_writing  = false;
    ArrayResize(g_wblog_deferred_names, 0);
    ArrayResize(g_wblog_deferred_rows, 0);
 }
 
 inline bool WBLOG_ScheduledOutputActive()
 {
-   return g_wblog_scheduled_output_enabled;
+   return (g_wblog_scheduled_output_enabled || g_wblog_final_only_output_enabled);
 }
 
 inline bool WBLOG_ScheduledOutputDone()
@@ -247,12 +260,14 @@ inline bool WBLOG_ScheduledOutputDone()
 
 inline datetime WBLOG_ScheduledOutputAt()
 {
+   if(g_wblog_final_only_output_enabled)
+      return 0;
    return g_wblog_scheduled_output_at;
 }
 
 inline bool WBLOG_OutputCanWriteNow()
 {
-   if(!g_wblog_scheduled_output_enabled)
+   if(!g_wblog_scheduled_output_enabled && !g_wblog_final_only_output_enabled)
       return true;
    return g_wblog_scheduled_output_writing;
 }
@@ -406,7 +421,7 @@ inline bool WBLOG_FlushOpenFileName(const string filename)
 
 inline void WBLOG_WriteLineAppend(const string filename, const string line)
 {
-   if(g_wblog_scheduled_output_enabled && !g_wblog_scheduled_output_writing)
+   if((g_wblog_scheduled_output_enabled || g_wblog_final_only_output_enabled) && !g_wblog_scheduled_output_writing)
    {
       // Before the selected M1 date, avoid disk I/O completely. Keep only
       // low-frequency event rows that cannot be reconstructed from snapshots.
@@ -583,6 +598,10 @@ inline string WBLOG_FileHeader(const string name)
 
 inline void WBLOG_ResetAllFiles()
 {
+   // A clean rebuild must reset candle de-dup cursors as well as file contents.
+   g_wblog_last_m1_candle  = 0;
+   g_wblog_last_m15_candle = 0;
+
    WBLOG_ResetFile("WaveBot_RunConfig.csv", WBLOG_FileHeader("WaveBot_RunConfig.csv"));
    WBLOG_ResetFile("WaveBot_Params.csv", WBLOG_FileHeader("WaveBot_Params.csv"));
    WBLOG_ResetFile("WaveBot_Candles_M15.csv", WBLOG_FileHeader("WaveBot_Candles_M15.csv"));
@@ -611,7 +630,7 @@ inline void WBLOG_ResetAllFiles()
 
 inline void WBLOG_BeginScheduledOutputWrite()
 {
-   if(!g_wblog_scheduled_output_enabled)
+   if(!g_wblog_scheduled_output_enabled && !g_wblog_final_only_output_enabled)
       return;
    if(g_wblog_scheduled_output_done)
       return;
@@ -620,7 +639,7 @@ inline void WBLOG_BeginScheduledOutputWrite()
 
    g_wblog_scheduled_output_writing = true;
 
-   // Create a clean CSV set exactly at the scheduled update point.
+   // Create a clean CSV set exactly at the final/deferred output point.
    WBLOG_ResetAllFiles();
 
    // Replay buffered low-frequency rows accumulated before the scheduled date.
@@ -638,7 +657,7 @@ inline void WBLOG_BeginScheduledOutputWrite()
 
 inline void WBLOG_EndScheduledOutputWrite(const bool mark_done)
 {
-   if(!g_wblog_scheduled_output_enabled)
+   if(!g_wblog_scheduled_output_enabled && !g_wblog_final_only_output_enabled)
       return;
 
    WBLOG_FlushAllOpenFiles();
@@ -768,9 +787,9 @@ inline void WBLOG_Finalize()
    if(!g_wblog_ready)
       return;
 
-   // In one-shot scheduled mode, no extra final write is allowed. The only
-   // output write happens at the selected M1 date. Finalize only closes handles.
-   if(g_wblog_scheduled_output_enabled)
+   // In deferred M1 output mode, no extra final write is allowed here. The only
+   // output write happens at terminal M1 hard stop. Finalize only closes handles.
+   if(g_wblog_scheduled_output_enabled || g_wblog_final_only_output_enabled)
    {
       WBLOG_CloseAllFiles();
       g_wblog_ready = false;
@@ -812,6 +831,7 @@ inline void WBLOG_LogCandleAndFeatures(const string sym,
                                        const int bar_idx)
 {
    if(!g_wblog_ready) return;
+   if(!WBLOG_OutputCanWriteNow()) return;
    if(n <= 0 || bar_idx < 0 || bar_idx >= n) return;
 
    const datetime t = rates[bar_idx].time;

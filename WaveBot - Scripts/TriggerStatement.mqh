@@ -115,9 +115,10 @@ static datetime        g_trgstmt_live_last_write_time = 0;
 static bool            g_trgstmt_live_refresh_context = false;
 static bool            g_trgstmt_bulk_scan_mode       = false;
 
-// Optional one-shot output scheduler. Used from the M1 chart only when the
-// user sets InpM1StatementLogUpdateAt in WaveBot.mq5.
+// Deferred output mode. Scheduled mode can write at a selected time; final-only
+// mode is used by the M1 chart and writes only after terminal hard stop.
 static bool            g_trgstmt_scheduled_output_enabled = false;
+static bool            g_trgstmt_final_only_output_enabled = false;
 static datetime        g_trgstmt_scheduled_output_at      = 0;
 static bool            g_trgstmt_scheduled_output_done    = false;
 static bool            g_trgstmt_scheduled_output_busy    = false;
@@ -170,6 +171,7 @@ inline void TriggerStatement_ResetGlobals()
    g_trgstmt_bulk_scan_mode       = false;
 
    g_trgstmt_scheduled_output_enabled = false;
+   g_trgstmt_final_only_output_enabled = false;
    g_trgstmt_scheduled_output_at      = 0;
    g_trgstmt_scheduled_output_done    = false;
    g_trgstmt_scheduled_output_busy    = false;
@@ -226,15 +228,25 @@ inline void TriggerStatement_LiveConfigure(const string          sym,
 
 inline void TriggerStatement_SetScheduledOutput(const datetime update_at, const bool enabled)
 {
-   g_trgstmt_scheduled_output_enabled = (enabled && update_at > 0);
-   g_trgstmt_scheduled_output_at      = (g_trgstmt_scheduled_output_enabled ? update_at : 0);
-   g_trgstmt_scheduled_output_done    = false;
-   g_trgstmt_scheduled_output_busy    = false;
+   g_trgstmt_scheduled_output_enabled  = (enabled && update_at > 0);
+   g_trgstmt_final_only_output_enabled = false;
+   g_trgstmt_scheduled_output_at       = (g_trgstmt_scheduled_output_enabled ? update_at : 0);
+   g_trgstmt_scheduled_output_done     = false;
+   g_trgstmt_scheduled_output_busy     = false;
+}
+
+inline void TriggerStatement_SetFinalOnlyOutput(const bool enabled)
+{
+   g_trgstmt_scheduled_output_enabled  = false;
+   g_trgstmt_final_only_output_enabled = enabled;
+   g_trgstmt_scheduled_output_at       = 0;
+   g_trgstmt_scheduled_output_done     = false;
+   g_trgstmt_scheduled_output_busy     = false;
 }
 
 inline bool TriggerStatement_ScheduledOutputActive()
 {
-   return g_trgstmt_scheduled_output_enabled;
+   return (g_trgstmt_scheduled_output_enabled || g_trgstmt_final_only_output_enabled);
 }
 
 inline bool TriggerStatement_ScheduledOutputDone()
@@ -249,6 +261,8 @@ inline datetime TriggerStatement_ScheduledOutputAt()
 
 inline bool TriggerStatement_ScheduledOutputMaybeAt(const datetime current_time)
 {
+   if(g_trgstmt_final_only_output_enabled)
+      return false;
    if(!g_trgstmt_scheduled_output_enabled)
       return false;
    if(g_trgstmt_scheduled_output_done)
@@ -307,7 +321,7 @@ inline bool TriggerStatement_LiveRefreshTo(const datetime scan_to)
    if(!g_trgstmt_live_enabled)
       return false;
 
-   if(g_trgstmt_scheduled_output_enabled && !g_trgstmt_scheduled_output_done)
+   if((g_trgstmt_scheduled_output_enabled || g_trgstmt_final_only_output_enabled) && !g_trgstmt_scheduled_output_done)
    {
       datetime scheduled_dirty_time = scan_to;
       if(scheduled_dirty_time <= 0)
@@ -318,7 +332,8 @@ inline bool TriggerStatement_LiveRefreshTo(const datetime scan_to)
          g_trgstmt_live_pending_scan_to = scheduled_dirty_time;
       g_trgstmt_live_dirty = true;
 
-      TriggerStatement_ScheduledOutputMaybeAt(scan_to);
+      if(g_trgstmt_scheduled_output_enabled)
+         TriggerStatement_ScheduledOutputMaybeAt(scan_to);
       return false;
    }
 
@@ -444,10 +459,11 @@ inline void TriggerStatement_OnNewTriggerAt(const datetime trigger_time)
    if(g_trgstmt_live_scan_from > 0 && use_time < g_trgstmt_live_scan_from)
       use_time = g_trgstmt_live_scan_from;
 
-   if(g_trgstmt_scheduled_output_enabled && !g_trgstmt_scheduled_output_done)
+   if((g_trgstmt_scheduled_output_enabled || g_trgstmt_final_only_output_enabled) && !g_trgstmt_scheduled_output_done)
    {
       TriggerStatement_LiveMarkDirty(use_time);
-      TriggerStatement_ScheduledOutputMaybeAt(use_time);
+      if(g_trgstmt_scheduled_output_enabled)
+         TriggerStatement_ScheduledOutputMaybeAt(use_time);
       return;
    }
 

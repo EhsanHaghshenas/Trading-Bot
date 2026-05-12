@@ -191,7 +191,15 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
    datetime effective_start = from_time + (HISTORY_SKIP_BARS * tfsec);
    datetime from_adj = from_time - tfsec*10;
 
-   MqlRates rates[]; int n = LoadRatesRange(sym, tf, from_adj, to_time, rates);
+   datetime __api_stop_time = to_time;
+   if(tf == PERIOD_M1 && Trigger_M1HardStopEnabled())
+   {
+      datetime __hs = Trigger_M1HardStopTime();
+      if(__hs > 0 && (__api_stop_time <= 0 || __api_stop_time > __hs))
+         __api_stop_time = __hs;
+   }
+
+   MqlRates rates[]; int n = LoadRatesRange(sym, tf, from_adj, __api_stop_time, rates);
    if(n<=0)
    {
       if(InpDebugPrints) Print("LoadRatesRange failed");
@@ -246,6 +254,16 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
                g_scan_id = __maj_scan_id;
             }
 
+            if(tf == PERIOD_M1)
+            {
+               if(Trigger_M1HardStopShouldStopBeforeBar(rates[i].time))
+               {
+                  Race_LeaveAPIScan(__api_token);
+                  return pairs;
+               }
+               Trigger_M1HardStopMarkFinalBarIfNeeded(rates[i].time);
+            }
+
             if(Race_CheckActiveRefBreak_Global(rates, n, i))
             {
                Race_LeaveAPIScan(__api_token);
@@ -271,7 +289,7 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
             SR_Mitigator_OnBar_DOWN(rates, n, i);   // NEW
             SR_GoozBaghali_OnBar_DOWN(rates, n, i);
             FSMS_SW_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);   // NEW: parallel guard for FSMS–SW^
-            WBWM_ProcessMinorStarterEvents(rates, n, i, to_time);
+            WBWM_ProcessMinorStarterEvents(rates, n, i, __api_stop_time);
             if(Race_ShouldAllowFSMS())
             {
                FSMS_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);
@@ -307,7 +325,7 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
 
             c1=i; c2=i2; c3=i3; c4=i4; cend=(c4>=0?c4:c3);
 
-            if(rates[c1].time<effective_start || rates[c1].time>to_time)
+            if(rates[c1].time<effective_start || rates[c1].time>__api_stop_time)
             { idx=cend+1; continue; }
 
             string tag_num = IntegerToString(pairs+1);
@@ -349,6 +367,16 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
                g_scan_id = __maj_scan_id;
             }
 
+            if(tf == PERIOD_M1)
+            {
+               if(Trigger_M1HardStopShouldStopBeforeBar(rates[j].time))
+               {
+                  Race_LeaveAPIScan(__api_token);
+                  return pairs;
+               }
+               Trigger_M1HardStopMarkFinalBarIfNeeded(rates[j].time);
+            }
+
             if(Race_CheckActiveRefBreak_Global(rates, n, j))
             {
                Race_LeaveAPIScan(__api_token);
@@ -377,7 +405,7 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
             SB_DN_OnBarCtx(rates, insideHL, n, cend, j);   // ShadowBreaker + temp-c1-sw
             SR_GoozBaghali_OnBar_DOWN(rates, n, j);
             FSMS_SW_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, j);   // NEW: parallel guard for FSMS–SW
-            WBWM_ProcessMinorStarterEvents(rates, n, j, to_time);
+            WBWM_ProcessMinorStarterEvents(rates, n, j, __api_stop_time);
             if(Race_ShouldAllowFSMS())
             {
                FSMS_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, j);

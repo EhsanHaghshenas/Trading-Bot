@@ -804,7 +804,7 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
                   SR_AllowOnly(DIR_DOWN);
                   __Race_ClearRegimeArtifacts();
 
-                  if(__prev_mode==DIR_UP)
+                  if(__prev_mode==DIR_UP && !Trigger_M1HardStopFinalizeRequested())
                      API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, runtime_tf, __from, __to,
                                                            false, 0.0, 0, "", __bump);
                }
@@ -1029,7 +1029,7 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
                   SR_AllowOnly(DIR_UP);
                   __Race_ClearRegimeArtifacts();
 
-                  if(__prev_mode==DIR_DOWN)
+                  if(__prev_mode==DIR_DOWN && !Trigger_M1HardStopFinalizeRequested())
                      API_RunScanSequential_W2W3_Hunter(InpSymbol, runtime_tf, __from, __to,
                                                       false, 0.0, 0, "", __bump);
                }
@@ -1176,6 +1176,9 @@ inline void __Race_LaunchSpecialDirectionScan(const Direction dir,
    const datetime __to   = __Race_ScanToTime(rates, n);
    const bool     __bump = __Race_IsMajorWorld();
    const ENUM_TIMEFRAMES runtime_tf = __Race_RuntimeTF();
+
+   if(Trigger_M1HardStopFinalizeRequested())
+      return;
 
    if(dir == DIR_UP)
       API_RunScanSequential_W2W3_Hunter(InpSymbol, runtime_tf, __from, __to,

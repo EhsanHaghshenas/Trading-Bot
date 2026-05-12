@@ -35,9 +35,6 @@ input bool              InpEnableTriggerStatement          = true;
 input double            InpTriggerStatementInitialCapital  = 10000.0;
 input double            InpTriggerStatementRiskPercent     = 1.0;
 input string            InpTriggerStatementFileTag         = "WaveBot_TriggerStatement";
-// M1-only one-shot Statement/CSV log update time.
-// Set to 1970.01.01 00:00 to keep the normal immediate/final update behavior.
-input datetime          InpM1StatementLogUpdateAt          = D'2026.05.11 00:00';
 
 // ===== Includes (??? ?? Inputs) =====
 #include <WaveBot/Utils.mqh>
@@ -70,6 +67,11 @@ int g_scan_id = 0;
 datetime g_stmt_scan_start = 0;
 datetime g_stmt_scan_stop  = 0;
 bool     g_stmt_window_set = false;
+
+// --- M1 hard end-of-scan stop guard ---
+bool     g_final_outputs_written = false;
+bool     g_m1_scan_hard_stopped  = false;
+datetime g_m1_scan_hard_stop_time = 0;
 
 // --- NEW: Auto Master/Slave role based on chart timeframe (M15=Master, M1=Slave) ---
 enum WBRole { WBROLE_STANDALONE=0, WBROLE_MASTER_M15=1, WBROLE_SLAVE_M1=2 };
@@ -168,13 +170,6 @@ inline bool __WB_ShouldHandleTriggerStatement()
    return ((ENUM_TIMEFRAMES)Period() == PERIOD_M1);
 }
 
-inline bool __WB_UseScheduledM1StatementLogUpdate()
-{
-   if((ENUM_TIMEFRAMES)Period() != PERIOD_M1)
-      return false;
-   return (InpM1StatementLogUpdateAt > 0);
-}
-
 inline void __WB_RememberTriggerStatementWindow(const datetime start,
                                                 const datetime stop)
 {
@@ -183,12 +178,13 @@ inline void __WB_RememberTriggerStatementWindow(const datetime start,
    g_stmt_window_set = true;
 }
 
-inline void __WB_WriteTriggerStatementReport()
+inline void __WB_WriteTriggerStatementReportCore(const datetime fixed_stop,
+                                                const bool     force_even_if_scheduled)
 {
    if(!__WB_ShouldHandleTriggerStatement())
       return;
 
-   if(TriggerStatement_ScheduledOutputActive())
+   if(TriggerStatement_ScheduledOutputActive() && !force_even_if_scheduled)
       return;
 
    datetime stmt_start = 0;
@@ -204,7 +200,13 @@ inline void __WB_WriteTriggerStatementReport()
       ResolveWindow(stmt_start, stmt_stop);
    }
 
-   if(stmt_stop <= 0 || stmt_stop < TimeCurrent())
+   if(fixed_stop > 0)
+      stmt_stop = fixed_stop;
+
+   if(stmt_stop <= 0)
+      stmt_stop = TimeCurrent();
+
+   if(!force_even_if_scheduled && stmt_stop < TimeCurrent())
       stmt_stop = TimeCurrent();
 
    bool stmt_ok = TriggerStatement_WriteTextReport(InpSymbol,
@@ -216,6 +218,147 @@ inline void __WB_WriteTriggerStatementReport()
                                                 InpTriggerStatementFileTag);
    if(stmt_ok)
       TriggerStatement_LiveClearPendingAfterExternalWrite();
+}
+
+inline void __WB_WriteTriggerStatementReport()
+{
+   __WB_WriteTriggerStatementReportCore(0, false);
+}
+
+inline void __WB_WriteTriggerStatementReportFinal(const datetime final_stop)
+{
+   __WB_WriteTriggerStatementReportCore(final_stop, true);
+}
+
+inline datetime __WB_ResolveM1HardStopBoundary(const datetime requested_stop)
+{
+   datetime use_stop = requested_stop;
+   if(use_stop <= 0)
+      use_stop = TimeCurrent();
+
+   // Freeze M1 to the last CLOSED candle. The current forming M1 candle can keep
+   // changing near the live edge and can cause the final-days rescan loop.
+   datetime last_closed_m1 = iTime(InpSymbol, PERIOD_M1, 1);
+   if(last_closed_m1 > 0 && last_closed_m1 < use_stop)
+      use_stop = last_closed_m1;
+
+   if(use_stop <= 0)
+      use_stop = TimeCurrent();
+
+   return use_stop;
+}
+
+inline datetime __WB_M1ExclusiveBoundaryAfterStop(const datetime closed_stop)
+{
+   int tfsec = PeriodSeconds(PERIOD_M1);
+   if(tfsec <= 0)
+      tfsec = 60;
+   if(closed_stop <= 0)
+      return TimeCurrent();
+   return (datetime)(closed_stop + (datetime)tfsec);
+}
+
+inline void __WB_PrimeM1HardStopBoundary(const datetime requested_stop)
+{
+   if(g_role != WBROLE_SLAVE_M1)
+   {
+      Trigger_SetM1HardStop(0, false);
+      return;
+   }
+
+   if(g_m1_scan_hard_stop_time <= 0)
+      g_m1_scan_hard_stop_time = __WB_ResolveM1HardStopBoundary(requested_stop);
+
+   if(g_m1_scan_hard_stop_time > 0)
+      Trigger_SetM1HardStop(g_m1_scan_hard_stop_time, false);
+}
+
+inline bool __WB_FinalScanOutputCompleted()
+{
+   return g_final_outputs_written;
+}
+
+inline void __WB_FlushFinalScanOutputs(const datetime scan_stop)
+{
+   datetime use_stop = scan_stop;
+   if(use_stop <= 0)
+      use_stop = TimeCurrent();
+
+   datetime use_start = g_stmt_scan_start;
+   if(!g_stmt_window_set || use_start <= 0)
+   {
+      datetime tmp_stop = use_stop;
+      ResolveWindow(use_start, tmp_stop);
+   }
+
+   __WB_RememberTriggerStatementWindow(use_start, use_stop);
+
+   if(TriggerStatement_ScheduledOutputActive())
+   {
+      // M1 final-only output mode: rebuild Statement and diagnostic CSV
+      // snapshots once, exactly after the terminal M1 hard stop.
+      WBLOG_BeginScheduledOutputWrite();
+      WBLOG_ExportScheduledCandleSnapshots(InpSymbol, use_start, use_stop);
+      __WB_WriteTriggerStatementReportFinal(use_stop);
+      WBLOG_EndScheduledOutputWrite(TriggerStatement_LastWriteOK());
+   }
+   else
+   {
+      __WB_WriteTriggerStatementReportFinal(use_stop);
+   }
+
+   g_final_outputs_written = true;
+   WBLOG_FlushSnapshotFilesIfDirty();
+   WBLOG_FlushAllOpenFiles();
+}
+
+inline void __WB_HardStopM1AtScanEnd(const datetime scan_stop)
+{
+   if(g_role != WBROLE_SLAVE_M1)
+      return;
+
+   datetime use_stop = scan_stop;
+   if(g_m1_scan_hard_stop_time > 0)
+      use_stop = g_m1_scan_hard_stop_time;
+   else
+      use_stop = __WB_ResolveM1HardStopBoundary(use_stop);
+
+   if(use_stop <= 0)
+      use_stop = TimeCurrent();
+
+   if(g_m1_scan_hard_stopped)
+   {
+      EventKillTimer();
+      return;
+   }
+
+   g_m1_scan_hard_stopped   = true;
+   g_m1_scan_hard_stop_time = use_stop;
+
+   Trigger_FinalizeM1HardStop(use_stop);
+   TriggerStatement_SetBulkScanMode(false);
+
+   if(!__WB_FinalScanOutputCompleted())
+      __WB_FlushFinalScanOutputs(use_stop);
+
+   WBLOG_LogParam("M1HardStop", "true", "M1_SCAN_REACHED_END_OF_CHART");
+   WBLOG_LogParam("M1HardStopTime", WBLOG_Time(use_stop), "WaveBot.mq5");
+   WBLOG_FlushSnapshotFilesIfDirty();
+   WBLOG_FlushAllOpenFiles();
+
+   EventKillTimer();
+
+   if(InpDebugPrints)
+   {
+      Print("[WB-M1-HARD-STOP] Historical M1 scan reached final scan boundary @ ",
+            TimeToString(use_stop, TIME_DATE|TIME_SECONDS),
+            ". Timer killed and EA removal requested after final Statement/Log flush.");
+   }
+
+   if((bool)MQLInfoInteger(MQL_TESTER))
+      TesterStop();
+   else
+      ExpertRemove();
 }
 
 inline void __WB_EnsureLiveTriggerStatementFile()
@@ -239,10 +382,9 @@ inline void __WB_EnsureLiveTriggerStatementFile()
    if(initial_cutoff <= 0)
       initial_cutoff = (datetime)1;
 
-   if(TriggerStatement_ScheduledOutputActive())
-      TriggerStatement_LiveMarkDirty(initial_cutoff);
-   else
-      TriggerStatement_LiveRefreshTo(initial_cutoff);
+   // Do not write the Statement at initialization. On M1 the full Statement
+   // and CSV diagnostics are rebuilt once after the terminal hard stop.
+   TriggerStatement_LiveMarkDirty(initial_cutoff);
 }
 // ============================================================================
 // Minor session runner (Phase-1: Minor inside Major)
@@ -392,8 +534,8 @@ int OnInit()
    datetime __wblog_scan_to   = 0;
    ResolveWindow(__wblog_scan_from, __wblog_scan_to);
 
-   bool __m1_scheduled_output = __WB_UseScheduledM1StatementLogUpdate();
-   WBLOG_SetScheduledOutput(InpM1StatementLogUpdateAt, __m1_scheduled_output);
+   bool __m1_final_only_output = ((ENUM_TIMEFRAMES)Period() == PERIOD_M1);
+   WBLOG_SetFinalOnlyOutput(__m1_final_only_output);
 
    WBLOG_Initialize(InpSymbol,
                     PERIOD_M15,
@@ -418,7 +560,6 @@ int OnInit()
    WBLOG_LogParam("InpEnableTriggerStatement", (InpEnableTriggerStatement ? "true" : "false"), "input");
    WBLOG_LogParam("InpTriggerStatementInitialCapital", DoubleToString(InpTriggerStatementInitialCapital, 2), "input");
    WBLOG_LogParam("InpTriggerStatementRiskPercent", DoubleToString(InpTriggerStatementRiskPercent, 4), "input");
-   WBLOG_LogParam("InpM1StatementLogUpdateAt", WBLOG_Time(InpM1StatementLogUpdateAt), "input");
    WBLOG_LogParam("TRGSL_MAX_RISK_PIPS", "25.0", "TriggerSLTP.mqh");
    WBLOG_LogParam("TRGSL_R_MULTIPLE", "3.0", "TriggerSLTP.mqh");
 
@@ -427,10 +568,14 @@ int OnInit()
    WBWM_Init();
    Trigger_ResetGlobals();
    TriggerStatement_ResetGlobals();
-   TriggerStatement_SetScheduledOutput(InpM1StatementLogUpdateAt, __m1_scheduled_output);
+   TriggerStatement_SetFinalOnlyOutput(__m1_final_only_output);
    g_stmt_scan_start = 0;
    g_stmt_scan_stop  = 0;
    g_stmt_window_set = false;
+   g_final_outputs_written = false;
+   g_m1_scan_hard_stopped = false;
+   g_m1_scan_hard_stop_time = 0;
+   Trigger_SetM1HardStop(0, false);
    __WB_ApplyHiddenVisualPolicies();
    __WB_DeleteAllM15NumberingObjects();
    __WB_EnsureLiveTriggerStatementFile();
@@ -447,8 +592,13 @@ void OnDeinit(const int reason)
 {
    __WB_ApplyHiddenVisualPolicies();
    __WB_DeleteAllM15NumberingObjects();
-   if(!TriggerStatement_ScheduledOutputActive())
-      __WB_WriteTriggerStatementReport();
+   if(!__WB_FinalScanOutputCompleted())
+   {
+      datetime final_stop = g_stmt_scan_stop;
+      if(final_stop <= 0)
+         final_stop = TimeCurrent();
+      __WB_FlushFinalScanOutputs(final_stop);
+   }
    WBLOG_Finalize();
    Trigger_ResetGlobals();
    TriggerStatement_ResetGlobals();
@@ -480,6 +630,12 @@ void SB_RunOneShot()
 // --- OnTimer: ??????? ????? + ????? ??? ?? Mode ????? + ????? Minor sessions ---
 void OnTimer()
 {
+   if(g_role == WBROLE_SLAVE_M1 && g_m1_scan_hard_stopped)
+   {
+      EventKillTimer();
+      return;
+   }
+
    // M1 keeps listening to the M15 bridge on every timer tick.
    // Local MIN-world execution on the slave is disabled and any old
    // local-minor artifacts are purged from the chart.
@@ -487,6 +643,17 @@ void OnTimer()
    {
       WB15_Slave_OnTimer(InpSymbol);
       __WB_DeleteAllM15NumberingObjects();
+
+      if(Trigger_M1HardStopFinalizeRequested())
+      {
+         datetime requested_stop = Trigger_M1HardStopFinalizeTime();
+         if(requested_stop <= 0)
+            requested_stop = g_m1_scan_hard_stop_time;
+         if(requested_stop <= 0)
+            requested_stop = TimeCurrent();
+         __WB_HardStopM1AtScanEnd(requested_stop);
+         return;
+      }
    }
 
    // Major namespace (default world)
@@ -498,10 +665,21 @@ void OnTimer()
    // trigger -> trade evaluation fully synchronized with the normal wave scan.
    if(g_once)
    {
+      if(g_role == WBROLE_SLAVE_M1)
+      {
+         datetime final_stop = g_m1_scan_hard_stop_time;
+         if(final_stop <= 0)
+            final_stop = g_stmt_scan_stop;
+         __WB_PrimeM1HardStopBoundary(final_stop);
+         final_stop = g_m1_scan_hard_stop_time;
+         if(final_stop <= 0)
+            final_stop = TimeCurrent();
+         __WB_HardStopM1AtScanEnd(final_stop);
+         return;
+      }
+
       Trigger_OnTimer(InpSymbol);
-      if(TriggerStatement_ScheduledOutputActive())
-         TriggerStatement_ScheduledOutputMaybeAt(TimeCurrent());
-      else
+      if(!TriggerStatement_ScheduledOutputActive())
          TriggerStatement_LiveFlushPendingIfDue(30);
       return;
    }
@@ -517,8 +695,30 @@ void OnTimer()
    if(g_role == WBROLE_MASTER_M15)
       WB15_MasterBegin(InpSymbol);
 
+   datetime master_scan_end = 0;
+   int      master_done_seq = 0;
+   if(g_role == WBROLE_SLAVE_M1)
+   {
+      // Do not start the terminal M1 historical pass until the M15 master has
+      // published all M15->M1 bridge events and its final scan boundary.
+      if(!WB15_MasterDoneInfo(InpSymbol, master_scan_end, master_done_seq))
+      {
+         if(InpDebugPrints)
+            Print("[WB-M1] Waiting for M15 master DONE marker before terminal M1 historical scan.");
+         return;
+      }
+   }
+
    datetime start=0, stop=0;
    ResolveWindow(start, stop);
+   if(g_role == WBROLE_SLAVE_M1 && master_scan_end > 0 && master_scan_end < stop)
+      stop = master_scan_end;
+   if(g_role == WBROLE_SLAVE_M1)
+   {
+      __WB_PrimeM1HardStopBoundary(stop);
+      if(g_m1_scan_hard_stop_time > 0)
+         stop = g_m1_scan_hard_stop_time;
+   }
    __WB_RememberTriggerStatementWindow(start, stop);
 
    // Bulk historical pass: avoid rebuilding the full Statement after each
@@ -560,15 +760,25 @@ void OnTimer()
 
    TriggerStatement_SetBulkScanMode(false);
 
-   if(TriggerStatement_ScheduledOutputActive())
-      TriggerStatement_ScheduledOutputMaybeAt(stop);
-   else
+   if(g_role == WBROLE_MASTER_M15)
+      WB15_MasterEnd(InpSymbol, stop);
+
+   if(g_role == WBROLE_SLAVE_M1)
    {
-      __WB_WriteTriggerStatementReport();
-      WBLOG_FlushSnapshotFilesIfDirty();
-      WBLOG_FlushAllOpenFiles();
+      __WB_PrimeM1HardStopBoundary(stop);
+      if(Trigger_M1HardStopFinalizeRequested() && Trigger_M1HardStopFinalizeTime() > 0)
+         stop = Trigger_M1HardStopFinalizeTime();
+      else
+      if(g_m1_scan_hard_stop_time > 0)
+         stop = g_m1_scan_hard_stop_time;
+
+      g_once = true;  // فقط یک‌بار اسکن کامل در هر اجرای EA
+      __WB_HardStopM1AtScanEnd(stop);
+      return;
    }
 
-   g_once=true;  // فقط یک‌بار اسکن کامل در هر اجرای EA
+   __WB_FlushFinalScanOutputs(stop);
+
+   g_once = true;  // فقط یک‌بار اسکن کامل در هر اجرای EA
 }
 

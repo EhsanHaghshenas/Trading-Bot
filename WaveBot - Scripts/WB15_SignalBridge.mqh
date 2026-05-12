@@ -254,8 +254,61 @@ inline void WB15_MasterBegin(const string sym)
    const double run_id = (double)TimeCurrent();
    GlobalVariableSet(__WB15_Key(sym, "RUN"), run_id);
    GlobalVariableSet(__WB15_Key(sym, "SEQ"), 0.0);
+   GlobalVariableSet(__WB15_Key(sym, "DONE"), 0.0);
+   GlobalVariableSet(__WB15_Key(sym, "DONE_SEQ"), 0.0);
+   GlobalVariableSet(__WB15_Key(sym, "SCAN_END"), 0.0);
 
    __WB15_StageResetAll();
+}
+
+inline void WB15_MasterEnd(const string sym, const datetime scan_end_time)
+{
+   if(!__WB15_IsMaster()) return;
+
+   datetime use_end = scan_end_time;
+   if(use_end <= 0)
+      use_end = TimeCurrent();
+
+   int seq = 0;
+   const string kSeq = __WB15_Key(sym, "SEQ");
+   if(GlobalVariableCheck(kSeq))
+      seq = (int)GlobalVariableGet(kSeq);
+
+   GlobalVariableSet(__WB15_Key(sym, "SCAN_END"), (double)use_end);
+   GlobalVariableSet(__WB15_Key(sym, "DONE_SEQ"), (double)seq);
+   GlobalVariableSet(__WB15_Key(sym, "DONE"), 1.0);
+}
+
+inline bool WB15_MasterDoneInfo(const string sym, datetime &scan_end_time, int &done_seq)
+{
+   scan_end_time = 0;
+   done_seq = 0;
+
+   const string kDone = __WB15_Key(sym, "DONE");
+   if(!GlobalVariableCheck(kDone))
+      return false;
+
+   if(GlobalVariableGet(kDone) < 0.5)
+      return false;
+
+   const string kEnd = __WB15_Key(sym, "SCAN_END");
+   if(GlobalVariableCheck(kEnd))
+      scan_end_time = (datetime)GlobalVariableGet(kEnd);
+
+   const string kDoneSeq = __WB15_Key(sym, "DONE_SEQ");
+   if(GlobalVariableCheck(kDoneSeq))
+      done_seq = (int)GlobalVariableGet(kDoneSeq);
+   else
+   {
+      const string kSeq2 = __WB15_Key(sym, "SEQ");
+      if(GlobalVariableCheck(kSeq2))
+         done_seq = (int)GlobalVariableGet(kSeq2);
+   }
+
+   if(scan_end_time <= 0)
+      scan_end_time = TimeCurrent();
+
+   return true;
 }
 
 inline void WB15_MasterPushEvent(const string sym,

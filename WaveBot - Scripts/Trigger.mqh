@@ -90,6 +90,15 @@ static datetime          g_trigger_pending_refresh_time = 0;
 static int               g_trigger_apply_next_event = 0;
 static datetime          g_trigger_apply_last_time  = 0;
 
+// Hard terminal boundary for the historical M1 scan.
+// When WaveBot.mq5 finishes the one-shot M1 pass, live timer processing must not
+// rewind into the last few days and rescan already-processed candles.
+static bool              g_trigger_m1_hard_stop_enabled    = false;
+static datetime          g_trigger_m1_hard_stop_time       = 0;
+static bool              g_trigger_m1_terminal_stop_mode   = false;
+static bool              g_trigger_m1_finalize_requested   = false;
+static datetime          g_trigger_m1_finalize_time        = 0;
+
 // Public functions implemented by Trigger_Type1.mqh / Trigger_Type2.mqh.
 void Trigger_Type1_ResetGlobals();
 bool Trigger_Type1_ProcessUP(const MqlRates &rates[], const int n, const int bar_idx, const datetime from_time, const datetime to_time);
@@ -97,6 +106,169 @@ bool Trigger_Type1_ProcessDOWN(const MqlRates &rates[], const int n, const int b
 void Trigger_Type2_ResetGlobals();
 bool Trigger_Type2_ProcessUP(const MqlRates &rates[], const int n, const int bar_idx, const datetime from_time, const datetime to_time);
 bool Trigger_Type2_ProcessDOWN(const MqlRates &rates[], const int n, const int bar_idx, const datetime from_time, const datetime to_time);
+
+inline void Trigger_SetM1HardStop(const datetime stop_time, const bool terminal_stop_mode)
+{
+   if(stop_time > 0)
+   {
+      g_trigger_m1_hard_stop_enabled  = true;
+      g_trigger_m1_hard_stop_time     = stop_time;
+      g_trigger_m1_terminal_stop_mode = terminal_stop_mode;
+
+      if(!terminal_stop_mode)
+      {
+         g_trigger_m1_finalize_requested = false;
+         g_trigger_m1_finalize_time      = 0;
+      }
+   }
+   else
+   {
+      g_trigger_m1_hard_stop_enabled     = false;
+      g_trigger_m1_hard_stop_time        = 0;
+      g_trigger_m1_terminal_stop_mode    = false;
+      g_trigger_m1_finalize_requested    = false;
+      g_trigger_m1_finalize_time         = 0;
+   }
+}
+
+inline bool Trigger_M1HardStopEnabled()
+{
+   return g_trigger_m1_hard_stop_enabled;
+}
+
+inline datetime Trigger_M1HardStopTime()
+{
+   return g_trigger_m1_hard_stop_time;
+}
+
+inline bool Trigger_M1TerminalStopMode()
+{
+   return g_trigger_m1_terminal_stop_mode;
+}
+
+inline bool Trigger_M1HardStopFinalizeRequested()
+{
+   return g_trigger_m1_finalize_requested;
+}
+
+inline datetime Trigger_M1HardStopFinalizeTime()
+{
+   return g_trigger_m1_finalize_time;
+}
+
+inline bool __TRG_M1HardStopBeyondAllowed(const datetime t)
+{
+   if(!g_trigger_m1_hard_stop_enabled)
+      return false;
+   if(g_trigger_m1_hard_stop_time <= 0)
+      return false;
+   if(t <= 0)
+      return false;
+
+   // The configured stop time is the last M1 candle that is allowed to be
+   // processed. Only bars AFTER it are blocked before processing.
+   return (t > g_trigger_m1_hard_stop_time);
+}
+
+inline bool __TRG_M1HardStopFinalBarReached(const datetime t)
+{
+   if(!g_trigger_m1_hard_stop_enabled)
+      return false;
+   if(g_trigger_m1_hard_stop_time <= 0)
+      return false;
+   if(t <= 0)
+      return false;
+
+   return (t >= g_trigger_m1_hard_stop_time);
+}
+
+inline bool Trigger_M1HardStopReached(const datetime t)
+{
+   return __TRG_M1HardStopBeyondAllowed(t);
+}
+
+inline void Trigger_RequestM1HardStopFinalize(const datetime reached_time)
+{
+   if(!g_trigger_m1_hard_stop_enabled)
+      return;
+   if(g_trigger_m1_hard_stop_time <= 0)
+      return;
+
+   datetime use_time = reached_time;
+   if(use_time <= 0 || use_time > g_trigger_m1_hard_stop_time)
+      use_time = g_trigger_m1_hard_stop_time;
+
+   g_trigger_m1_finalize_requested = true;
+   g_trigger_m1_finalize_time      = use_time;
+}
+
+inline bool Trigger_M1HardStopShouldStopBeforeBar(const datetime t)
+{
+   if(g_trigger_m1_terminal_stop_mode)
+      return true;
+
+   if(g_trigger_m1_finalize_requested)
+      return true;
+
+   if(__TRG_M1HardStopBeyondAllowed(t))
+   {
+      Trigger_RequestM1HardStopFinalize(g_trigger_m1_hard_stop_time);
+      return true;
+   }
+
+   return false;
+}
+
+inline void Trigger_M1HardStopMarkFinalBarIfNeeded(const datetime t)
+{
+   if(g_trigger_m1_terminal_stop_mode)
+      return;
+
+   if(__TRG_M1HardStopFinalBarReached(t))
+      Trigger_RequestM1HardStopFinalize(t);
+}
+
+inline bool __TRG_M1HardStopBlocksProcessing(const datetime t)
+{
+   if(!g_trigger_m1_hard_stop_enabled)
+      return false;
+
+   // Terminal mode is enabled only after the first complete historical M1 pass.
+   // From that moment, even older bars must not be accepted again; otherwise a
+   // timer/backfill call can jump back several days and duplicate statement trades.
+   if(g_trigger_m1_terminal_stop_mode)
+      return true;
+
+   return __TRG_M1HardStopBeyondAllowed(t);
+}
+
+inline void Trigger_FinalizeM1HardStop(const datetime stop_time)
+{
+   Trigger_SetM1HardStop(stop_time, true);
+
+   if(stop_time <= 0)
+      return;
+
+   g_trigger_m1_finalize_requested = true;
+   g_trigger_m1_finalize_time      = stop_time;
+
+   // Final hard stop means no historical or live replay may create another M1
+   // trigger. Close the imported window locally and advance the bridge cursor
+   // to the current event count so old bridge events cannot reopen it.
+   g_trigger_core.active                = false;
+   g_trigger_core.active_start_seq      = -1;
+   g_trigger_core.active_start_kind     = 0;
+   g_trigger_core.active_start_ns       = WB15_NS_NONE;
+   g_trigger_core.active_dir            = DIR_UP;
+   g_trigger_core.active_start_time     = 0;
+   g_trigger_core.active_start_bar_time = 0;
+   g_trigger_core.active_context_id     = 0;
+   g_trigger_core.active_zone_id        = 0;
+   g_trigger_core.active_m1_window_id   = 0;
+   g_trigger_apply_next_event           = ArraySize(g_trigger_events);
+   g_trigger_apply_last_time            = stop_time;
+   g_trigger_pending_refresh_time       = 0;
+}
 
 // ----------------------------------------------------------------------------
 // Worker / bridge helpers
@@ -232,6 +404,9 @@ inline void Trigger_ResetGlobals()
    g_trigger_pending_refresh_time = 0;
    g_trigger_apply_next_event = 0;
    g_trigger_apply_last_time  = 0;
+   g_trigger_m1_hard_stop_enabled  = false;
+   g_trigger_m1_hard_stop_time     = 0;
+   g_trigger_m1_terminal_stop_mode = false;
 
    Trigger_Type1_ResetGlobals();
    Trigger_Type2_ResetGlobals();
@@ -835,6 +1010,11 @@ inline void __TRG_ProcessLoadedBar(const string    sym,
 
    const datetime bar_time = rates[bar_idx].time;
    if(bar_time <= 0) return;
+   if(__TRG_M1HardStopBlocksProcessing(bar_time))
+   {
+      TriggerStatement_ScheduledOutputMaybeAt(bar_time);
+      return;
+   }
 
    if(!force_reprocess &&
       g_trigger_core.last_processed_time > 0 &&
@@ -906,6 +1086,12 @@ inline void Trigger_OnTimer(const string sym)
    if(!__TRG_IsMajorWorld()) return;
    if(sym == "") return;
 
+   if(g_trigger_m1_hard_stop_enabled)
+   {
+      TriggerStatement_ScheduledOutputMaybeAt(g_trigger_m1_hard_stop_time);
+      return;
+   }
+
    if(!__TRG_RebuildBridgeEvents(sym))
       return;
 
@@ -973,6 +1159,7 @@ inline void Trigger_OnBarCandidate(const string    sym,
 
    const datetime bar_time = rates[bar_idx].time;
    if(bar_time <= 0) return;
+   if(__TRG_M1HardStopBlocksProcessing(bar_time)) return;
 
    int previous_bridge_seq = g_trigger_core.bridge_seq;
    if(!__TRG_RebuildBridgeEvents(sym))
