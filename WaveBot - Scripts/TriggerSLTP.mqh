@@ -1,10 +1,9 @@
-
 #ifndef WAVEBOT_TRIGGER_SLTP_MQH
 #define WAVEBOT_TRIGGER_SLTP_MQH
 
 #include <WaveBot/Types.mqh>
 #include <WaveBot/Markers.mqh>
-#include <WaveBot/AnalysisLogger.mqh>
+#include <WaveBot/WaveBotLogger.mqh>
 
 #define TRGSL_MAX_RISK_PIPS 25.0
 #define TRGSL_R_MULTIPLE    3.0
@@ -30,11 +29,12 @@ struct TriggerSLTPRecord
    double    risk_price;
    double    risk_pips;
 
-   int       context_seq;
-   int       context_kind;
-   int       context_ns;
-   datetime  context_start_time;
-   datetime  context_start_bar_time;
+   // Diagnostic lineage IDs only. These fields do not affect SL/TP logic.
+   int       log_context_id;
+   int       log_zone_id;
+   int       log_m1_window_id;
+   int       log_start_kind;
+   int       log_start_ns;
 };
 
 static TriggerSLTPRecord g_trgsl_records[];
@@ -57,11 +57,11 @@ inline void __TRGSL_ClearRecord(TriggerSLTPRecord &rec)
    rec.tp_level       = 0.0;
    rec.risk_price     = 0.0;
    rec.risk_pips      = 0.0;
-   rec.context_seq    = -1;
-   rec.context_kind   = 0;
-   rec.context_ns     = 0;
-   rec.context_start_time     = 0;
-   rec.context_start_bar_time = 0;
+   rec.log_context_id   = 0;
+   rec.log_zone_id      = 0;
+   rec.log_m1_window_id = 0;
+   rec.log_start_kind   = 0;
+   rec.log_start_ns     = 0;
 }
 
 inline void TriggerSLTP_ResetGlobals()
@@ -192,21 +192,15 @@ inline bool __TRGSL_BuildBull(const string    sym,
    if(hit_idx < 0 || hit_idx >= n)
       return false;
 
-   int from = src_idx;
-   int to   = hit_idx;
-   if(from > to)
-   {
-      int tmp = from;
-      from = to;
-      to   = tmp;
-   }
+   // New Flip/MajicFlip SL rule:
+   // Bullish trigger => SL below the Low of the same Flip/MajicFlip candle.
+   double buffer = __TRGSL_PointOf(sym);
+   if(buffer <= 0.0)
+      buffer = _Point;
+   if(buffer <= 0.0)
+      buffer = 0.00000001;
 
-   double sl = rates[from].low;
-   for(int i = from + 1; i <= to; ++i)
-   {
-      if(rates[i].low < sl)
-         sl = rates[i].low;
-   }
+   double sl = rates[hit_idx].low - buffer;
 
    double risk = (level - sl);
    if(risk <= 0.0)
@@ -249,21 +243,15 @@ inline bool __TRGSL_BuildBear(const string    sym,
    if(hit_idx < 0 || hit_idx >= n)
       return false;
 
-   int from = src_idx;
-   int to   = hit_idx;
-   if(from > to)
-   {
-      int tmp = from;
-      from = to;
-      to   = tmp;
-   }
+   // New Flip/MajicFlip SL rule:
+   // Bearish trigger => SL above the High of the same Flip/MajicFlip candle.
+   double buffer = __TRGSL_PointOf(sym);
+   if(buffer <= 0.0)
+      buffer = _Point;
+   if(buffer <= 0.0)
+      buffer = 0.00000001;
 
-   double sl = rates[from].high;
-   for(int i = from + 1; i <= to; ++i)
-   {
-      if(rates[i].high > sl)
-         sl = rates[i].high;
-   }
+   double sl = rates[hit_idx].high + buffer;
 
    double risk = (sl - level);
    if(risk <= 0.0)
@@ -313,6 +301,29 @@ inline void TriggerSLTP_OnTriggerFired(const string    sym,
 
    if(!ok)
    {
+      double approx_risk_pips = 0.0;
+      if(hit_idx >= 0 && hit_idx < n)
+      {
+         if(dir == DIR_UP)
+            approx_risk_pips = __TRGSL_ToPips(use_sym, MathAbs(level - rates[hit_idx].low));
+         else
+            approx_risk_pips = __TRGSL_ToPips(use_sym, MathAbs(rates[hit_idx].high - level));
+
+         WBLOG_LogRejectedTrigger(type_id,
+                                  dir,
+                                  rates[hit_idx].time,
+                                  hit_idx,
+                                  rates[hit_idx].open,
+                                  rates[hit_idx].high,
+                                  rates[hit_idx].low,
+                                  rates[hit_idx].close,
+                                  "risk_gt_25pip_or_bad_flip_candle_range",
+                                  approx_risk_pips,
+                                  0.0,
+                                  0.0,
+                                  "TriggerSLTP_OnTriggerFired_rejected");
+      }
+
       if(InpDebugPrints)
       {
          Print("[TRG-SLTP] Skip invalid ",
@@ -320,32 +331,16 @@ inline void TriggerSLTP_OnTriggerFired(const string    sym,
                " trigger | breakout=", DoubleToString(level, __TRGSL_DigitsOf(use_sym)),
                " | src_idx=", src_idx,
                " | hit_idx=", hit_idx,
-               " | reason=risk>25pip_or_bad_range");
-      }
-
-      if(hit_idx >= 0 && hit_idx < n)
-      {
-         AnalysisLogger_LogRejectedTrigger(use_sym,
-                                           dir,
-                                           type_id,
-                                           hit_idx,
-                                           rates[hit_idx].time,
-                                           rates[hit_idx].open,
-                                           rates[hit_idx].high,
-                                           rates[hit_idx].low,
-                                           rates[hit_idx].close,
-                                           level,
-                                           "INVALID_SLTP_OR_RISK_TOO_HIGH",
-                                           "TriggerSLTP_OnTriggerFired rejected candidate");
+               " | reason=risk>25pip_or_bad_flip_candle_range");
       }
       return;
    }
 
-   rec.context_seq            = AnalysisLogger_CurrentContextSeq();
-   rec.context_kind           = AnalysisLogger_CurrentContextKind();
-   rec.context_ns             = AnalysisLogger_CurrentContextNS();
-   rec.context_start_time     = AnalysisLogger_CurrentContextStartTime();
-   rec.context_start_bar_time = AnalysisLogger_CurrentContextStartBar();
+   rec.log_context_id   = WBLOG_CurrentContextId();
+   rec.log_zone_id      = WBLOG_CurrentZoneId();
+   rec.log_m1_window_id = WBLOG_CurrentWindowId();
+   rec.log_start_kind   = WBLOG_CurrentStartKind();
+   rec.log_start_ns     = WBLOG_CurrentStartNS();
 
    if(dir == DIR_UP)
    {
@@ -360,26 +355,23 @@ inline void TriggerSLTP_OnTriggerFired(const string    sym,
 
    __TRGSL_StoreRecord(rec);
 
-   if(hit_idx >= 0 && hit_idx < n)
+   if(rec.hit_idx >= 0 && rec.hit_idx < n)
    {
-      AnalysisLogger_LogM1Trigger(use_sym,
-                                  dir,
-                                  type_id,
-                                  rec.serial,
-                                  hit_idx,
-                                  rec.hit_time,
-                                  rates[hit_idx].open,
-                                  rates[hit_idx].high,
-                                  rates[hit_idx].low,
-                                  rates[hit_idx].close,
-                                  rec.breakout_level,
-                                  rec.sl_level,
-                                  rec.tp_level,
-                                  rec.risk_pips,
-                                  true,
-                                  true,
-                                  "",
-                                  "valid_sltp_trigger_stored");
+      WBLOG_LogM1TriggerFinal(use_sym,
+                              rec.serial,
+                              rec.type_id,
+                              rec.dir,
+                              rec.hit_time,
+                              rec.hit_idx,
+                              rates[rec.hit_idx].open,
+                              rates[rec.hit_idx].high,
+                              rates[rec.hit_idx].low,
+                              rates[rec.hit_idx].close,
+                              rec.breakout_level,
+                              rec.sl_level,
+                              rec.tp_level,
+                              rec.risk_pips,
+                              rec.serial);
    }
 
    const string dir_tag = (dir == DIR_UP ? "U" : "D");
@@ -408,4 +400,3 @@ inline void TriggerSLTP_OnTriggerFired(const string    sym,
 }
 
 #endif // WAVEBOT_TRIGGER_SLTP_MQH
-

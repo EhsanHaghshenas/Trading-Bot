@@ -1,4 +1,3 @@
-
 #ifndef WAVEBOT_FSMS_SW_MQH
 #define WAVEBOT_FSMS_SW_MQH
 
@@ -42,6 +41,21 @@ static double g_C1_W3_Minor_U_Value = 0.0;   // High C1_W3_Minor_U آخرین ج
 // برای روند نزولی: Low(C1) ذخیره می‌شود
 static double g_C1_W2_Minor_D_Value = 0.0;   // Low C1_W2_Minor_D آخرین جفت
 static double g_C1_W3_Minor_D_Value = 0.0;   // Low C1_W3_Minor_D آخرین جفت
+
+// Fast cache for HWX/HWBB marker lookup used by FSMS-SW invalidation.
+// The old implementation scanned every chart object on every candle while
+// FSMS-SW was active. With many drawn markers this is the exact visible stall
+// the user observed around FSMS candles.
+static datetime g_fsms_sw_hw_marker_latest_time = 0;
+static int      g_fsms_sw_hw_marker_last_total  = -1;
+static string   g_fsms_sw_hw_marker_last_prefix = "";
+
+inline void __FSMS_SW_ResetHWMarkerLookupCache()
+{
+   g_fsms_sw_hw_marker_latest_time = 0;
+   g_fsms_sw_hw_marker_last_total  = -1;
+   g_fsms_sw_hw_marker_last_prefix = "";
+}
 
 inline bool __FSMS_SW_ShouldRunMinorWorldOnThisChart()
 {
@@ -104,6 +118,18 @@ struct __SW_OppCtx
    bool     prelock_active;
    int      prelock_idx;
    double   prelock_level;
+
+   // Performance cache: repeated Wave3 scans after FSMS are expensive and
+   // the result is stable for the same startIdx/history tail.
+   int      w3_cache_start_idx;
+   int      w3_cache_n;
+   datetime w3_cache_last_time;
+   bool     w3_cache_ready;
+   bool     w3_cache_ok;
+   int      w3_cache_k2;
+   int      w3_cache_k3;
+   int      w3_cache_k4;
+   int      w3_cache_end;
 };
 
 inline void __SW_ResetOppCtx(__SW_OppCtx &S)
@@ -116,11 +142,124 @@ inline void __SW_ResetOppCtx(__SW_OppCtx &S)
    S.bodyBreakLevel=0.0; S.breakAchieved=false; S.bodyBreakIdx=-1;
    S.postBreak_c1_lock=false; S.postBreak_c1_ref=-1;
    S.prelock_active=false; S.prelock_idx=-1; S.prelock_level=0.0;
+
+   S.w3_cache_start_idx = -1;
+   S.w3_cache_n         = -1;
+   S.w3_cache_last_time = 0;
+   S.w3_cache_ready     = false;
+   S.w3_cache_ok        = false;
+   S.w3_cache_k2        = -1;
+   S.w3_cache_k3        = -1;
+   S.w3_cache_k4        = -1;
+   S.w3_cache_end       = -1;
+}
+
+inline void __SW_W3CacheClear(__SW_OppCtx &S)
+{
+   S.w3_cache_start_idx = -1;
+   S.w3_cache_n         = -1;
+   S.w3_cache_last_time = 0;
+   S.w3_cache_ready     = false;
+   S.w3_cache_ok        = false;
+   S.w3_cache_k2        = -1;
+   S.w3_cache_k3        = -1;
+   S.w3_cache_k4        = -1;
+   S.w3_cache_end       = -1;
+}
+
+inline bool __SW_W3CacheMatches(const __SW_OppCtx &S,
+                                const MqlRates &rates[],
+                                const int n,
+                                const int startIdx)
+{
+   if(!S.w3_cache_ready) return false;
+   if(S.w3_cache_start_idx != startIdx) return false;
+   if(S.w3_cache_n != n) return false;
+   if(n <= 0) return false;
+   if(S.w3_cache_last_time != rates[n-1].time) return false;
+   return true;
+}
+
+inline void __SW_W3CacheStore(__SW_OppCtx &S,
+                              const MqlRates &rates[],
+                              const int n,
+                              const int startIdx,
+                              const bool ok,
+                              const int k2,
+                              const int k3,
+                              const int k4,
+                              const int end_idx)
+{
+   S.w3_cache_start_idx = startIdx;
+   S.w3_cache_n         = n;
+   S.w3_cache_last_time = (n > 0 ? rates[n-1].time : 0);
+   S.w3_cache_ready     = true;
+   S.w3_cache_ok        = ok;
+   S.w3_cache_k2        = k2;
+   S.w3_cache_k3        = k3;
+   S.w3_cache_k4        = k4;
+   S.w3_cache_end       = end_idx;
+}
+
+inline bool __SW_CheckWave3DownCached(__SW_OppCtx &S,
+                                      const MqlRates &rates[],
+                                      const bool &insideHL[],
+                                      const double &bodyLowEff[],
+                                      const double &bodyHighEff[],
+                                      const int n,
+                                      const int startIdx,
+                                      int &k2, int &k3, int &k4, int &w3e)
+{
+   if(__SW_W3CacheMatches(S, rates, n, startIdx))
+   {
+      k2  = S.w3_cache_k2;
+      k3  = S.w3_cache_k3;
+      k4  = S.w3_cache_k4;
+      w3e = S.w3_cache_end;
+      return S.w3_cache_ok;
+   }
+
+   bool ok = CheckWave3CountOnly_Local_Down(rates, insideHL, bodyLowEff, bodyHighEff, n, startIdx, k2, k3, k4, w3e);
+   __SW_W3CacheStore(S, rates, n, startIdx, ok, k2, k3, k4, w3e);
+   return ok;
+}
+
+inline bool __SW_CheckWave3UpCached(__SW_OppCtx &S,
+                                    const MqlRates &rates[],
+                                    const bool &insideHL[],
+                                    const double &bodyLowEff[],
+                                    const double &bodyHighEff[],
+                                    const int n,
+                                    const int startIdx,
+                                    int &k2, int &k3, int &k4, int &w3e)
+{
+   if(__SW_W3CacheMatches(S, rates, n, startIdx))
+   {
+      k2  = S.w3_cache_k2;
+      k3  = S.w3_cache_k3;
+      k4  = S.w3_cache_k4;
+      w3e = S.w3_cache_end;
+      return S.w3_cache_ok;
+   }
+
+   bool ok = CheckWave3CountOnly_Local(rates, insideHL, bodyLowEff, bodyHighEff, n, startIdx, k2, k3, k4, w3e);
+   __SW_W3CacheStore(S, rates, n, startIdx, ok, k2, k3, k4, w3e);
+   return ok;
 }
 
 // دو زمینه: بعد از FSMS_U باید «DOWN دوم» را پایش کنیم؛ بعد از FSMS_D باید «UP دوم» را پایش کنیم
 static __SW_OppCtx g_sw_guard_after_u;  // scan: DOWN
 static __SW_OppCtx g_sw_guard_after_d;  // scan: UP
+
+// Cached HW/HWBB object scans while FSMS-SW is active.
+static datetime g_sw_hwscan_up_seed    = 0;
+static int      g_sw_hwscan_up_total   = -1;
+static string   g_sw_hwscan_up_prefix  = "";
+static bool     g_sw_hwscan_up_result  = false;
+static datetime g_sw_hwscan_dn_seed    = 0;
+static int      g_sw_hwscan_dn_total   = -1;
+static string   g_sw_hwscan_dn_prefix  = "";
+static bool     g_sw_hwscan_dn_result  = false;
 
 inline void __SW_ResetAllGuards(){ __SW_ResetOppCtx(g_sw_guard_after_u); __SW_ResetOppCtx(g_sw_guard_after_d); }
 
@@ -1018,35 +1157,76 @@ inline void FSMS_SW_ConvertFSMS_D_ToMinor(const MqlRates &rates[], const int n)
 
 inline int __SW_FindIndexAtOrAfter(const MqlRates &rates[], const int n, const datetime t)
 {
-   for(int i=0;i<n;++i) if(rates[i].time>=t) return i;
-   return n; // not found ⇒ انتهای آرایه
+   if(n <= 0) return 0;
+   int lo = 0;
+   int hi = n - 1;
+   int ans = n;
+
+   while(lo <= hi)
+   {
+      int mid = (lo + hi) / 2;
+      if(rates[mid].time >= t)
+      {
+         ans = mid;
+         hi = mid - 1;
+      }
+      else
+      {
+         lo = mid + 1;
+      }
+   }
+
+   return ans;
 }
 
 // ابطال با HW/HWBB از روی مارکرهای همین اسکن
 inline bool __SW_ShouldDisarmOnHWMarkersSince(const datetime seed_time)
 {
-   if(seed_time<=0) return false;
-   const string p   = __ScanPrefix();
-   const int    plen= StringLen(p);
-   for(int oi=ObjectsTotal(0)-1; oi>=0; --oi)
+   if(seed_time <= 0) return false;
+
+   datetime wb15_hw_time = WB15_LastHWXHWBBStageTime();
+   if(wb15_hw_time > g_fsms_sw_hw_marker_latest_time)
+      g_fsms_sw_hw_marker_latest_time = wb15_hw_time;
+
+   // If a previous lookup or the WB15 event cache already found an HW/HWBB
+   // after this seed, no chart object traversal is needed anymore.
+   if(g_fsms_sw_hw_marker_latest_time >= seed_time)
+      return true;
+
+   const string p    = __ScanPrefix();
+   const int    total = ObjectsTotal(0);
+
+   // No object count / namespace change since the previous lookup means there
+   // cannot be a new HWX/HWBB marker to invalidate this FSMS-SW seed.
+   if(total == g_fsms_sw_hw_marker_last_total && p == g_fsms_sw_hw_marker_last_prefix)
+      return false;
+
+   g_fsms_sw_hw_marker_last_total  = total;
+   g_fsms_sw_hw_marker_last_prefix = p;
+
+   const int plen = StringLen(p);
+   datetime latest = g_fsms_sw_hw_marker_latest_time;
+
+   for(int oi = total - 1; oi >= 0; --oi)
    {
-      string on = ObjectName(0,oi);
-      if(on=="" || StringLen(on)<plen) continue;
-      if(StringSubstr(on,0,plen)!=p)   continue;
+      string on = ObjectName(0, oi);
+      if(on == "" || StringLen(on) < plen) continue;
+      if(StringSubstr(on, 0, plen) != p) continue;
 
       string tail = StringSubstr(on, plen);
-
-      bool isHWX   = (StringFind(tail,"HW_")==0    && StringFind(tail,"_X")>=0);
-      bool isHWBB  = (StringFind(tail,"HWBB_U_")==0 || StringFind(tail,"HWBB_D_")==0);
+      bool isHWX  = (StringFind(tail, "HW_") == 0 && StringFind(tail, "_X") >= 0);
+      bool isHWBB = (StringFind(tail, "HWBB_U_") == 0 || StringFind(tail, "HWBB_D_") == 0);
       if(!isHWX && !isHWBB) continue;
 
-      // فقط روی مارکرهای عمودی (VLINE) زمان را بخوان
-      if((ENUM_OBJECT)ObjectGetInteger(0,on,OBJPROP_TYPE) != OBJ_VLINE) continue;
+      if((ENUM_OBJECT)ObjectGetInteger(0, on, OBJPROP_TYPE) != OBJ_VLINE) continue;
 
-      datetime t = (datetime)ObjectGetInteger(0,on,OBJPROP_TIME);
-      if(t >= seed_time) return true;
+      datetime t = (datetime)ObjectGetInteger(0, on, OBJPROP_TIME);
+      if(t > latest)
+         latest = t;
    }
-   return false;
+
+   g_fsms_sw_hw_marker_latest_time = latest;
+   return (latest >= seed_time);
 }
 
 inline void __SW_Disarm_UP()
@@ -1083,6 +1263,15 @@ inline void FSMS_SW_DisarmAll()
    g_fsms_sw_dn_w3_c1_idx = -1;
 
    __SW_ResetAllGuards();
+
+   g_sw_hwscan_up_seed = 0;
+   g_sw_hwscan_up_total = -1;
+   g_sw_hwscan_up_prefix = "";
+   g_sw_hwscan_up_result = false;
+   g_sw_hwscan_dn_seed = 0;
+   g_sw_hwscan_dn_total = -1;
+   g_sw_hwscan_dn_prefix = "";
+   g_sw_hwscan_dn_result = false;
 }
 
 // ---------- فعال‌سازی بذر پس از فایر FSMS ----------
@@ -1107,6 +1296,10 @@ inline void FSMS_SW_UP_ActivateSeed(const MqlRates &rates[], const int n,
    // نگهبان: از همین لحظه مراقب «جفت DOWN بعد از FSMS» باش
    __SW_ResetOppCtx(g_sw_guard_after_u);
    g_sw_guard_after_u.active = true;
+   g_sw_hwscan_up_seed = 0;
+   g_sw_hwscan_up_total = -1;
+   g_sw_hwscan_up_prefix = "";
+   g_sw_hwscan_up_result = false;
 
    if(InpDebugPrints)
       Print("[FSMS–SW-UP] Seed armed | C1=", T(rates[sameDirC1_Index].time),
@@ -1134,6 +1327,10 @@ inline void FSMS_SW_DN_ActivateSeed(const MqlRates &rates[], const int n,
 
    __SW_ResetOppCtx(g_sw_guard_after_d);
    g_sw_guard_after_d.active = true;
+   g_sw_hwscan_dn_seed = 0;
+   g_sw_hwscan_dn_total = -1;
+   g_sw_hwscan_dn_prefix = "";
+   g_sw_hwscan_dn_result = false;
 
    if(InpDebugPrints)
       Print("[FSMS–SW-DOWN] Seed armed | C1=", T(rates[sameDirC1_Index].time),
@@ -1272,6 +1469,8 @@ inline void __SW_Scan_DN_After_FSMS_U(const MqlRates &rates[], const bool &insid
 
             S.postBreak_c1_lock=false; S.postBreak_c1_ref=-1;
 
+            __SW_W3CacheClear(S);
+
             S.idx=S.cend; S.state=__SW_OP_WAIT_CONFIRM;
             S.prelock_active=false;
             found=true; break;
@@ -1343,7 +1542,7 @@ inline void __SW_Scan_DN_After_FSMS_U(const MqlRates &rates[], const bool &insid
             if(!S.have_w3 && startIdx>=0 && !insideHL[startIdx])
             {
                int a2=-1,a3=-1,a4=-1,w3e=-1;
-               if(CheckWave3CountOnly_Local_Down(rates,insideHL,bodyLowEff,bodyHighEff,n,startIdx,a2,a3,a4,w3e))
+               if(__SW_CheckWave3DownCached(S,rates,insideHL,bodyLowEff,bodyHighEff,n,startIdx,a2,a3,a4,w3e))
                { S.have_w3=true; if(S.w3_c1<0) S.w3_c1=startIdx; S.k2=a2; S.k3=a3; S.k4=a4; S.w3_end=w3e; }
             }
 
@@ -1457,6 +1656,8 @@ inline void __SW_Scan_UP_After_FSMS_D(const MqlRates &rates[], const bool &insid
 
             S.postBreak_c1_lock=false; S.postBreak_c1_ref=-1;
 
+            __SW_W3CacheClear(S);
+
             S.idx=S.cend; S.state=__SW_OP_WAIT_CONFIRM;
             S.prelock_active=false;
             found=true; break;
@@ -1528,7 +1729,7 @@ inline void __SW_Scan_UP_After_FSMS_D(const MqlRates &rates[], const bool &insid
             if(!S.have_w3 && startIdx>=0 && !insideHL[startIdx])
             {
                int a2=-1,a3=-1,a4=-1,w3e=-1;
-               if(CheckWave3CountOnly_Local(rates,insideHL,bodyLowEff,bodyHighEff,n,startIdx,a2,a3,a4,w3e))
+               if(__SW_CheckWave3UpCached(S,rates,insideHL,bodyLowEff,bodyHighEff,n,startIdx,a2,a3,a4,w3e))
                { S.have_w3=true; if(S.w3_c1<0) S.w3_c1=startIdx; S.k2=a2; S.k3=a3; S.k4=a4; S.w3_end=w3e; }
             }
 
@@ -2001,6 +2202,7 @@ inline void FSMS_SW_ResetGlobals()
 {
    // ریست Seedها و نگهبان موازی طبق منطق فعلی
    FSMS_SW_DisarmAll();        // g_fsms_sw_*_active/c1/level/seed_time و گاردها
+   __FSMS_SW_ResetHWMarkerLookupCache();
 
    // ریست کامل لاگ و مینور استارتر / آُف
    FSMS_SW_MinorLog_Reset();
@@ -2053,4 +2255,3 @@ inline void FSMS_SW_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
 }
 
 #endif // WAVEBOT_FSMS_SW_MQH
-

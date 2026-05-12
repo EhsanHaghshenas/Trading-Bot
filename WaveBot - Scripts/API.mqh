@@ -1,4 +1,3 @@
-
 #ifndef WAVEBOT_API_MQH
 #define WAVEBOT_API_MQH
 
@@ -274,27 +273,17 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
             FSMS_SW_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);   // NEW: parallel guard for FSMS–SW
             WBWM_ProcessMinorStarterEvents(rates, n, i, to_time);
             if(Race_ShouldAllowFSMS())
+            {
                FSMS_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);
+            }
             WB15_MasterOnM15Bar(sym, rates, n, i);
             if(insideHL[i]) continue;
             
             bool __reanched = false;
             if(!C1W2_UP_ShouldAllowAt(rates, i, __reanched))
             {
-               ExtLQ_OnBar(rates[i]);
-               HW_BB_UP_OnBar(rates[i], rates, n, i);
-               if(Race_ConsumeAbortAPIScan(__api_token))
-               {
-                  Race_LeaveAPIScan(__api_token);
-                  return pairs;
-               }
-               SR_Mitigator_OnBar_UP(rates, n, i);
-               SR_GoozBaghali_OnBar_UP(rates, n, i);
-               FSMS_SW_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);   // NEW
-               WBWM_ProcessMinorStarterEvents(rates, n, i, to_time);
-               if(Race_ShouldAllowFSMS())
-                  FSMS_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);
-               WB15_MasterOnM15Bar(sym, rates, n, i);
+               // Side-effect modules for this bar were already updated above.
+               // Avoid running FSMS/FSMS-SW/WB15 twice on the same candle.
                continue;
             }
             // ????: C1W2 ??? ??? ??? ?? ??? ???? ???? ???? FSMS ?? ?? ?? ??? ????????.
@@ -393,7 +382,9 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
             FSMS_SW_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, j);   // NEW: parallel guard for FSMS–SW
             WBWM_ProcessMinorStarterEvents(rates, n, j, to_time);
             if(Race_ShouldAllowFSMS())
+            {
                FSMS_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, j);
+            }
             WB15_MasterOnM15Bar(sym, rates, n, j);
             
             // --- NEW: Chain invalidation after ShadowBreaker (UP) -----------------
@@ -655,4 +646,3 @@ void API_ShowMostRecent_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf, 
 }
 
 #endif // WAVEBOT_API_MQH
-

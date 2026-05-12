@@ -1,4 +1,3 @@
-
 #ifndef WAVEBOT_WAVE2_MQH
 #define WAVEBOT_WAVE2_MQH
 
@@ -79,4 +78,3 @@ bool CheckWave2FromIndex_Hunter(const MqlRates &rates[],
 }
 
 #endif // WAVEBOT_WAVE2_MQH
-

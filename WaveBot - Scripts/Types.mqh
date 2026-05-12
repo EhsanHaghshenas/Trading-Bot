@@ -1,4 +1,3 @@
-
 #ifndef WAVEBOT_TYPES_MQH
 #define WAVEBOT_TYPES_MQH
 
@@ -21,4 +20,3 @@ enum Direction
 };
 
 #endif // WAVEBOT_TYPES_MQH
-

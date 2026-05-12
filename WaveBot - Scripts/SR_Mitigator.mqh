@@ -1,4 +1,3 @@
-
 // WaveBot/SR_Mitigator.mqh
 
 // WaveBot/SR_Mitigator.mqh
@@ -1162,4 +1161,3 @@ inline void SR_Mitigator_OnBar_DOWN(const MqlRates &rates[], const int n, const 
 }
 
 #endif // WAVEBOT_SR_MITIGATOR_MQH
-

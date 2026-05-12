@@ -1,4 +1,3 @@
-
 #ifndef WAVEBOT_EXTLQ_MQH
 #define WAVEBOT_EXTLQ_MQH
 #include <WaveBot/Markers.mqh>
@@ -267,4 +266,3 @@ inline bool ExtLQ_PromotePrevToCurrent()
 }
 
 #endif // WAVEBOT_EXTLQ_MQH
-

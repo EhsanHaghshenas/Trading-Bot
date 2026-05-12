@@ -1,4 +1,3 @@
-
 #property strict
 #property description "WaveBot – W2/W3 + Hunter + ExtLQ + SW (Bootstrap Direction Race)"
 
@@ -21,7 +20,7 @@ input Direction         InpDirection           = DIR_DOWN;
 input bool              InpMostRecentOnly      = false;
 input bool              InpUseMonthsAgo        = false;
 input int               InpMonthsAgo           = 40;
-input datetime          InpScanFromDate        = D'2026.01.01 00:00';
+input datetime          InpScanFromDate        = D'2026.01.00 00:00';
 
 // --- ???? ????????? ????? ????? (???? ?????) ---
 input bool              InpRequireCloseBreakAboveW2H1 = true;
@@ -36,32 +35,15 @@ input bool              InpEnableTriggerStatement          = true;
 input double            InpTriggerStatementInitialCapital  = 10000.0;
 input double            InpTriggerStatementRiskPercent     = 1.0;
 input string            InpTriggerStatementFileTag         = "WaveBot_TriggerStatement";
-
-// ===== Analysis logger (CSV research package) =====
-input bool              InpAnalysisLogEnabled              = true;
-input bool              InpAnalysisOverrideScanStart       = true;
-input datetime          InpAnalysisStartDate               = D'2026.01.01 00:00';
-input string            InpAnalysisRunTag                  = "RUN_001";
-input string            InpAnalysisCodeVersionTag          = "WaveBot_AnalysisLogger";
-input bool              InpAnalysisResetFilesOnInit        = true;
-input bool              InpAnalysisExportCandles           = true;
-input bool              InpAnalysisLogTradePath            = true;
-input bool              InpAnalysisDebugRawLog             = true;
-
-// ===== Strict trade execution filters (research-backed hard gate) =====
-input bool              InpStrictTradeGateEnabled          = true;
-input bool              InpStrictAllowOnlyFSMSAndHWX       = true;
-input double            InpStrictMinRiskPips               = 3.0;
-input double            InpStrictMaxSpreadRiskRatio        = 0.15;
-input bool              InpStrictAvoidWeakHours            = true;
-input bool              InpStrictNoDuplicateSameContextBar = true;
-input bool              InpStrictPreferType1OnDuplicate    = true;
+// M1-only one-shot Statement/CSV log update time.
+// Set to 1970.01.01 00:00 to keep the normal immediate/final update behavior.
+input datetime          InpM1StatementLogUpdateAt          = D'2026.05.11 00:00';
 
 // ===== Includes (??? ?? Inputs) =====
 #include <WaveBot/Utils.mqh>
 #include <WaveBot/Data.mqh>
 #include <WaveBot/Markers.mqh>
-#include <WaveBot/AnalysisLogger.mqh>
+#include <WaveBot/WaveBotLogger.mqh>
 // NEW: Simple M15->M1 bridge (signals + candle counting)
 #include <WaveBot/WB15_SignalBridge.mqh>
 #include <WaveBot/Trigger.mqh>
@@ -186,6 +168,13 @@ inline bool __WB_ShouldHandleTriggerStatement()
    return ((ENUM_TIMEFRAMES)Period() == PERIOD_M1);
 }
 
+inline bool __WB_UseScheduledM1StatementLogUpdate()
+{
+   if((ENUM_TIMEFRAMES)Period() != PERIOD_M1)
+      return false;
+   return (InpM1StatementLogUpdateAt > 0);
+}
+
 inline void __WB_RememberTriggerStatementWindow(const datetime start,
                                                 const datetime stop)
 {
@@ -197,6 +186,9 @@ inline void __WB_RememberTriggerStatementWindow(const datetime start,
 inline void __WB_WriteTriggerStatementReport()
 {
    if(!__WB_ShouldHandleTriggerStatement())
+      return;
+
+   if(TriggerStatement_ScheduledOutputActive())
       return;
 
    datetime stmt_start = 0;
@@ -215,13 +207,15 @@ inline void __WB_WriteTriggerStatementReport()
    if(stmt_stop <= 0 || stmt_stop < TimeCurrent())
       stmt_stop = TimeCurrent();
 
-   TriggerStatement_WriteTextReport(InpSymbol,
-                                    (ENUM_TIMEFRAMES)Period(),
-                                    stmt_start,
-                                    stmt_stop,
-                                    InpTriggerStatementInitialCapital,
-                                    InpTriggerStatementRiskPercent,
-                                    InpTriggerStatementFileTag);
+   bool stmt_ok = TriggerStatement_WriteTextReport(InpSymbol,
+                                                (ENUM_TIMEFRAMES)Period(),
+                                                stmt_start,
+                                                stmt_stop,
+                                                InpTriggerStatementInitialCapital,
+                                                InpTriggerStatementRiskPercent,
+                                                InpTriggerStatementFileTag);
+   if(stmt_ok)
+      TriggerStatement_LiveClearPendingAfterExternalWrite();
 }
 
 inline void __WB_EnsureLiveTriggerStatementFile()
@@ -245,7 +239,10 @@ inline void __WB_EnsureLiveTriggerStatementFile()
    if(initial_cutoff <= 0)
       initial_cutoff = (datetime)1;
 
-   TriggerStatement_LiveRefreshTo(initial_cutoff);
+   if(TriggerStatement_ScheduledOutputActive())
+      TriggerStatement_LiveMarkDirty(initial_cutoff);
+   else
+      TriggerStatement_LiveRefreshTo(initial_cutoff);
 }
 // ============================================================================
 // Minor session runner (Phase-1: Minor inside Major)
@@ -383,14 +380,6 @@ inline void __WB_RunOneMinorSession(const FSMS_SW_MinorSession &s)
 void ResolveWindow(datetime &start, datetime &stop)
 {
    if(InpMostRecentOnly){ start=0; stop=TimeCurrent(); return; }
-
-   if(InpAnalysisLogEnabled && InpAnalysisOverrideScanStart && InpAnalysisStartDate > 0)
-   {
-      start = InpAnalysisStartDate;
-      stop  = TimeCurrent();
-      return;
-   }
-
    start = ResolveScanStart(InpUseMonthsAgo, InpMonthsAgo, InpScanFromDate);
    stop  = TimeCurrent();
 }
@@ -399,20 +388,46 @@ int OnInit()
 {
    g_role = __WB_DetectRole();
 
-   datetime analysis_start = 0;
-   datetime analysis_stop  = 0;
-   ResolveWindow(analysis_start, analysis_stop);
-   AnalysisLogger_Init(InpSymbol,
-                       analysis_start,
-                       analysis_stop,
-                       InpTriggerStatementInitialCapital,
-                       InpTriggerStatementRiskPercent);
+   datetime __wblog_scan_from = 0;
+   datetime __wblog_scan_to   = 0;
+   ResolveWindow(__wblog_scan_from, __wblog_scan_to);
+
+   bool __m1_scheduled_output = __WB_UseScheduledM1StatementLogUpdate();
+   WBLOG_SetScheduledOutput(InpM1StatementLogUpdateAt, __m1_scheduled_output);
+
+   WBLOG_Initialize(InpSymbol,
+                    PERIOD_M15,
+                    PERIOD_M1,
+                    __wblog_scan_from,
+                    __wblog_scan_to,
+                    InpTriggerStatementInitialCapital,
+                    InpTriggerStatementRiskPercent,
+                    (InpDirection == DIR_UP ? "DIR_UP" : "DIR_DOWN"),
+                    "WaveBot_160_M15_ThreeStage_FlipMajic_DiagnosticLogger",
+                    (g_role == WBROLE_MASTER_M15 || g_role == WBROLE_STANDALONE));
+
+   WBLOG_LogParam("InpSymbol", InpSymbol, "input");
+   WBLOG_LogParam("InpTF", IntegerToString((int)InpTF), "input");
+   WBLOG_LogParam("InpLookbackBars", IntegerToString(InpLookbackBars), "input");
+   WBLOG_LogParam("InpMaxBarsInWave", IntegerToString(InpMaxBarsInWave), "input");
+   WBLOG_LogParam("InpDirection", (InpDirection == DIR_UP ? "DIR_UP" : "DIR_DOWN"), "input");
+   WBLOG_LogParam("InpMostRecentOnly", (InpMostRecentOnly ? "true" : "false"), "input");
+   WBLOG_LogParam("InpUseMonthsAgo", (InpUseMonthsAgo ? "true" : "false"), "input");
+   WBLOG_LogParam("InpMonthsAgo", IntegerToString(InpMonthsAgo), "input");
+   WBLOG_LogParam("InpScanFromDate", WBLOG_Time(InpScanFromDate), "input");
+   WBLOG_LogParam("InpEnableTriggerStatement", (InpEnableTriggerStatement ? "true" : "false"), "input");
+   WBLOG_LogParam("InpTriggerStatementInitialCapital", DoubleToString(InpTriggerStatementInitialCapital, 2), "input");
+   WBLOG_LogParam("InpTriggerStatementRiskPercent", DoubleToString(InpTriggerStatementRiskPercent, 4), "input");
+   WBLOG_LogParam("InpM1StatementLogUpdateAt", WBLOG_Time(InpM1StatementLogUpdateAt), "input");
+   WBLOG_LogParam("TRGSL_MAX_RISK_PIPS", "25.0", "TriggerSLTP.mqh");
+   WBLOG_LogParam("TRGSL_R_MULTIPLE", "3.0", "TriggerSLTP.mqh");
 
    // Ensure WorldManager captures clean baselines before any scan starts
    Markers_SetNamespace("MAJ");
    WBWM_Init();
    Trigger_ResetGlobals();
    TriggerStatement_ResetGlobals();
+   TriggerStatement_SetScheduledOutput(InpM1StatementLogUpdateAt, __m1_scheduled_output);
    g_stmt_scan_start = 0;
    g_stmt_scan_stop  = 0;
    g_stmt_window_set = false;
@@ -432,8 +447,9 @@ void OnDeinit(const int reason)
 {
    __WB_ApplyHiddenVisualPolicies();
    __WB_DeleteAllM15NumberingObjects();
-   __WB_WriteTriggerStatementReport();
-   AnalysisLogger_Finalize();
+   if(!TriggerStatement_ScheduledOutputActive())
+      __WB_WriteTriggerStatementReport();
+   WBLOG_Finalize();
    Trigger_ResetGlobals();
    TriggerStatement_ResetGlobals();
    EventKillTimer();
@@ -464,8 +480,6 @@ void SB_RunOneShot()
 // --- OnTimer: ??????? ????? + ????? ??? ?? Mode ????? + ????? Minor sessions ---
 void OnTimer()
 {
-   AnalysisLogger_UpdateCandles(InpSymbol);
-
    // M1 keeps listening to the M15 bridge on every timer tick.
    // Local MIN-world execution on the slave is disabled and any old
    // local-minor artifacts are purged from the chart.
@@ -485,6 +499,10 @@ void OnTimer()
    if(g_once)
    {
       Trigger_OnTimer(InpSymbol);
+      if(TriggerStatement_ScheduledOutputActive())
+         TriggerStatement_ScheduledOutputMaybeAt(TimeCurrent());
+      else
+         TriggerStatement_LiveFlushPendingIfDue(30);
       return;
    }
 
@@ -502,6 +520,11 @@ void OnTimer()
    datetime start=0, stop=0;
    ResolveWindow(start, stop);
    __WB_RememberTriggerStatementWindow(start, stop);
+
+   // Bulk historical pass: avoid rebuilding the full Statement after each
+   // trigger. The complete final Statement is written immediately after this
+   // scan finishes; live mode keeps immediate refresh behavior.
+   TriggerStatement_SetBulkScanMode(true);
 
    ENUM_TIMEFRAMES tf = __WB_EffectiveTF();
 
@@ -535,7 +558,16 @@ void OnTimer()
    else
       API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, tf, resume_from, stop);
 
-   __WB_WriteTriggerStatementReport();
+   TriggerStatement_SetBulkScanMode(false);
+
+   if(TriggerStatement_ScheduledOutputActive())
+      TriggerStatement_ScheduledOutputMaybeAt(stop);
+   else
+   {
+      __WB_WriteTriggerStatementReport();
+      WBLOG_FlushSnapshotFilesIfDirty();
+      WBLOG_FlushAllOpenFiles();
+   }
 
    g_once=true;  // فقط یک‌بار اسکن کامل در هر اجرای EA
 }

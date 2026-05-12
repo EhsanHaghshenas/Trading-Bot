@@ -1,4 +1,3 @@
-
 #ifndef WAVEBOT_EXTLQ_DOWN_MQH
 #define WAVEBOT_EXTLQ_DOWN_MQH
 #include <WaveBot/Markers.mqh>
@@ -249,4 +248,3 @@ inline bool ExtLQ_Down_PromotePrevToCurrent()
 }
 
 #endif // WAVEBOT_EXTLQ_DOWN_MQH
-

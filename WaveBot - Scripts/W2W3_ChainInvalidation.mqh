@@ -1,4 +1,3 @@
-
 // WaveBot/W2W3_ChainInvalidation.mqh
 #ifndef WAVEBOT_W2W3_CHAININVALIDATION_MQH
 #define WAVEBOT_W2W3_CHAININVALIDATION_MQH
@@ -66,4 +65,3 @@ inline bool ChainInv_PreBody_WickWindow_DN_OnBar(
 }
 
 #endif // WAVEBOT_W2W3_CHAININVALIDATION_MQH
-

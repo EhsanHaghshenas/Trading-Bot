@@ -1,411 +1,241 @@
-
 #ifndef WAVEBOT_TRIGGER_TYPE2_MQH
 #define WAVEBOT_TRIGGER_TYPE2_MQH
 
 // ============================================================================
 // Dedicated search engine for Trigger Type-2
+// New definition: every valid MajicFlip candle from Majicflip.mqh is Trigger
+// Type-2. The engine is evaluated on every worker candle while an imported M15
+// signal window is active. It never uses the old phase-based FSM.
+//
+// Performance note:
+// The previous version re-ran __MFlip_Build* for up to InpMaxBarsInWave mother
+// candidates on every M1 bar. Each builder rescanned the same inside-candle run.
+// The fast builders below preserve the exact MajicFlip rules and nearest-mother
+// priority, but check the inside envelope incrementally in one backward pass.
 // ============================================================================
 
-inline int __TRG2_BullHandlePhase4Break(const MqlRates &rates[],
-                                        const int       n,
-                                        const int       bar_idx)
+static int g_trg2_mflip_up_draw_count = 0;
+static int g_trg2_mflip_dn_draw_count = 0;
+
+inline int __TRG2_BackScanLimitBars()
 {
-   if(bar_idx < 0 || bar_idx >= n)
-      return TRG_PHASE_NONE;
-
-   const MqlRates bar = rates[bar_idx];
-
-   g_trigger_type2.phase              = TRG_PHASE_4;
-   g_trigger_type2.phase4_level       = bar.low;
-   g_trigger_type2.phase4_idx         = bar_idx;
-   g_trigger_type2.phase4_break2_seen = true;
-   __TRG_ClearPhase2Build(g_trigger_type2);
-
-   __TRG_DrawPhaseLabel(TRG_ENGINE_TYPE2, bar, TRG_PHASE_4);
-
-   if(g_trigger_type2.phase3_idx >= 0 &&
-      __TRG_TouchHigh(bar.high, g_trigger_type2.phase3_level) &&
-      __TRG_BullSameBarTriggerAllowed(bar))
-   {
-      __TRG_FireTrigger(TRG_ENGINE_TYPE2,
-                        g_trigger_type2.phase3_idx,
-                        g_trigger_type2.phase3_level,
-                        bar_idx,
-                        rates,
-                        n);
-      return TRG_PHASE_4;
-   }
-
-   g_trigger_type2.phase = TRG_PHASE_5;
-   return TRG_PHASE_4;
+   int limit = InpMaxBarsInWave;
+   if(limit <= 0)
+      limit = 1000;
+   if(limit < 10)
+      limit = 10;
+   return limit;
 }
 
-inline int __TRG2_BearHandlePhase4Break(const MqlRates &rates[],
-                                        const int       n,
-                                        const int       bar_idx)
+inline void Trigger_Type2_ResetGlobals()
 {
-   if(bar_idx < 0 || bar_idx >= n)
-      return TRG_PHASE_NONE;
-
-   const MqlRates bar = rates[bar_idx];
-
-   g_trigger_type2.phase              = TRG_PHASE_4;
-   g_trigger_type2.phase4_level       = bar.high;
-   g_trigger_type2.phase4_idx         = bar_idx;
-   g_trigger_type2.phase4_break2_seen = true;
-   __TRG_ClearPhase2Build(g_trigger_type2);
-
-   __TRG_DrawPhaseLabel(TRG_ENGINE_TYPE2, bar, TRG_PHASE_4);
-
-   if(g_trigger_type2.phase3_idx >= 0 &&
-      __TRG_TouchLow(bar.low, g_trigger_type2.phase3_level) &&
-      __TRG_BearSameBarTriggerAllowed(bar))
-   {
-      __TRG_FireTrigger(TRG_ENGINE_TYPE2,
-                        g_trigger_type2.phase3_idx,
-                        g_trigger_type2.phase3_level,
-                        bar_idx,
-                        rates,
-                        n);
-      return TRG_PHASE_4;
-   }
-
-   g_trigger_type2.phase = TRG_PHASE_5;
-   return TRG_PHASE_4;
+   g_trg2_mflip_up_draw_count = 0;
+   g_trg2_mflip_dn_draw_count = 0;
+   MajicFlip_ResetGlobals();
 }
 
-inline int __TRG2_ProcessBull(const MqlRates &rates[],
-                              const int       n,
-                              const int       bar_idx)
+inline bool __TRG2_DrawAndFireUP(const MajicFlipZone &z,
+                                 const MqlRates &rates[],
+                                 const int n)
 {
-   if(bar_idx < 0 || bar_idx >= n) return TRG_PHASE_NONE;
+   if(!z.used) return false;
+   if(z.breaker_idx < 0 || z.breaker_idx >= n) return false;
 
-   const MqlRates bar = rates[bar_idx];
+   __MFlip_AddUP(z);
+   __MFlip_DrawUP(z, g_trg2_mflip_up_draw_count);
 
-   if(!g_trigger_type2.mother_set)
-   {
-      __TRG_StartBullCycle(g_trigger_type2, TRG_ENGINE_TYPE2, rates, n, bar_idx, false, true, true);
-      return TRG_PHASE_1;
-   }
-
-   bool allow_phase1_mother_update = false;
-   if(g_trigger_type2.phase == TRG_PHASE_1 &&
-      __TRG_BreakAboveStrict(bar.high, g_trigger_type2.phase1_level))
-   {
-      allow_phase1_mother_update = true;
-   }
-
-   if(__TRG_BreakBelowStrict(bar.low, g_trigger_type2.mother_level) &&
-      !allow_phase1_mother_update)
-   {
-      __TRG_StartBullCycle(g_trigger_type2, TRG_ENGINE_TYPE2, rates, n, bar_idx, true, true, true);
-      return TRG_PHASE_1;
-   }
-
-   if(g_trigger_type2.phase <= TRG_PHASE_NONE || g_trigger_type2.phase > TRG_PHASE_5)
-   {
-      __TRG_StartBullCycle(g_trigger_type2, TRG_ENGINE_TYPE2, rates, n, bar_idx, false, true, true);
-      return TRG_PHASE_1;
-   }
-
-   if(bar_idx == g_trigger_type2.mother_idx && g_trigger_type2.phase == TRG_PHASE_1)
-   {
-      __TRG_DrawPhaseLabel(TRG_ENGINE_TYPE2, bar, TRG_PHASE_1);
-      return TRG_PHASE_1;
-   }
-
-   switch(g_trigger_type2.phase)
-   {
-      case TRG_PHASE_1:
-      {
-         bool extended_phase1 = false;
-
-         if(__TRG_BreakAboveStrict(bar.high, g_trigger_type2.phase1_level))
-         {
-            g_trigger_type2.phase1_level = bar.high;
-            g_trigger_type2.phase1_idx   = bar_idx;
-            extended_phase1 = true;
-         }
-
-         if(bar.low < g_trigger_type2.mother_level)
-         {
-            g_trigger_type2.mother_level = bar.low;
-            g_trigger_type2.mother_idx   = bar_idx;
-            g_trigger_type2.mother_time  = bar.time;
-            __TRG_DrawBoundaryLabel(TRG_ENGINE_TYPE2, bar);
-         }
-
-         if(extended_phase1)
-         {
-            __TRG_DrawPhaseLabel(TRG_ENGINE_TYPE2, bar, TRG_PHASE_1);
-            return TRG_PHASE_1;
-         }
-
-         __TRG_SetBullPhase2Latest(g_trigger_type2, bar_idx, bar);
-         __TRG_DrawPhaseLabel(TRG_ENGINE_TYPE2, bar, TRG_PHASE_2);
-         return TRG_PHASE_2;
-      }
-
-      case TRG_PHASE_2:
-      {
-         if(!__TRG_EngineHasPhase3(g_trigger_type2))
-         {
-            if(__TRG_BreakAboveStrict(bar.high, g_trigger_type2.phase1_level))
-            {
-               __TRG_SetBullPhase3Latest(g_trigger_type2, bar_idx, bar);
-               __TRG_DrawPhaseLabel(TRG_ENGINE_TYPE2, bar, TRG_PHASE_3);
-               return TRG_PHASE_3;
-            }
-
-            __TRG_SetBullPhase2Latest(g_trigger_type2, bar_idx, bar);
-            __TRG_DrawPhaseLabel(TRG_ENGINE_TYPE2, bar, TRG_PHASE_2);
-            return TRG_PHASE_2;
-         }
-
-         if(g_trigger_type2.phase2_idx >= 0 &&
-            __TRG_BreakBelowStrict(bar.low, g_trigger_type2.phase2_level))
-         {
-            return __TRG2_BullHandlePhase4Break(rates, n, bar_idx);
-         }
-
-         if(__TRG_BreakAboveStrict(bar.high, g_trigger_type2.phase3_level))
-         {
-            __TRG_SetBullPhase3Latest(g_trigger_type2, bar_idx, bar);
-            __TRG_DrawPhaseLabel(TRG_ENGINE_TYPE2, bar, TRG_PHASE_3);
-            return TRG_PHASE_3;
-         }
-
-         __TRG_SetBullPhase2Candidate(g_trigger_type2, bar_idx, bar);
-         __TRG_DrawPhaseLabel(TRG_ENGINE_TYPE2, bar, TRG_PHASE_2);
-         return TRG_PHASE_2;
-      }
-
-      case TRG_PHASE_3:
-      {
-         if(g_trigger_type2.phase2_idx >= 0 &&
-            __TRG_BreakBelowStrict(bar.low, g_trigger_type2.phase2_level))
-         {
-            return __TRG2_BullHandlePhase4Break(rates, n, bar_idx);
-         }
-
-         if(__TRG_BreakAboveStrict(bar.high, g_trigger_type2.phase3_level))
-         {
-            __TRG_SetBullPhase3Latest(g_trigger_type2, bar_idx, bar);
-            __TRG_DrawPhaseLabel(TRG_ENGINE_TYPE2, bar, TRG_PHASE_3);
-            return TRG_PHASE_3;
-         }
-
-         __TRG_SetBullPhase2Candidate(g_trigger_type2, bar_idx, bar);
-         __TRG_DrawPhaseLabel(TRG_ENGINE_TYPE2, bar, TRG_PHASE_2);
-         return TRG_PHASE_2;
-      }
-
-      case TRG_PHASE_4:
-      {
-         g_trigger_type2.phase = TRG_PHASE_5;
-         __TRG_DrawPhaseLabel(TRG_ENGINE_TYPE2, bar, TRG_PHASE_5);
-
-         if(g_trigger_type2.phase3_idx >= 0 &&
-            __TRG_TouchHigh(bar.high, g_trigger_type2.phase3_level))
-         {
-            __TRG_FireTrigger(TRG_ENGINE_TYPE2,
-                              g_trigger_type2.phase3_idx,
-                              g_trigger_type2.phase3_level,
-                              bar_idx,
-                              rates,
-                              n);
-         }
-
-         return TRG_PHASE_5;
-      }
-
-      case TRG_PHASE_5:
-      {
-         __TRG_DrawPhaseLabel(TRG_ENGINE_TYPE2, bar, TRG_PHASE_5);
-
-         if(g_trigger_type2.phase3_idx >= 0 &&
-            __TRG_TouchHigh(bar.high, g_trigger_type2.phase3_level))
-         {
-            __TRG_FireTrigger(TRG_ENGINE_TYPE2,
-                              g_trigger_type2.phase3_idx,
-                              g_trigger_type2.phase3_level,
-                              bar_idx,
-                              rates,
-                              n);
-         }
-
-         return TRG_PHASE_5;
-      }
-   }
-
-   return TRG_PHASE_NONE;
+   __TRG_FirePatternTrigger(TRG_ENGINE_TYPE2,
+                            z.mother_idx,
+                            z.breaker_idx,
+                            rates,
+                            n);
+   return true;
 }
 
-inline int __TRG2_ProcessBear(const MqlRates &rates[],
-                              const int       n,
-                              const int       bar_idx)
+inline bool __TRG2_DrawAndFireDOWN(const MajicFlipZone &z,
+                                   const MqlRates &rates[],
+                                   const int n)
 {
-   if(bar_idx < 0 || bar_idx >= n) return TRG_PHASE_NONE;
+   if(!z.used) return false;
+   if(z.breaker_idx < 0 || z.breaker_idx >= n) return false;
 
-   const MqlRates bar = rates[bar_idx];
+   __MFlip_AddDOWN(z);
+   __MFlip_DrawDOWN(z, g_trg2_mflip_dn_draw_count);
 
-   if(!g_trigger_type2.mother_set)
+   __TRG_FirePatternTrigger(TRG_ENGINE_TYPE2,
+                            z.mother_idx,
+                            z.breaker_idx,
+                            rates,
+                            n);
+   return true;
+}
+
+inline void __TRG2_FillUP(const MqlRates &rates[],
+                          const int mother_idx,
+                          const int breaker_idx,
+                          MajicFlipZone &out)
+{
+   out.used         = true;
+   out.mother_idx   = mother_idx;
+   out.breaker_idx  = breaker_idx;
+
+   out.mother_time  = rates[mother_idx].time;
+   out.breaker_time = rates[breaker_idx].time;
+
+   out.mother_high  = rates[mother_idx].high;
+   out.mother_low   = rates[mother_idx].low;
+   out.breaker_high = rates[breaker_idx].high;
+   out.breaker_low  = rates[breaker_idx].low;
+
+   out.price_top    = rates[mother_idx].high;
+   out.price_bottom = rates[breaker_idx].low;
+}
+
+inline void __TRG2_FillDOWN(const MqlRates &rates[],
+                            const int mother_idx,
+                            const int breaker_idx,
+                            MajicFlipZone &out)
+{
+   out.used         = true;
+   out.mother_idx   = mother_idx;
+   out.breaker_idx  = breaker_idx;
+
+   out.mother_time  = rates[mother_idx].time;
+   out.breaker_time = rates[breaker_idx].time;
+
+   out.mother_high  = rates[mother_idx].high;
+   out.mother_low   = rates[mother_idx].low;
+   out.breaker_high = rates[breaker_idx].high;
+   out.breaker_low  = rates[breaker_idx].low;
+
+   out.price_top    = rates[breaker_idx].high;
+   out.price_bottom = rates[mother_idx].low;
+}
+
+inline bool __TRG2_BuildUPFast(const MqlRates &rates[],
+                               const int n,
+                               const int bar_idx,
+                               const datetime from_time,
+                               const datetime to_time,
+                               const int from_idx,
+                               MajicFlipZone &out)
+{
+   if(bar_idx < 2 || bar_idx >= n) return false;
+   if(!__MFlip_TimeInWindow(rates[bar_idx].time, from_time, to_time)) return false;
+   if(!__MFlip_IsBull(rates[bar_idx])) return false;
+
+   double mid_max_high = -DBL_MAX;
+   double mid_min_low  = DBL_MAX;
+
+   int start_mother = bar_idx - 2;
+   int stop_mother  = from_idx;
+   if(stop_mother < 0)
+      stop_mother = 0;
+
+   for(int mother_idx = start_mother; mother_idx >= stop_mother; --mother_idx)
    {
-      __TRG_StartBearCycle(g_trigger_type2, TRG_ENGINE_TYPE2, rates, n, bar_idx, false, true, true);
-      return TRG_PHASE_1;
-   }
-
-   bool allow_phase1_mother_update = false;
-   if(g_trigger_type2.phase == TRG_PHASE_1 &&
-      __TRG_BreakBelowStrict(bar.low, g_trigger_type2.phase1_level))
-   {
-      allow_phase1_mother_update = true;
-   }
-
-   if(__TRG_BreakAboveStrict(bar.high, g_trigger_type2.mother_level) &&
-      !allow_phase1_mother_update)
-   {
-      __TRG_StartBearCycle(g_trigger_type2, TRG_ENGINE_TYPE2, rates, n, bar_idx, true, true, true);
-      return TRG_PHASE_1;
-   }
-
-   if(g_trigger_type2.phase <= TRG_PHASE_NONE || g_trigger_type2.phase > TRG_PHASE_5)
-   {
-      __TRG_StartBearCycle(g_trigger_type2, TRG_ENGINE_TYPE2, rates, n, bar_idx, false, true, true);
-      return TRG_PHASE_1;
-   }
-
-   if(bar_idx == g_trigger_type2.mother_idx && g_trigger_type2.phase == TRG_PHASE_1)
-   {
-      __TRG_DrawPhaseLabel(TRG_ENGINE_TYPE2, bar, TRG_PHASE_1);
-      return TRG_PHASE_1;
-   }
-
-   switch(g_trigger_type2.phase)
-   {
-      case TRG_PHASE_1:
+      int mid_idx = mother_idx + 1;
+      if(mid_idx >= 0 && mid_idx < bar_idx)
       {
-         bool extended_phase1 = false;
-
-         if(__TRG_BreakBelowStrict(bar.low, g_trigger_type2.phase1_level))
-         {
-            g_trigger_type2.phase1_level = bar.low;
-            g_trigger_type2.phase1_idx   = bar_idx;
-            extended_phase1 = true;
-         }
-
-         if(bar.high > g_trigger_type2.mother_level)
-         {
-            g_trigger_type2.mother_level = bar.high;
-            g_trigger_type2.mother_idx   = bar_idx;
-            g_trigger_type2.mother_time  = bar.time;
-            __TRG_DrawBoundaryLabel(TRG_ENGINE_TYPE2, bar);
-         }
-
-         if(extended_phase1)
-         {
-            __TRG_DrawPhaseLabel(TRG_ENGINE_TYPE2, bar, TRG_PHASE_1);
-            return TRG_PHASE_1;
-         }
-
-         __TRG_SetBearPhase2Latest(g_trigger_type2, bar_idx, bar);
-         __TRG_DrawPhaseLabel(TRG_ENGINE_TYPE2, bar, TRG_PHASE_2);
-         return TRG_PHASE_2;
+         if(rates[mid_idx].high > mid_max_high) mid_max_high = rates[mid_idx].high;
+         if(rates[mid_idx].low  < mid_min_low)  mid_min_low  = rates[mid_idx].low;
       }
 
-      case TRG_PHASE_2:
-      {
-         if(!__TRG_EngineHasPhase3(g_trigger_type2))
-         {
-            if(__TRG_BreakBelowStrict(bar.low, g_trigger_type2.phase1_level))
-            {
-               __TRG_SetBearPhase3Latest(g_trigger_type2, bar_idx, bar);
-               __TRG_DrawPhaseLabel(TRG_ENGINE_TYPE2, bar, TRG_PHASE_3);
-               return TRG_PHASE_3;
-            }
+      if(mother_idx < 0 || mother_idx >= n - 2) continue;
+      if(from_time > 0 && rates[mother_idx].time < from_time) break;
+      if(!__MFlip_TimeInWindow(rates[mother_idx].time, from_time, to_time)) continue;
+      if(!__MFlip_IsBear(rates[mother_idx])) continue;
 
-            __TRG_SetBearPhase2Latest(g_trigger_type2, bar_idx, bar);
-            __TRG_DrawPhaseLabel(TRG_ENGINE_TYPE2, bar, TRG_PHASE_2);
-            return TRG_PHASE_2;
-         }
+      if(mid_max_high > rates[mother_idx].high) continue;
+      if(mid_min_low  < rates[mother_idx].low)  continue;
 
-         if(g_trigger_type2.phase2_idx >= 0 &&
-            __TRG_BreakAboveStrict(bar.high, g_trigger_type2.phase2_level))
-         {
-            return __TRG2_BearHandlePhase4Break(rates, n, bar_idx);
-         }
+      if(rates[bar_idx].close <= rates[mother_idx].high) continue;
+      if(rates[bar_idx].low   >= rates[mother_idx].low)  continue;
 
-         if(__TRG_BreakBelowStrict(bar.low, g_trigger_type2.phase3_level))
-         {
-            __TRG_SetBearPhase3Latest(g_trigger_type2, bar_idx, bar);
-            __TRG_DrawPhaseLabel(TRG_ENGINE_TYPE2, bar, TRG_PHASE_3);
-            return TRG_PHASE_3;
-         }
-
-         __TRG_SetBearPhase2Candidate(g_trigger_type2, bar_idx, bar);
-         __TRG_DrawPhaseLabel(TRG_ENGINE_TYPE2, bar, TRG_PHASE_2);
-         return TRG_PHASE_2;
-      }
-
-      case TRG_PHASE_3:
-      {
-         if(g_trigger_type2.phase2_idx >= 0 &&
-            __TRG_BreakAboveStrict(bar.high, g_trigger_type2.phase2_level))
-         {
-            return __TRG2_BearHandlePhase4Break(rates, n, bar_idx);
-         }
-
-         if(__TRG_BreakBelowStrict(bar.low, g_trigger_type2.phase3_level))
-         {
-            __TRG_SetBearPhase3Latest(g_trigger_type2, bar_idx, bar);
-            __TRG_DrawPhaseLabel(TRG_ENGINE_TYPE2, bar, TRG_PHASE_3);
-            return TRG_PHASE_3;
-         }
-
-         __TRG_SetBearPhase2Candidate(g_trigger_type2, bar_idx, bar);
-         __TRG_DrawPhaseLabel(TRG_ENGINE_TYPE2, bar, TRG_PHASE_2);
-         return TRG_PHASE_2;
-      }
-
-      case TRG_PHASE_4:
-      {
-         g_trigger_type2.phase = TRG_PHASE_5;
-         __TRG_DrawPhaseLabel(TRG_ENGINE_TYPE2, bar, TRG_PHASE_5);
-
-         if(g_trigger_type2.phase3_idx >= 0 &&
-            __TRG_TouchLow(bar.low, g_trigger_type2.phase3_level))
-         {
-            __TRG_FireTrigger(TRG_ENGINE_TYPE2,
-                              g_trigger_type2.phase3_idx,
-                              g_trigger_type2.phase3_level,
-                              bar_idx,
-                              rates,
-                              n);
-         }
-
-         return TRG_PHASE_5;
-      }
-
-      case TRG_PHASE_5:
-      {
-         __TRG_DrawPhaseLabel(TRG_ENGINE_TYPE2, bar, TRG_PHASE_5);
-
-         if(g_trigger_type2.phase3_idx >= 0 &&
-            __TRG_TouchLow(bar.low, g_trigger_type2.phase3_level))
-         {
-            __TRG_FireTrigger(TRG_ENGINE_TYPE2,
-                              g_trigger_type2.phase3_idx,
-                              g_trigger_type2.phase3_level,
-                              bar_idx,
-                              rates,
-                              n);
-         }
-
-         return TRG_PHASE_5;
-      }
+      __TRG2_FillUP(rates, mother_idx, bar_idx, out);
+      return true;
    }
 
-   return TRG_PHASE_NONE;
+   return false;
+}
+
+inline bool __TRG2_BuildDOWNFast(const MqlRates &rates[],
+                                 const int n,
+                                 const int bar_idx,
+                                 const datetime from_time,
+                                 const datetime to_time,
+                                 const int from_idx,
+                                 MajicFlipZone &out)
+{
+   if(bar_idx < 2 || bar_idx >= n) return false;
+   if(!__MFlip_TimeInWindow(rates[bar_idx].time, from_time, to_time)) return false;
+   if(!__MFlip_IsBear(rates[bar_idx])) return false;
+
+   double mid_max_high = -DBL_MAX;
+   double mid_min_low  = DBL_MAX;
+
+   int start_mother = bar_idx - 2;
+   int stop_mother  = from_idx;
+   if(stop_mother < 0)
+      stop_mother = 0;
+
+   for(int mother_idx = start_mother; mother_idx >= stop_mother; --mother_idx)
+   {
+      int mid_idx = mother_idx + 1;
+      if(mid_idx >= 0 && mid_idx < bar_idx)
+      {
+         if(rates[mid_idx].high > mid_max_high) mid_max_high = rates[mid_idx].high;
+         if(rates[mid_idx].low  < mid_min_low)  mid_min_low  = rates[mid_idx].low;
+      }
+
+      if(mother_idx < 0 || mother_idx >= n - 2) continue;
+      if(from_time > 0 && rates[mother_idx].time < from_time) break;
+      if(!__MFlip_TimeInWindow(rates[mother_idx].time, from_time, to_time)) continue;
+      if(!__MFlip_IsBull(rates[mother_idx])) continue;
+
+      if(mid_max_high > rates[mother_idx].high) continue;
+      if(mid_min_low  < rates[mother_idx].low)  continue;
+
+      if(rates[bar_idx].close >= rates[mother_idx].low)  continue;
+      if(rates[bar_idx].high  <= rates[mother_idx].high) continue;
+
+      __TRG2_FillDOWN(rates, mother_idx, bar_idx, out);
+      return true;
+   }
+
+   return false;
+}
+
+inline bool Trigger_Type2_ProcessUP(const MqlRates &rates[],
+                                    const int n,
+                                    const int bar_idx,
+                                    const datetime from_time,
+                                    const datetime to_time)
+{
+   if(bar_idx < 0 || bar_idx >= n) return false;
+
+   __TRG_CACHE_BuildUP(rates, n, bar_idx, from_time, to_time);
+
+   if(g_trg_cache_up_mflip.used)
+      return __TRG2_DrawAndFireUP(g_trg_cache_up_mflip, rates, n);
+
+   return false;
+}
+
+inline bool Trigger_Type2_ProcessDOWN(const MqlRates &rates[],
+                                      const int n,
+                                      const int bar_idx,
+                                      const datetime from_time,
+                                      const datetime to_time)
+{
+   if(bar_idx < 0 || bar_idx >= n) return false;
+
+   __TRG_CACHE_BuildDOWN(rates, n, bar_idx, from_time, to_time);
+
+   if(g_trg_cache_dn_mflip.used)
+      return __TRG2_DrawAndFireDOWN(g_trg_cache_dn_mflip, rates, n);
+
+   return false;
 }
 
 #endif // WAVEBOT_TRIGGER_TYPE2_MQH

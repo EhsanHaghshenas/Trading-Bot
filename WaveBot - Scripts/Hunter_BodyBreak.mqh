@@ -1,4 +1,3 @@
-
 #ifndef WAVEBOT_HUNTER_BODYBREAK_MQH
 #define WAVEBOT_HUNTER_BODYBREAK_MQH
 
@@ -324,4 +323,3 @@ inline void HW_BB_DOWN_OnBar(const MqlRates &r, const MqlRates &rates[], const i
 }
 
 #endif // WAVEBOT_HUNTER_BODYBREAK_MQH
-

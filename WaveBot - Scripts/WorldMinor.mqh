@@ -1,4 +1,3 @@
-
 #ifndef WAVEBOT_WORLDMINOR_MQH
 #define WAVEBOT_WORLDMINOR_MQH
 
@@ -127,4 +126,3 @@ inline bool WorldMinor_CheckMinorOff(const MqlRates &bar, const int bar_idx)
 }
 
 #endif // WAVEBOT_WORLDMINOR_MQH
-

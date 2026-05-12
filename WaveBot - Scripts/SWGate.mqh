@@ -1,4 +1,3 @@
-
 // WaveBot/SWGate.mqh
 #ifndef WAVEBOT_SWGATE_MQH
 #define WAVEBOT_SWGATE_MQH
@@ -94,4 +93,3 @@ inline void SWGate_ResetGlobals()
 }
 
 #endif // WAVEBOT_SWGATE_MQH
-

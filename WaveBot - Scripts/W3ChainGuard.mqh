@@ -1,4 +1,3 @@
-
 // WaveBot/W3ChainGuard.mqh
 #ifndef WAVEBOT_W3CHAINGUARD_MQH
 #define WAVEBOT_W3CHAINGUARD_MQH
@@ -171,4 +170,3 @@ inline void W3Chain_DN_ClearAfterRollback()
 }
 
 #endif // WAVEBOT_W3CHAINGUARD_MQH
-

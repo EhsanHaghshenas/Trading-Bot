@@ -283,17 +283,7 @@
       "relative_to_project":false
     },
     {
-      "path":"MQL5\\Include\\WaveBot\\AnalysisLogger.mqh",
-      "compile":false,
-      "relative_to_project":false
-    },
-    {
-      "path":"MQL5\\Include\\WaveBot\\Trigger_Type1.mqh",
-      "compile":false,
-      "relative_to_project":false
-    },
-    {
-      "path":"MQL5\\Include\\WaveBot\\Trigger_Type2.mqh",
+      "path":"MQL5\\Include\\WaveBot\\WaveBotLogger.mqh",
       "compile":false,
       "relative_to_project":false
     },
@@ -308,7 +298,17 @@
       "relative_to_project":false
     },
     {
-      "path":"MQL5\\Include\\WaveBot\\BalancedTradeGate.mqh",
+      "path":"MQL5\\Include\\WaveBot\\Trigger_Type1.mqh",
+      "compile":false,
+      "relative_to_project":false
+    },
+    {
+      "path":"MQL5\\Include\\WaveBot\\Trigger_Type2.mqh",
+      "compile":false,
+      "relative_to_project":false
+    },
+    {
+      "path":"MQL5\\Include\\WaveBot\\WaveBotScanControl.mqh",
       "compile":false,
       "relative_to_project":false
     }

@@ -1,4 +1,3 @@
-
 #ifndef WAVEBOT_HUNTER_DOWN_MQH
 #define WAVEBOT_HUNTER_DOWN_MQH
 
@@ -235,4 +234,3 @@ inline void SW_DOWN_TryMarkOnConfirmedW3(const MqlRates &rates[], const int n,
 }
 
 #endif // WAVEBOT_HUNTER_DOWN_MQH
-

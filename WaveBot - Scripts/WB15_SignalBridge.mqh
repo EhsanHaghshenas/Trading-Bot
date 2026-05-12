@@ -7,9 +7,8 @@
 // M15 publishes START/STOP signals; M1 draws ON/OFF markers as an overlay.
 // ============================================================================
 
-#include <WaveBot/AnalysisLogger.mqh>
-
-// NOTE: This module is intentionally standalone except for AnalysisLogger hooks and implements the M15 three-stage signal gate.
+// NOTE: This module is intentionally standalone and implements the M15 three-stage signal gate.
+#include <WaveBot/WaveBotLogger.mqh>
 
 // ---- Signal namespace (world) ----
 enum WB15_NS
@@ -27,9 +26,10 @@ enum WB15_KIND
    WB15_KIND_START_FSMS         = 3,
    WB15_KIND_START_GOOZBAGHALI  = 4,
 
-   WB15_KIND_STOP_MTC           = 10,
-   WB15_KIND_STOP_MINORSTARTER  = 11,
-   WB15_KIND_STOP_MINOROFF_ZONE = 12
+   WB15_KIND_STOP_MTC              = 10,
+   WB15_KIND_STOP_MINORSTARTER     = 11,
+   WB15_KIND_STOP_MINOROFF_ZONE    = 12,
+   WB15_KIND_STOP_ZONE_INVALIDATED = 13
 };
 
 // ---- Internal state (M1) ----
@@ -168,9 +168,6 @@ struct WB15StageState
    bool      zone_active;     // Stage-2 is active
    bool      on_sent;         // Stage-3 already published to M1
 
-   int       stage_seq;       // Analysis context id for Stage-1/2/3 logs
-   int       zone_seq;        // Analysis zone id for this Stage-2 zone
-
    int       start_kind;
    int       start_ns;
    Direction start_dir;
@@ -184,26 +181,31 @@ struct WB15StageState
    double    zone_top;
    double    zone_bottom;
    double    invalid_level;   // UP: below Flip/MajicFlip low | DOWN: above Flip/MajicFlip high
-   double    zone_flip_low;
-   double    zone_flip_high;
-   double    zone_anchor_low;
-   double    zone_anchor_high;
-   int       zone_anchor_idx;
-   int       zone_flip_idx;
+
+   // Diagnostic-only lineage IDs (do not affect bridge/trading logic).
+   int       log_context_id;
+   int       log_zone_id;
 };
 
 static WB15StageState g_wb15_stage_maj;
 static WB15StageState g_wb15_stage_min;
-static int            g_wb15_stage_context_counter = 0;
-static int            g_wb15_stage_zone_counter    = 0;
+
+// Fast event cache for FSMS-SW. FSMS-SW used to scan all chart objects on
+// every candle to discover whether a later HWX/HWBB had invalidated the seed.
+// Updating this timestamp at the actual Stage-1 source event makes that check
+// O(1) and avoids the visible FSMS stalls.
+static datetime g_wb15_last_hwx_hwbb_stage_time = 0;
+
+inline datetime WB15_LastHWXHWBBStageTime()
+{
+   return g_wb15_last_hwx_hwbb_stage_time;
+}
 
 inline void __WB15_StageReset(WB15StageState &st)
 {
    st.active           = false;
    st.zone_active      = false;
    st.on_sent          = false;
-   st.stage_seq        = -1;
-   st.zone_seq         = -1;
    st.start_kind       = 0;
    st.start_ns         = WB15_NS_NONE;
    st.start_dir        = DIR_UP;
@@ -216,20 +218,15 @@ inline void __WB15_StageReset(WB15StageState &st)
    st.zone_top         = 0.0;
    st.zone_bottom      = 0.0;
    st.invalid_level    = 0.0;
-   st.zone_flip_low    = 0.0;
-   st.zone_flip_high   = 0.0;
-   st.zone_anchor_low  = 0.0;
-   st.zone_anchor_high = 0.0;
-   st.zone_anchor_idx  = -1;
-   st.zone_flip_idx    = -1;
+   st.log_context_id   = 0;
+   st.log_zone_id      = 0;
 }
 
 inline void __WB15_StageResetAll()
 {
    __WB15_StageReset(g_wb15_stage_maj);
    __WB15_StageReset(g_wb15_stage_min);
-   g_wb15_stage_context_counter = 0;
-   g_wb15_stage_zone_counter    = 0;
+   g_wb15_last_hwx_hwbb_stage_time = 0;
 }
 
 
@@ -265,7 +262,15 @@ inline void WB15_MasterPushEvent(const string sym,
                                 const int kind,
                                 const int ns,
                                 const Direction dir,
-                                const datetime t)
+                                const datetime t,
+                                const int m15_context_id = 0,
+                                const int m15_zone_id = 0,
+                                const int m1_window_id = 0,
+                                const int zone_source = 0,
+                                const int zone_kind = 0,
+                                const double zone_low = 0.0,
+                                const double zone_high = 0.0,
+                                const string stop_reason = "")
 {
    if(!__WB15_IsMaster()) return;
    if(t <= 0) return;
@@ -296,24 +301,16 @@ inline void WB15_MasterPushEvent(const string sym,
    GlobalVariableSet(__WB15_KeyT(sym, seq), (double)t);
    GlobalVariableSet(__WB15_KeyC(sym, seq), (double)code);
 
-   bool is_start = (kind == WB15_KIND_START_HWX ||
-                    kind == WB15_KIND_START_HWBB ||
-                    kind == WB15_KIND_START_FSMS ||
-                    kind == WB15_KIND_START_GOOZBAGHALI);
-   bool is_stop  = (kind == WB15_KIND_STOP_MTC ||
-                    kind == WB15_KIND_STOP_MINORSTARTER ||
-                    kind == WB15_KIND_STOP_MINOROFF_ZONE);
+   int effective_window_id = m1_window_id;
+   if(effective_window_id <= 0)
+      effective_window_id = seq;
 
-   if(is_start || is_stop)
-   {
-      AnalysisLogger_LogBridgeMaster(sym,
-                                     seq,
-                                     kind,
-                                     ns,
-                                     dir,
-                                     t,
-                                     (is_start ? "stage3_start_sent_to_m1" : "off_sent_to_m1"));
-   }
+   GlobalVariableSet(__WB15_Key(sym, "CTX_" + IntegerToString(seq)), (double)m15_context_id);
+   GlobalVariableSet(__WB15_Key(sym, "ZONE_" + IntegerToString(seq)), (double)m15_zone_id);
+   GlobalVariableSet(__WB15_Key(sym, "WIN_" + IntegerToString(seq)), (double)effective_window_id);
+
+   string event_type = (kind < 10 ? "START" : "STOP");
+   WBLOG_M15BridgeEvent(m15_context_id, m15_zone_id, effective_window_id, event_type, dir, t, t, kind, zone_source, zone_kind, zone_low, zone_high, (kind >= 10 ? t : 0), stop_reason, ns, seq);
 }
 
 // Convenience wrappers (called from signal detection points)
@@ -623,42 +620,7 @@ inline void __WB15_StageClearZone(WB15StageState &st)
    st.zone_top         = 0.0;
    st.zone_bottom      = 0.0;
    st.invalid_level    = 0.0;
-   st.zone_flip_low    = 0.0;
-   st.zone_flip_high   = 0.0;
-   st.zone_anchor_low  = 0.0;
-   st.zone_anchor_high = 0.0;
-   st.zone_anchor_idx  = -1;
-   st.zone_flip_idx    = -1;
-   st.zone_seq         = -1;
-}
-
-inline int __WB15_StageFindBarIndexByTime(const MqlRates &rates[], const int n, const datetime t)
-{
-   if(t <= 0) return -1;
-   for(int i = 0; i < n; ++i)
-   {
-      if(rates[i].time == t)
-         return i;
-   }
-   return -1;
-}
-
-inline void __WB15_StageGetBarOHLC(const MqlRates &rates[], const int n, const int idx,
-                                   double &o, double &h, double &l, double &c, datetime &t)
-{
-   o = 0.0;
-   h = 0.0;
-   l = 0.0;
-   c = 0.0;
-   t = 0;
-
-   if(idx < 0 || idx >= n) return;
-
-   o = rates[idx].open;
-   h = rates[idx].high;
-   l = rates[idx].low;
-   c = rates[idx].close;
-   t = rates[idx].time;
+   st.log_zone_id      = 0;
 }
 
 inline void __WB15_StageStartState(const string sym,
@@ -672,8 +634,6 @@ inline void __WB15_StageStartState(const string sym,
    st.active           = true;
    st.zone_active      = false;
    st.on_sent          = false;
-   st.stage_seq        = ++g_wb15_stage_context_counter;
-   st.zone_seq         = -1;
    st.start_kind       = kind;
    st.start_ns         = ns;
    st.start_dir        = dir;
@@ -686,47 +646,8 @@ inline void __WB15_StageStartState(const string sym,
    st.zone_top         = 0.0;
    st.zone_bottom      = 0.0;
    st.invalid_level    = 0.0;
-   st.zone_flip_low    = 0.0;
-   st.zone_flip_high   = 0.0;
-   st.zone_anchor_low  = 0.0;
-   st.zone_anchor_high = 0.0;
-   st.zone_anchor_idx  = -1;
-   st.zone_flip_idx    = -1;
-
-   AnalysisLogger_LogM15MainSignal(sym,
-                                   st.stage_seq,
-                                   kind,
-                                   ns,
-                                   dir,
-                                   event_time,
-                                   true,
-                                   "WB15_StageStart",
-                                   "",
-                                   "stage1_detected_waiting_for_flip_or_majicflip_zone");
-
-   AnalysisLogger_LogM15StageDetailed(sym,
-                                      st.stage_seq,
-                                      -1,
-                                      kind,
-                                      ns,
-                                      dir,
-                                      event_time,
-                                      -1,
-                                      "STAGE1_MAIN_SIGNAL_STARTED",
-                                      0,
-                                      0,
-                                      -1,
-                                      0,
-                                      0,0,0,0,
-                                      -1,
-                                      stage1_bar_time,
-                                      0,0,0,0,
-                                      0,0,
-                                      0,
-                                      0,
-                                      0,
-                                      "",
-                                      "stage1_context_opened_by_main_signal");
+   st.log_zone_id      = 0;
+   st.log_context_id   = WBLOG_M15MainSignalStart(sym, kind, ns, dir, event_time, stage1_bar_time);
 
    if(InpDebugPrints)
       Print("[WB15-STAGE] Stage-1 armed | kind=", __WB15_StartKindLabel(kind),
@@ -746,102 +667,39 @@ inline void __WB15_StageStart(const string sym,
    if(!__WB15_IsMaster()) return;
    if(event_time <= 0) return;
    if(stage1_bar_time <= 0) return;
-   if(ns == WB15_NS_NONE) return;
+
+   if((kind == WB15_KIND_START_HWX || kind == WB15_KIND_START_HWBB) && event_time > g_wb15_last_hwx_hwbb_stage_time)
+      g_wb15_last_hwx_hwbb_stage_time = event_time;
+
    if(ns == WB15_NS_MAJ)
       __WB15_StageStartState(sym, g_wb15_stage_maj, kind, ns, dir, event_time, stage1_bar_time);
    else if(ns == WB15_NS_MIN)
       __WB15_StageStartState(sym, g_wb15_stage_min, kind, ns, dir, event_time, stage1_bar_time);
 }
 
-inline void __WB15_StageStopState(const string sym,
-                                  WB15StageState &st,
-                                  const int stop_kind,
+inline void __WB15_StageStopState(WB15StageState &st,
                                   const Direction stop_dir,
                                   const datetime stop_time)
 {
    if(!st.active) return;
    if(stop_dir != __WB15_Opposite(st.start_dir)) return;
 
-   AnalysisLogger_LogM15MainSignal(sym,
-                                   st.stage_seq,
-                                   stop_kind,
-                                   st.start_ns,
-                                   stop_dir,
-                                   stop_time,
-                                   false,
-                                   "WB15_StageStop",
-                                   "MAIN_OFF",
-                                   "original_off_resets_three_stage_context");
-
-   AnalysisLogger_LogM15StageDetailed(sym,
-                                      st.stage_seq,
-                                      st.zone_seq,
-                                      st.start_kind,
-                                      st.start_ns,
-                                      st.start_dir,
-                                      stop_time,
-                                      -1,
-                                      "MAIN_OFF_FULL_RESET",
-                                      st.zone_source,
-                                      st.zone_kind,
-                                      st.zone_flip_idx,
-                                      st.zone_flip_time,
-                                      0,0,0,0,
-                                      st.zone_anchor_idx,
-                                      st.zone_anchor_time,
-                                      0,0,0,0,
-                                      st.zone_bottom,
-                                      st.zone_top,
-                                      st.invalid_level,
-                                      0,
-                                      0,
-                                      "MAIN_OFF",
-                                      "original_off_resets_active_context");
-
-   if(st.zone_active)
-   {
-      AnalysisLogger_LogM15ZoneSnapshot(sym,
-                                        st.stage_seq,
-                                        st.zone_seq,
-                                        st.start_dir,
-                                        st.start_kind,
-                                        st.zone_source,
-                                        st.zone_kind,
-                                        st.zone_flip_time,
-                                        st.zone_flip_idx,
-                                        st.zone_flip_low,
-                                        st.zone_flip_high,
-                                        st.zone_anchor_time,
-                                        st.zone_anchor_idx,
-                                        st.zone_anchor_low,
-                                        st.zone_anchor_high,
-                                        st.zone_bottom,
-                                        st.zone_top,
-                                        st.invalid_level,
-                                        st.zone_flip_time,
-                                        0,
-                                        -1,
-                                        st.on_sent,
-                                        0,
-                                        false,
-                                        0,
-                                        "",
-                                        stop_time,
-                                        (st.on_sent ? "MAIN_OFF_AFTER_SENT" : "MAIN_OFF_BEFORE_RETOUCH"));
-   }
-
    if(InpDebugPrints)
       Print("[WB15-STAGE] Reset by original OFF | active_kind=", __WB15_StartKindLabel(st.start_kind),
             " | dir=", (st.start_dir==DIR_UP ? "UP" : "DOWN"),
             " | off=", TimeToString(stop_time, TIME_DATE|TIME_SECONDS));
 
+   WBLOG_M15MainSignalOff(st.log_context_id, st.start_dir, stop_time, "ORIGINAL_OFF");
+   if(st.on_sent)
+      WBLOG_LogM15GateEvent(st.log_context_id, st.log_zone_id, "M1_STOP_SENT", st.start_dir, stop_time, (int)stop_time, 0.0, 0.0, 0.0, 0.0, st.zone_bottom, st.zone_top, "original_off_after_m1_start");
+
    __WB15_StageReset(st);
 }
 
-inline void __WB15_StageStop(const string sym, const int stop_kind, const Direction stop_dir, const datetime stop_time)
+inline void __WB15_StageStop(const Direction stop_dir, const datetime stop_time)
 {
-   __WB15_StageStopState(sym, g_wb15_stage_maj, stop_kind, stop_dir, stop_time);
-   __WB15_StageStopState(sym, g_wb15_stage_min, stop_kind, stop_dir, stop_time);
+   __WB15_StageStopState(g_wb15_stage_maj, stop_dir, stop_time);
+   __WB15_StageStopState(g_wb15_stage_min, stop_dir, stop_time);
 }
 
 inline bool __WB15_StageBreakerAfterStart(const WB15StageState &st,
@@ -883,12 +741,6 @@ inline bool __WB15_StageBuildDirectFlipUP(const MqlRates &rates[],
    out.zone_kind        = 1;
    out.zone_anchor_time = rates[idx-1].time;
    out.zone_flip_time   = rates[idx].time;
-   out.zone_anchor_idx  = idx - 1;
-   out.zone_flip_idx    = idx;
-   out.zone_flip_low    = rates[idx].low;
-   out.zone_flip_high   = rates[idx].high;
-   out.zone_anchor_low  = rates[idx-1].low;
-   out.zone_anchor_high = rates[idx-1].high;
    out.zone_top         = rates[idx-1].high;
    out.zone_bottom      = rates[idx].low;
    out.invalid_level    = rates[idx].low;
@@ -915,12 +767,6 @@ inline bool __WB15_StageBuildDirectFlipDOWN(const MqlRates &rates[],
    out.zone_kind        = 1;
    out.zone_anchor_time = rates[idx-1].time;
    out.zone_flip_time   = rates[idx].time;
-   out.zone_anchor_idx  = idx - 1;
-   out.zone_flip_idx    = idx;
-   out.zone_flip_low    = rates[idx].low;
-   out.zone_flip_high   = rates[idx].high;
-   out.zone_anchor_low  = rates[idx-1].low;
-   out.zone_anchor_high = rates[idx-1].high;
    out.zone_top         = rates[idx].high;
    out.zone_bottom      = rates[idx-1].low;
    out.invalid_level    = rates[idx].high;
@@ -939,25 +785,31 @@ inline bool __WB15_StageBuildMotherFlipUP(const MqlRates &rates[],
    if(!__WB15_StageBreakerAfterStart(st, rates[idx].time)) return false;
    if(!__WB15_StageIsBull(rates[idx])) return false;
 
-   for(int m = idx - 2; m >= 0; --m)
+   // Fast one-pass version of the original mother+inside scan. It preserves the
+   // same nearest-mother priority but avoids rescanning the inside range for each
+   // candidate mother on every M15 candle.
+   // Bound the historical mother search by InpMaxBarsInWave to prevent long
+   // full-history back scans after FSMS stage-1 starts.
+   int min_m = idx - InpMaxBarsInWave;
+   if(min_m < 0) min_m = 0;
+
+   double mid_max_high = -DBL_MAX;
+   double mid_min_low  = DBL_MAX;
+
+   for(int m = idx - 2; m >= min_m; --m)
    {
+      int mid_idx = m + 1;
+      if(mid_idx >= 0 && mid_idx < idx)
+      {
+         if(rates[mid_idx].high > mid_max_high) mid_max_high = rates[mid_idx].high;
+         if(rates[mid_idx].low  < mid_min_low)  mid_min_low  = rates[mid_idx].low;
+      }
+
       if(!__WB15_StageIsBear(rates[m]))
          continue;
 
-      int inside_count = 0;
-      bool all_inside = true;
-      for(int k = m + 1; k < idx; ++k)
-      {
-         if(!__WB15_StageInsideMotherHL(rates[m], rates[k]))
-         {
-            all_inside = false;
-            break;
-         }
-         inside_count++;
-      }
-
-      if(!all_inside || inside_count <= 0)
-         continue;
+      if(mid_max_high > rates[m].high) continue;
+      if(mid_min_low  < rates[m].low)  continue;
 
       if(rates[idx].close <= rates[m].high)
          continue;
@@ -971,12 +823,6 @@ inline bool __WB15_StageBuildMotherFlipUP(const MqlRates &rates[],
       out.zone_kind        = (majic ? 0 : 2);
       out.zone_anchor_time = rates[m].time;
       out.zone_flip_time   = rates[idx].time;
-      out.zone_anchor_idx  = m;
-      out.zone_flip_idx    = idx;
-      out.zone_flip_low    = rates[idx].low;
-      out.zone_flip_high   = rates[idx].high;
-      out.zone_anchor_low  = rates[m].low;
-      out.zone_anchor_high = rates[m].high;
       out.zone_top         = rates[m].high;
       out.zone_bottom      = rates[idx].low;
       out.invalid_level    = rates[idx].low;
@@ -998,25 +844,31 @@ inline bool __WB15_StageBuildMotherFlipDOWN(const MqlRates &rates[],
    if(!__WB15_StageBreakerAfterStart(st, rates[idx].time)) return false;
    if(!__WB15_StageIsBear(rates[idx])) return false;
 
-   for(int m = idx - 2; m >= 0; --m)
+   // Fast one-pass version of the original mother+inside scan. It preserves the
+   // same nearest-mother priority but avoids rescanning the inside range for each
+   // candidate mother on every M15 candle.
+   // Bound the historical mother search by InpMaxBarsInWave to prevent long
+   // full-history back scans after FSMS stage-1 starts.
+   int min_m = idx - InpMaxBarsInWave;
+   if(min_m < 0) min_m = 0;
+
+   double mid_max_high = -DBL_MAX;
+   double mid_min_low  = DBL_MAX;
+
+   for(int m = idx - 2; m >= min_m; --m)
    {
+      int mid_idx = m + 1;
+      if(mid_idx >= 0 && mid_idx < idx)
+      {
+         if(rates[mid_idx].high > mid_max_high) mid_max_high = rates[mid_idx].high;
+         if(rates[mid_idx].low  < mid_min_low)  mid_min_low  = rates[mid_idx].low;
+      }
+
       if(!__WB15_StageIsBull(rates[m]))
          continue;
 
-      int inside_count = 0;
-      bool all_inside = true;
-      for(int k = m + 1; k < idx; ++k)
-      {
-         if(!__WB15_StageInsideMotherHL(rates[m], rates[k]))
-         {
-            all_inside = false;
-            break;
-         }
-         inside_count++;
-      }
-
-      if(!all_inside || inside_count <= 0)
-         continue;
+      if(mid_max_high > rates[m].high) continue;
+      if(mid_min_low  < rates[m].low)  continue;
 
       if(rates[idx].close >= rates[m].low)
          continue;
@@ -1030,12 +882,6 @@ inline bool __WB15_StageBuildMotherFlipDOWN(const MqlRates &rates[],
       out.zone_kind        = (majic ? 0 : 2);
       out.zone_anchor_time = rates[m].time;
       out.zone_flip_time   = rates[idx].time;
-      out.zone_anchor_idx  = m;
-      out.zone_flip_idx    = idx;
-      out.zone_flip_low    = rates[idx].low;
-      out.zone_flip_high   = rates[idx].high;
-      out.zone_anchor_low  = rates[m].low;
-      out.zone_anchor_high = rates[m].high;
       out.zone_top         = rates[idx].high;
       out.zone_bottom      = rates[m].low;
       out.invalid_level    = rates[idx].high;
@@ -1114,21 +960,98 @@ inline bool __WB15_StageM1TouchInvalidTimes(const string sym,
       bool invalid = false;
 
       if(dir == DIR_UP)
-         invalid = (bars[i].low < (invalid_level - eps));
+         invalid = (bars[i].low < invalid_level);
       else
-         invalid = (bars[i].high > (invalid_level + eps));
+         invalid = (bars[i].high > invalid_level);
+
+      datetime event_time = __WB15_StableM15IntrabarTime(bars[i].time);
+      if(event_time <= 0)
+         continue;
+
+      // Conservative priority rule:
+      // if a single M1 candle both touches and pierces the invalidation edge,
+      // the zone is considered invalid immediately.  MQL rates do not expose
+      // the intrabar tick order, and accepting a trigger from such a candle can
+      // create trades from a dead M15 Flip/MajicFlip zone.
+      if(invalid && invalid_time <= 0)
+         invalid_time = event_time;
 
       if(touched && touch_time <= 0)
-         touch_time = __WB15_StableM15IntrabarTime(bars[i].time);
+         touch_time = event_time;
 
-      if(invalid && invalid_time <= 0)
-         invalid_time = __WB15_StableM15IntrabarTime(bars[i].time);
+      if(invalid_time > 0 && (touch_time <= 0 || invalid_time <= touch_time))
+         return true;
 
-      if(touch_time > 0 || invalid_time > 0)
+      if(touch_time > 0 && invalid_time > 0)
          return true;
    }
 
-   return false;
+   return (touch_time > 0 || invalid_time > 0);
+}
+
+inline void __WB15_StageInvalidateZone(const string sym,
+                                       WB15StageState &st,
+                                       const datetime invalid_time,
+                                       const string reason,
+                                       const bool send_m1_stop)
+{
+   if(!st.active) return;
+   if(!st.zone_active) return;
+   if(invalid_time <= 0) return;
+
+   const bool had_m1_on = st.on_sent;
+   const Direction stop_dir = __WB15_Opposite(st.start_dir);
+
+   if(InpDebugPrints)
+      Print("[WB15-STAGE] Stage-2 zone invalidated | zone=",
+            __WB15_StageSourceLabel(st.zone_source, st.zone_kind),
+            " | dir=", (st.start_dir==DIR_UP ? "UP" : "DOWN"),
+            " | t=", TimeToString(invalid_time, TIME_DATE|TIME_SECONDS),
+            " | reason=", reason);
+
+   WBLOG_M15ZoneStatus(st.log_zone_id, "INVALIDATED", invalid_time, (int)invalid_time, reason);
+   WBLOG_LogM15GateEvent(st.log_context_id, st.log_zone_id, "ZONE_INVALIDATED", st.start_dir, invalid_time, (int)invalid_time,
+                         0.0, 0.0, 0.0, 0.0, st.zone_bottom, st.zone_top, reason);
+
+   if(send_m1_stop && had_m1_on)
+   {
+      // This is not the original Stage-1 OFF.  It only closes the already-open
+      // M1 trigger window because the Stage-2 Flip/MajicFlip zone has died.
+      TriggerM15SignalGate_RecordExact(sym, WB15_KIND_STOP_ZONE_INVALIDATED, st.start_ns, stop_dir, invalid_time);
+
+      WB15_MasterPushEvent(sym,
+                           WB15_KIND_STOP_ZONE_INVALIDATED,
+                           st.start_ns,
+                           stop_dir,
+                           invalid_time,
+                           st.log_context_id,
+                           st.log_zone_id,
+                           0,
+                           st.zone_source,
+                           st.zone_kind,
+                           st.zone_bottom,
+                           st.zone_top,
+                           reason);
+
+      WBLOG_LogM15GateEvent(st.log_context_id, st.log_zone_id, "M1_STOP_SENT", st.start_dir, invalid_time, (int)invalid_time,
+                            0.0, 0.0, 0.0, 0.0, st.zone_bottom, st.zone_top, "zone_invalidated_after_m1_start");
+   }
+
+   WBLOG_LogResetEvent("ZONE_ONLY_RESET",
+                       st.start_dir,
+                       st.log_context_id,
+                       st.log_zone_id,
+                       0,
+                       "ZONE_INVALIDATED",
+                       (had_m1_on ? "STAGE_3_M1_ON_SENT" : "STAGE_2_ZONE_ACTIVE"),
+                       "STAGE_2_SEARCH",
+                       invalid_time,
+                       PERIOD_M15,
+                       0.0,
+                       0.0,
+                       0.0);
+
+   __WB15_StageClearZone(st);
 }
 
 inline void __WB15_StagePublishON(const string sym,
@@ -1144,87 +1067,15 @@ inline void __WB15_StagePublishON(const string sym,
    // not the Stage-1 seed candle.
    TriggerM15SignalGate_RecordExact(sym, st.start_kind, st.start_ns, st.start_dir, touch_time);
 
-   AnalysisLogger_LogM15StageDetailed(sym,
-                                      st.stage_seq,
-                                      st.zone_seq,
-                                      st.start_kind,
-                                      st.start_ns,
-                                      st.start_dir,
-                                      touch_time,
-                                      -1,
-                                      "ZONE_RETOUCHED",
-                                      st.zone_source,
-                                      st.zone_kind,
-                                      st.zone_flip_idx,
-                                      st.zone_flip_time,
-                                      0,0,0,0,
-                                      st.zone_anchor_idx,
-                                      st.zone_anchor_time,
-                                      0,0,0,0,
-                                      st.zone_bottom,
-                                      st.zone_top,
-                                      st.invalid_level,
-                                      st.zone_bottom,
-                                      touch_time,
-                                      "",
-                                      "price_returned_to_m15_zone");
+   WBLOG_M15ZoneStatus(st.log_zone_id, "RETOUCHED", touch_time, (int)touch_time, "ZONE_RETOUCH_M1_START_SENT");
+   WBLOG_LogM15GateEvent(st.log_context_id, st.log_zone_id, "ZONE_RETOUCH", st.start_dir, touch_time, (int)touch_time, 0.0, 0.0, 0.0, 0.0, st.zone_bottom, st.zone_top, "retouch_confirmed");
 
-   AnalysisLogger_LogM15StageDetailed(sym,
-                                      st.stage_seq,
-                                      st.zone_seq,
-                                      st.start_kind,
-                                      st.start_ns,
-                                      st.start_dir,
-                                      touch_time,
-                                      -1,
-                                      "START_SENT_TO_M1",
-                                      st.zone_source,
-                                      st.zone_kind,
-                                      st.zone_flip_idx,
-                                      st.zone_flip_time,
-                                      0,0,0,0,
-                                      st.zone_anchor_idx,
-                                      st.zone_anchor_time,
-                                      0,0,0,0,
-                                      st.zone_bottom,
-                                      st.zone_top,
-                                      st.invalid_level,
-                                      st.zone_bottom,
-                                      touch_time,
-                                      "",
-                                      "stage3_confirmed_bridge_start_published_to_m1");
-
-   AnalysisLogger_LogM15ZoneSnapshot(sym,
-                                     st.stage_seq,
-                                     st.zone_seq,
-                                     st.start_dir,
-                                     st.start_kind,
-                                     st.zone_source,
-                                     st.zone_kind,
-                                     st.zone_flip_time,
-                                     st.zone_flip_idx,
-                                     st.zone_flip_low,
-                                     st.zone_flip_high,
-                                     st.zone_anchor_time,
-                                     st.zone_anchor_idx,
-                                     st.zone_anchor_low,
-                                     st.zone_anchor_high,
-                                     st.zone_bottom,
-                                     st.zone_top,
-                                     st.invalid_level,
-                                     st.zone_flip_time,
-                                     touch_time,
-                                     -1,
-                                     true,
-                                     touch_time,
-                                     false,
-                                     0,
-                                     "",
-                                     0,
-                                     "RETOUCHED_AND_SENT");
-
-   WB15_MasterPushEvent(sym, st.start_kind, st.start_ns, st.start_dir, touch_time);
+   WB15_MasterPushEvent(sym, st.start_kind, st.start_ns, st.start_dir, touch_time,
+                        st.log_context_id, st.log_zone_id, 0, st.zone_source, st.zone_kind, st.zone_bottom, st.zone_top, "");
    st.on_sent = true;
+
+   WBLOG_LogM15GateEvent(st.log_context_id, st.log_zone_id, "M1_START_SENT", st.start_dir, touch_time, (int)touch_time, 0.0, 0.0, 0.0, 0.0, st.zone_bottom, st.zone_top, "stage3_start_published_to_m1");
+   WBLOG_LogStateTransition("WB15_SignalBridge", "STAGE_2_ZONE_ACTIVE", "STAGE_3_M1_ON_SENT", st.start_dir, st.log_context_id, st.log_zone_id, 0, 0, "ZONE_RETOUCH", touch_time, PERIOD_M15, (int)touch_time, 0.0, 0.0, 0.0, 0.0);
 
    if(InpDebugPrints)
       Print("[WB15-STAGE] Stage-3 retouch -> M1 ON | kind=", __WB15_StartKindLabel(st.start_kind),
@@ -1233,104 +1084,12 @@ inline void __WB15_StagePublishON(const string sym,
             " | touch=", TimeToString(touch_time, TIME_DATE|TIME_SECONDS));
 }
 
-
-inline void __WB15_StageLogInvalidAndClear(const string sym, WB15StageState &st, const datetime invalid_time, const string reason)
-{
-   if(!st.active || !st.zone_active)
-   {
-      __WB15_StageClearZone(st);
-      return;
-   }
-
-   AnalysisLogger_LogM15StageDetailed(sym,
-                                      st.stage_seq,
-                                      st.zone_seq,
-                                      st.start_kind,
-                                      st.start_ns,
-                                      st.start_dir,
-                                      invalid_time,
-                                      -1,
-                                      "ZONE_INVALIDATED",
-                                      st.zone_source,
-                                      st.zone_kind,
-                                      st.zone_flip_idx,
-                                      st.zone_flip_time,
-                                      0,0,0,0,
-                                      st.zone_anchor_idx,
-                                      st.zone_anchor_time,
-                                      0,0,0,0,
-                                      st.zone_bottom,
-                                      st.zone_top,
-                                      st.invalid_level,
-                                      0,
-                                      0,
-                                      reason,
-                                      "zone_invalidated_before_m1_start");
-
-   AnalysisLogger_LogM15StageDetailed(sym,
-                                      st.stage_seq,
-                                      st.zone_seq,
-                                      st.start_kind,
-                                      st.start_ns,
-                                      st.start_dir,
-                                      invalid_time,
-                                      -1,
-                                      "STAGE2_RESET",
-                                      st.zone_source,
-                                      st.zone_kind,
-                                      st.zone_flip_idx,
-                                      st.zone_flip_time,
-                                      0,0,0,0,
-                                      st.zone_anchor_idx,
-                                      st.zone_anchor_time,
-                                      0,0,0,0,
-                                      st.zone_bottom,
-                                      st.zone_top,
-                                      st.invalid_level,
-                                      0,
-                                      0,
-                                      reason,
-                                      "stage2_and_stage3_reset_waiting_for_new_flip_or_majicflip");
-
-   AnalysisLogger_LogM15ZoneSnapshot(sym,
-                                     st.stage_seq,
-                                     st.zone_seq,
-                                     st.start_dir,
-                                     st.start_kind,
-                                     st.zone_source,
-                                     st.zone_kind,
-                                     st.zone_flip_time,
-                                     st.zone_flip_idx,
-                                     st.zone_flip_low,
-                                     st.zone_flip_high,
-                                     st.zone_anchor_time,
-                                     st.zone_anchor_idx,
-                                     st.zone_anchor_low,
-                                     st.zone_anchor_high,
-                                     st.zone_bottom,
-                                     st.zone_top,
-                                     st.invalid_level,
-                                     st.zone_flip_time,
-                                     0,
-                                     -1,
-                                     false,
-                                     0,
-                                     true,
-                                     invalid_time,
-                                     reason,
-                                     0,
-                                     "INVALIDATED_BEFORE_RETOUCH");
-
-   __WB15_StageClearZone(st);
-}
-
 inline void __WB15_StageProcessZoneRetouch(const string sym,
                                            WB15StageState &st,
                                            const MqlRates &bar)
 {
    if(!st.active) return;
    if(!st.zone_active) return;
-   if(st.on_sent) return;
    if(bar.time <= st.zone_flip_time) return;
 
    datetime touch_time = 0;
@@ -1346,34 +1105,67 @@ inline void __WB15_StageProcessZoneRetouch(const string sym,
 
    if(got_m1)
    {
-      if(touch_time > 0)
+      // BEFORE M1 ON: invalidation has priority over retouch when both are
+      // detected on the same M1 candle.  If retouch happened earlier and the
+      // invalidation happened later in the same M15 candle, publish ON and then
+      // immediately publish a zone-invalidation STOP at the invalid M1 candle.
+      if(!st.on_sent)
       {
-         __WB15_StagePublishON(sym, st, touch_time);
-         return;
-      }
+         if(invalid_time > 0 && (touch_time <= 0 || invalid_time <= touch_time))
+         {
+            __WB15_StageInvalidateZone(sym, st, invalid_time, "ZONE_INVALIDATED_BEFORE_RETOUCH", false);
+            return;
+         }
 
-      if(invalid_time > 0)
+         if(touch_time > 0)
+         {
+            __WB15_StagePublishON(sym, st, touch_time);
+
+            if(invalid_time > 0 && invalid_time > touch_time)
+            {
+               __WB15_StageInvalidateZone(sym, st, invalid_time, "ZONE_INVALIDATED_AFTER_RETOUCH", true);
+               return;
+            }
+
+            return;
+         }
+      }
+      else
       {
-         if(InpDebugPrints)
-            Print("[WB15-STAGE] Stage-2 zone invalidated before retouch | zone=",
-                  __WB15_StageSourceLabel(st.zone_source, st.zone_kind),
-                  " | t=", TimeToString(invalid_time, TIME_DATE|TIME_SECONDS));
-         __WB15_StageLogInvalidAndClear(sym, st, invalid_time, "INVALID_LEVEL_BROKEN_BEFORE_RETOUCH");
-         return;
+         // AFTER M1 ON: keep the Flip/MajicFlip zone alive only while price has
+         // not pierced its invalidation edge.  This closes the M1 trigger window
+         // before any trigger on the invalidating M1 candle can become a trade.
+         if(invalid_time > 0)
+         {
+            __WB15_StageInvalidateZone(sym, st, invalid_time, "ZONE_INVALIDATED_AFTER_M1_START", true);
+            return;
+         }
       }
    }
 
    // Fallback when M1 intrabar data is unavailable.
+   // Conservative priority: an M15 bar that both touches and pierces the invalid
+   // edge invalidates the zone instead of opening/keeping a trigger window.
    const double eps = __WB15_StageEps();
    bool touched_fallback = (bar.low <= (st.zone_top + eps) && bar.high >= (st.zone_bottom - eps));
    bool invalid_fallback = false;
 
    if(st.start_dir == DIR_UP)
-      invalid_fallback = (bar.low < (st.invalid_level - eps));
+      invalid_fallback = (bar.low < st.invalid_level);
    else
-      invalid_fallback = (bar.high > (st.invalid_level + eps));
+      invalid_fallback = (bar.high > st.invalid_level);
 
-   if(touched_fallback)
+   if(invalid_fallback)
+   {
+      __WB15_StageInvalidateZone(sym,
+                                 st,
+                                 bar.time,
+                                 (st.on_sent ? "ZONE_INVALIDATED_AFTER_M1_START_M15_FALLBACK" : "ZONE_INVALIDATED_BEFORE_RETOUCH_M15_FALLBACK"),
+                                 st.on_sent);
+      return;
+   }
+
+   if(!st.on_sent && touched_fallback)
    {
       datetime te = 0;
       if(!__WB15_FindFirstRangeTouchIntrabarTime(sym, bar.time, st.zone_bottom, st.zone_top, te))
@@ -1381,15 +1173,44 @@ inline void __WB15_StageProcessZoneRetouch(const string sym,
       __WB15_StagePublishON(sym, st, te);
       return;
    }
+}
 
-   if(invalid_fallback)
-   {
-      if(InpDebugPrints)
-         Print("[WB15-STAGE] Stage-2 zone invalidated | zone=",
-               __WB15_StageSourceLabel(st.zone_source, st.zone_kind),
-               " | M15=", TimeToString(bar.time, TIME_DATE|TIME_SECONDS));
-      __WB15_StageLogInvalidAndClear(sym, st, bar.time, "INVALID_LEVEL_BROKEN_BEFORE_RETOUCH");
-   }
+inline bool __WB15_StageTryArmZoneOnBar(const string sym,
+                                        WB15StageState &st,
+                                        const MqlRates &rates[],
+                                        const int n,
+                                        const int bar_idx)
+{
+   if(!st.active) return false;
+   if(st.zone_active) return false;
+   if(st.on_sent) return false;
+   if(bar_idx < 0 || bar_idx >= n) return false;
+
+   WB15StageState candidate;
+   if(!__WB15_StageBuildZoneOnClosedBar(rates, n, bar_idx, st, candidate))
+      return false;
+
+   st = candidate;
+   st.log_zone_id = WBLOG_M15FlipZoneCreated(sym,
+                                             st.log_context_id,
+                                             st.zone_source,
+                                             st.zone_kind,
+                                             st.start_dir,
+                                             st.zone_flip_time,
+                                             st.zone_anchor_time,
+                                             st.zone_bottom,
+                                             st.zone_top,
+                                             st.invalid_level);
+
+   if(InpDebugPrints)
+      Print("[WB15-STAGE] Stage-2 zone armed | kind=", __WB15_StartKindLabel(st.start_kind),
+            " | zone=", __WB15_StageSourceLabel(st.zone_source, st.zone_kind),
+            " | top=", DoubleToString(st.zone_top, _Digits),
+            " | bottom=", DoubleToString(st.zone_bottom, _Digits),
+            " | invalid=", DoubleToString(st.invalid_level, _Digits),
+            " | flip=", TimeToString(st.zone_flip_time, TIME_DATE|TIME_SECONDS));
+
+   return true;
 }
 
 inline void __WB15_StageProcessStateOnBar(const string sym,
@@ -1402,109 +1223,19 @@ inline void __WB15_StageProcessStateOnBar(const string sym,
    if(!st.active) return;
    if(bar_idx < 0 || bar_idx >= n) return;
 
+   bool had_zone_before_process = st.zone_active;
+
    if(!st.zone_active && !st.on_sent)
-   {
-      WB15StageState candidate;
-      if(__WB15_StageBuildZoneOnClosedBar(rates, n, bar_idx, st, candidate))
-      {
-         st = candidate;
-         st.zone_seq = ++g_wb15_stage_zone_counter;
-
-         double fo=0.0, fh=0.0, fl=0.0, fc=0.0; datetime ft=0;
-         double bo=0.0, bh=0.0, bl=0.0, bc=0.0; datetime bt=0;
-         __WB15_StageGetBarOHLC(rates, n, st.zone_flip_idx, fo, fh, fl, fc, ft);
-         __WB15_StageGetBarOHLC(rates, n, st.zone_anchor_idx, bo, bh, bl, bc, bt);
-
-         AnalysisLogger_LogM15StageDetailed(sym,
-                                            st.stage_seq,
-                                            st.zone_seq,
-                                            st.start_kind,
-                                            st.start_ns,
-                                            st.start_dir,
-                                            st.zone_flip_time,
-                                            st.zone_flip_idx,
-                                            (st.zone_source == 2 ? "STAGE2_MAJICFLIP_FOUND" : "STAGE2_FLIP_FOUND"),
-                                            st.zone_source,
-                                            st.zone_kind,
-                                            st.zone_flip_idx,
-                                            st.zone_flip_time,
-                                            fo, fh, fl, fc,
-                                            st.zone_anchor_idx,
-                                            st.zone_anchor_time,
-                                            bo, bh, bl, bc,
-                                            st.zone_bottom,
-                                            st.zone_top,
-                                            st.invalid_level,
-                                            0,
-                                            0,
-                                            "",
-                                            "stage2_zone_registered");
-
-         AnalysisLogger_LogM15StageDetailed(sym,
-                                            st.stage_seq,
-                                            st.zone_seq,
-                                            st.start_kind,
-                                            st.start_ns,
-                                            st.start_dir,
-                                            st.zone_flip_time,
-                                            st.zone_flip_idx,
-                                            "ZONE_CREATED",
-                                            st.zone_source,
-                                            st.zone_kind,
-                                            st.zone_flip_idx,
-                                            st.zone_flip_time,
-                                            fo, fh, fl, fc,
-                                            st.zone_anchor_idx,
-                                            st.zone_anchor_time,
-                                            bo, bh, bl, bc,
-                                            st.zone_bottom,
-                                            st.zone_top,
-                                            st.invalid_level,
-                                            0,
-                                            0,
-                                            "",
-                                            "m15_flip_majicflip_zone_created_and_waiting_for_retouch");
-
-         AnalysisLogger_LogM15ZoneSnapshot(sym,
-                                           st.stage_seq,
-                                           st.zone_seq,
-                                           st.start_dir,
-                                           st.start_kind,
-                                           st.zone_source,
-                                           st.zone_kind,
-                                           st.zone_flip_time,
-                                           st.zone_flip_idx,
-                                           fl,
-                                           fh,
-                                           st.zone_anchor_time,
-                                           st.zone_anchor_idx,
-                                           bl,
-                                           bh,
-                                           st.zone_bottom,
-                                           st.zone_top,
-                                           st.invalid_level,
-                                           st.zone_flip_time,
-                                           0,
-                                           -1,
-                                           false,
-                                           0,
-                                           false,
-                                           0,
-                                           "",
-                                           0,
-                                           "ACTIVE_WAITING_RETOUCH");
-
-         if(InpDebugPrints)
-            Print("[WB15-STAGE] Stage-2 zone armed | kind=", __WB15_StartKindLabel(st.start_kind),
-                  " | zone=", __WB15_StageSourceLabel(st.zone_source, st.zone_kind),
-                  " | top=", DoubleToString(st.zone_top, _Digits),
-                  " | bottom=", DoubleToString(st.zone_bottom, _Digits),
-                  " | invalid=", DoubleToString(st.invalid_level, _Digits),
-                  " | flip=", TimeToString(st.zone_flip_time, TIME_DATE|TIME_SECONDS));
-      }
-   }
+      __WB15_StageTryArmZoneOnBar(sym, st, rates, n, bar_idx);
 
    __WB15_StageProcessZoneRetouch(sym, st, rates[bar_idx]);
+
+   // If the previous Stage-2 zone was invalidated on this M15 candle, keep the
+   // Stage-1 signal alive and immediately resume Stage-2 search.  This allows
+   // the same closed M15 candle to become the new Flip/MajicFlip confirmation
+   // when it qualifies, while Stage-3 retouch is still blocked until later bars.
+   if(had_zone_before_process && !st.zone_active && !st.on_sent && st.active)
+      __WB15_StageTryArmZoneOnBar(sym, st, rates, n, bar_idx);
 }
 
 inline void WB15_MasterOnM15Bar(const string sym,
@@ -1515,6 +1246,8 @@ inline void WB15_MasterOnM15Bar(const string sym,
    if(!__WB15_IsMaster()) return;
    if(n <= 0) return;
    if(bar_idx < 0 || bar_idx >= n) return;
+
+   WBLOG_LogCandleAndFeatures(sym, PERIOD_M15, rates, n, bar_idx);
 
    __WB15_StageProcessStateOnBar(sym, g_wb15_stage_maj, rates, n, bar_idx);
    __WB15_StageProcessStateOnBar(sym, g_wb15_stage_min, rates, n, bar_idx);
@@ -1624,9 +1357,9 @@ inline void WB15_PublishStopMTC(const string sym, const Direction dir, const dat
    const datetime te = __WB15_CloseBasedEventTimeOrZero(t);
    if(te <= 0) return;
 
-   __WB15_StageStop(sym, WB15_KIND_STOP_MTC, dir, te);
+   __WB15_StageStop(dir, te);
 
-   WB15_MasterPushEvent(sym, WB15_KIND_STOP_MTC, ns, dir, te);
+   WB15_MasterPushEvent(sym, WB15_KIND_STOP_MTC, ns, dir, te, 0, 0, 0, 0, 0, 0.0, 0.0, "MTC_OFF");
 }
 
 // STOP (ON CLOSE, MAJ-only): MinorStarter must wait for M15 close
@@ -1637,9 +1370,9 @@ inline void WB15_PublishStopMinorStarter(const string sym, const Direction dir, 
    const datetime te = __WB15_CloseBasedEventTimeOrZero(t);
    if(te <= 0) return;
 
-   __WB15_StageStop(sym, WB15_KIND_STOP_MINORSTARTER, dir, te);
+   __WB15_StageStop(dir, te);
 
-   WB15_MasterPushEvent(sym, WB15_KIND_STOP_MINORSTARTER, WB15_NS_MAJ, dir, te);
+   WB15_MasterPushEvent(sym, WB15_KIND_STOP_MINORSTARTER, WB15_NS_MAJ, dir, te, 0, 0, 0, 0, 0, 0.0, 0.0, "MINORSTARTER_OFF");
 }
 
 // STOP (ON CLOSE, MAJ-only): MinorOff zone must wait for M15 close
@@ -1653,9 +1386,9 @@ inline void WB15_PublishStopMinorOffZone_MAJONLY(const string sym, const Directi
    const datetime te = __WB15_CloseBasedEventTimeOrZero(t);
    if(te <= 0) return;
 
-   __WB15_StageStop(sym, WB15_KIND_STOP_MINOROFF_ZONE, dir, te);
+   __WB15_StageStop(dir, te);
 
-   WB15_MasterPushEvent(sym, WB15_KIND_STOP_MINOROFF_ZONE, WB15_NS_MAJ, dir, te);
+   WB15_MasterPushEvent(sym, WB15_KIND_STOP_MINOROFF_ZONE, WB15_NS_MAJ, dir, te, 0, 0, 0, 0, 0, 0.0, 0.0, "MINOROFF_ZONE_OFF");
 }
 
 
@@ -1944,7 +1677,7 @@ inline bool __WB15_IsStartKind(const int kind)
 
 inline bool __WB15_IsStopKind(const int kind)
 {
-   return (kind == WB15_KIND_STOP_MTC || kind == WB15_KIND_STOP_MINORSTARTER || kind == WB15_KIND_STOP_MINOROFF_ZONE);
+   return (kind == WB15_KIND_STOP_MTC || kind == WB15_KIND_STOP_MINORSTARTER || kind == WB15_KIND_STOP_MINOROFF_ZONE || kind == WB15_KIND_STOP_ZONE_INVALIDATED);
 }
 
 inline bool __WB15_ShouldStop(const WB15ActiveState &st, const int stop_kind, const int stop_ns, const Direction stop_dir)
@@ -2071,19 +1804,6 @@ inline void WB15_Slave_OnTimer(const string sym)
                }
 
                __WB15_DrawSignalMarker(sym, run_id, i, t, false, g_wb15_state.start_dir, 0, 0);
-               AnalysisLogger_LogBridgeSlave(sym,
-                                             i,
-                                             kind,
-                                             ns,
-                                             dir,
-                                             t,
-                                             on_bar_time,
-                                             iBarShift(sym, PERIOD_M1, on_bar_time, false),
-                                             false,
-                                             g_wb15_state.start_bar_time,
-                                             on_bar_time,
-                                             "AUTO_RESTART_ON_NEW_START",
-                                             "slave_auto_closed_previous_window_on_new_start");
                g_wb15_state.active = false;
             }
 
@@ -2121,20 +1841,6 @@ inline void WB15_Slave_OnTimer(const string sym)
 
             // Draw ON marker + type line
             __WB15_DrawSignalMarker(sym, run_id, i, t, true, dir, kind, ns);
-
-            AnalysisLogger_LogBridgeSlave(sym,
-                                          i,
-                                          kind,
-                                          ns,
-                                          dir,
-                                          t,
-                                          on_bar_time,
-                                          iBarShift(sym, PERIOD_M1, on_bar_time, false),
-                                          true,
-                                          on_bar_time,
-                                          0,
-                                          "",
-                                          "slave_received_start_and_activated_window");
          }
          else if(__WB15_IsStopKind(kind))
          {
@@ -2159,25 +1865,7 @@ inline void WB15_Slave_OnTimer(const string sym)
                   }
                }
 
-               datetime off_bar_time_log = 0;
-               if(!__WB15_ResolveM15BarTime(sym, t, off_bar_time_log))
-                  off_bar_time_log = t;
-
                __WB15_DrawSignalMarker(sym, run_id, i, t, false, g_wb15_state.start_dir, 0, 0);
-
-               AnalysisLogger_LogBridgeSlave(sym,
-                                             i,
-                                             kind,
-                                             ns,
-                                             dir,
-                                             t,
-                                             off_bar_time_log,
-                                             iBarShift(sym, PERIOD_M1, off_bar_time_log, false),
-                                             false,
-                                             g_wb15_state.start_bar_time,
-                                             off_bar_time_log,
-                                             AnalysisLogger_SignalKindName(kind),
-                                             "slave_received_stop_and_deactivated_window");
 
                g_wb15_state.active = false;
             }

@@ -1,4 +1,3 @@
-
 #ifndef WAVEBOT_TRIGGER_M15_SIGNAL_GATE_MQH
 #define WAVEBOT_TRIGGER_M15_SIGNAL_GATE_MQH
 
@@ -9,9 +8,10 @@
 #define TRGM15G_KIND_START_FSMS        3
 #define TRGM15G_KIND_START_GOOZ        4
 
-#define TRGM15G_KIND_STOP_MTC          10
-#define TRGM15G_KIND_STOP_MINORSTARTER 11
-#define TRGM15G_KIND_STOP_MINOROFF     12
+#define TRGM15G_KIND_STOP_MTC              10
+#define TRGM15G_KIND_STOP_MINORSTARTER     11
+#define TRGM15G_KIND_STOP_MINOROFF         12
+#define TRGM15G_KIND_STOP_ZONE_INVALIDATED 13
 
 struct TriggerM15SignalGateEvent
 {
@@ -56,7 +56,8 @@ inline bool __TRGM15_IsStopKind(const int kind)
 {
    return (kind == TRGM15G_KIND_STOP_MTC ||
            kind == TRGM15G_KIND_STOP_MINORSTARTER ||
-           kind == TRGM15G_KIND_STOP_MINOROFF);
+           kind == TRGM15G_KIND_STOP_MINOROFF ||
+           kind == TRGM15G_KIND_STOP_ZONE_INVALIDATED);
 }
 
 inline string TriggerM15SignalGate_KindName(const int kind)
@@ -67,7 +68,8 @@ inline string TriggerM15SignalGate_KindName(const int kind)
    if(kind == TRGM15G_KIND_START_GOOZ)        return "GOOZBAGHALI";
    if(kind == TRGM15G_KIND_STOP_MTC)          return "MTC";
    if(kind == TRGM15G_KIND_STOP_MINORSTARTER) return "MINORSTARTER";
-   if(kind == TRGM15G_KIND_STOP_MINOROFF)     return "MINOROFF_ZONE";
+   if(kind == TRGM15G_KIND_STOP_MINOROFF)         return "MINOROFF_ZONE";
+   if(kind == TRGM15G_KIND_STOP_ZONE_INVALIDATED) return "ZONE_INVALIDATED";
    return "UNKNOWN";
 }
 
@@ -189,4 +191,3 @@ inline void TriggerM15SignalGate_RecordClose(const string    sym,
 }
 
 #endif // WAVEBOT_TRIGGER_M15_SIGNAL_GATE_MQH
-

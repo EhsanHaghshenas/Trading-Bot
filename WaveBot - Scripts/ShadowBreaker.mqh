@@ -1,4 +1,3 @@
-
 // WaveBot/ShadowBreaker.mqh
 
 // WaveBot/ShadowBreaker.mqh
@@ -488,4 +487,3 @@ inline void     SB_DN_ClearCycle()      { SB_DN_Reset();             }
 inline bool     SB_DN_BinaryPhaseActive(){ return (g_sb_dn_sb_marked && g_sb_dn_watch_active); }
 
 #endif // WAVEBOT_SHADOWBREAKER_MQH
-

@@ -1,5 +1,4 @@
-
-#ifndef WAVEBOT_FSMS_LIFECYCLE_MQH
+﻿#ifndef WAVEBOT_FSMS_LIFECYCLE_MQH
 #define WAVEBOT_FSMS_LIFECYCLE_MQH
 
 #include <WaveBot/Types.mqh>
@@ -268,4 +267,5 @@ inline void FSMSLC_FinishTerminal(const datetime resume_after)
 }
 
 #endif // WAVEBOT_FSMS_LIFECYCLE_MQH
+
 

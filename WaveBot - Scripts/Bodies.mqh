@@ -1,4 +1,3 @@
-
 #ifndef WAVEBOT_BODIES_MQH
 #define WAVEBOT_BODIES_MQH
 
@@ -78,4 +77,3 @@ void BuildInsideClusterFlagsHL(const MqlRates &rates[], const int n,
 }
 
 #endif // WAVEBOT_BODIES_MQH
-

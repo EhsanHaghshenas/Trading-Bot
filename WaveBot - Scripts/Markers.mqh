@@ -1,4 +1,3 @@
-
 #ifndef WAVEBOT_MARKERS_MQH
 #define WAVEBOT_MARKERS_MQH
 
@@ -115,4 +114,3 @@ inline void Markers_Clear_Waves_CurrentScan()
 }
 
 #endif // WAVEBOT_MARKERS_MQH
-

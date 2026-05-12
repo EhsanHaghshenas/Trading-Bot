@@ -1,4 +1,3 @@
-
 #ifndef WAVEBOT_FSMS_MQH
 #define WAVEBOT_FSMS_MQH
 
@@ -54,6 +53,19 @@ struct FSMSCtx
       // ??????? ?????? ?? FSMS ?? ???? ????? ??? ?????
    int      same_w3_c1_index;   // ????? C1 ???? ?????? (W3 ????)
    datetime same_w3_c1_time;    // ???? C1 ???? ??????
+
+
+   // Performance cache: repeated W3 count checks during FSMS confirmation
+   // are deterministic for the same startIdx/history tail.
+   int      w3_cache_start_idx;
+   int      w3_cache_n;
+   datetime w3_cache_last_time;
+   bool     w3_cache_ready;
+   bool     w3_cache_ok;
+   int      w3_cache_k2;
+   int      w3_cache_k3;
+   int      w3_cache_k4;
+   int      w3_cache_end;
 };
 
 // ?? ?????: ?? ?? W3-UP? ???? DOWN ? FSMS_U? ?? ?? W3-DOWN? ???? UP ? FSMS_D
@@ -102,6 +114,16 @@ inline void __FSMS_Reset(FSMSCtx &S)
    // NEW: ???? ??????? ???? ??????
    S.same_w3_c1_index = -1;
    S.same_w3_c1_time  = 0;
+
+   S.w3_cache_start_idx = -1;
+   S.w3_cache_n         = -1;
+   S.w3_cache_last_time = 0;
+   S.w3_cache_ready     = false;
+   S.w3_cache_ok        = false;
+   S.w3_cache_k2        = -1;
+   S.w3_cache_k3        = -1;
+   S.w3_cache_k4        = -1;
+   S.w3_cache_end       = -1;
 }
 
 inline void __FSMS_ResetKeepW3(FSMSCtx &S)
@@ -115,6 +137,99 @@ inline void __FSMS_ResetKeepW3(FSMSCtx &S)
    S.w3_seen          = had_w3;
    S.same_w3_c1_index = w3_idx;
    S.same_w3_c1_time  = w3_time;
+}
+
+inline void __FSMS_W3CacheClear(FSMSCtx &S)
+{
+   S.w3_cache_start_idx = -1;
+   S.w3_cache_n         = -1;
+   S.w3_cache_last_time = 0;
+   S.w3_cache_ready     = false;
+   S.w3_cache_ok        = false;
+   S.w3_cache_k2        = -1;
+   S.w3_cache_k3        = -1;
+   S.w3_cache_k4        = -1;
+   S.w3_cache_end       = -1;
+}
+
+inline bool __FSMS_W3CacheMatches(const FSMSCtx &S,
+                                  const MqlRates &rates[],
+                                  const int n,
+                                  const int startIdx)
+{
+   if(!S.w3_cache_ready) return false;
+   if(S.w3_cache_start_idx != startIdx) return false;
+   if(S.w3_cache_n != n) return false;
+   if(n <= 0) return false;
+   if(S.w3_cache_last_time != rates[n-1].time) return false;
+   return true;
+}
+
+inline void __FSMS_W3CacheStore(FSMSCtx &S,
+                                const MqlRates &rates[],
+                                const int n,
+                                const int startIdx,
+                                const bool ok,
+                                const int k2,
+                                const int k3,
+                                const int k4,
+                                const int end_idx)
+{
+   S.w3_cache_start_idx = startIdx;
+   S.w3_cache_n         = n;
+   S.w3_cache_last_time = (n > 0 ? rates[n-1].time : 0);
+   S.w3_cache_ready     = true;
+   S.w3_cache_ok        = ok;
+   S.w3_cache_k2        = k2;
+   S.w3_cache_k3        = k3;
+   S.w3_cache_k4        = k4;
+   S.w3_cache_end       = end_idx;
+}
+
+inline bool __FSMS_CheckWave3DownCached(FSMSCtx &S,
+                                        const MqlRates &rates[],
+                                        const bool &insideHL[],
+                                        const double &bodyLowEff[],
+                                        const double &bodyHighEff[],
+                                        const int n,
+                                        const int startIdx,
+                                        int &k2, int &k3, int &k4, int &w3e)
+{
+   if(__FSMS_W3CacheMatches(S, rates, n, startIdx))
+   {
+      k2  = S.w3_cache_k2;
+      k3  = S.w3_cache_k3;
+      k4  = S.w3_cache_k4;
+      w3e = S.w3_cache_end;
+      return S.w3_cache_ok;
+   }
+
+   bool ok = CheckWave3CountOnly_Local_Down(rates, insideHL, bodyLowEff, bodyHighEff, n, startIdx, k2, k3, k4, w3e);
+   __FSMS_W3CacheStore(S, rates, n, startIdx, ok, k2, k3, k4, w3e);
+   return ok;
+}
+
+inline bool __FSMS_CheckWave3UpCached(FSMSCtx &S,
+                                      const MqlRates &rates[],
+                                      const bool &insideHL[],
+                                      const double &bodyLowEff[],
+                                      const double &bodyHighEff[],
+                                      const int n,
+                                      const int startIdx,
+                                      int &k2, int &k3, int &k4, int &w3e)
+{
+   if(__FSMS_W3CacheMatches(S, rates, n, startIdx))
+   {
+      k2  = S.w3_cache_k2;
+      k3  = S.w3_cache_k3;
+      k4  = S.w3_cache_k4;
+      w3e = S.w3_cache_end;
+      return S.w3_cache_ok;
+   }
+
+   bool ok = CheckWave3CountOnly_Local(rates, insideHL, bodyLowEff, bodyHighEff, n, startIdx, k2, k3, k4, w3e);
+   __FSMS_W3CacheStore(S, rates, n, startIdx, ok, k2, k3, k4, w3e);
+   return ok;
 }
 
 inline void __FSMS_ApplyLifecycleTransition()
@@ -548,6 +663,8 @@ inline void FSMS_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
 
                   S.postBreak_c1_lock=false; S.postBreak_c1_ref=-1;
 
+                  __FSMS_W3CacheClear(S);
+
                   S.idx=S.cend; S.state=FSMS_WAIT_CONFIRM;
                   S.prelock_active = false;  // NEW: ??? FSMS ?? ????? ??? W2 ???? ???
                   found=true; break;
@@ -624,7 +741,7 @@ inline void FSMS_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
                   if(!S.have_w3 && startIdx>=0 && !insideHL[startIdx])
                   {
                      int a2=-1,a3=-1,a4=-1,w3e=-1;
-                     if(CheckWave3CountOnly_Local_Down(rates,insideHL,bodyLowEff,bodyHighEff,n,startIdx,a2,a3,a4,w3e))
+                     if(__FSMS_CheckWave3DownCached(S,rates,insideHL,bodyLowEff,bodyHighEff,n,startIdx,a2,a3,a4,w3e))
                      { S.have_w3=true; if(S.w3_c1<0) S.w3_c1=startIdx; S.k2=a2; S.k3=a3; S.k4=a4; S.w3_end=w3e; }
                   }
 
@@ -758,6 +875,8 @@ inline void FSMS_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
 
                   S.postBreak_c1_lock=false; S.postBreak_c1_ref=-1;
 
+                  __FSMS_W3CacheClear(S);
+
                   S.idx=S.cend; S.state=FSMS_WAIT_CONFIRM;
                   S.prelock_active = false;  // NEW: ??? FSMS ?? ????? ??? W2 ???? ???
                   found=true; break;
@@ -825,7 +944,7 @@ inline void FSMS_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
                   if(!S.have_w3 && startIdx>=0 && !insideHL[startIdx])
                   {
                      int a2=-1,a3=-1,a4=-1,w3e=-1;
-                     if(CheckWave3CountOnly_Local(rates,insideHL,bodyLowEff,bodyHighEff,n,startIdx,a2,a3,a4,w3e))
+                     if(__FSMS_CheckWave3UpCached(S,rates,insideHL,bodyLowEff,bodyHighEff,n,startIdx,a2,a3,a4,w3e))
                      { S.have_w3=true; if(S.w3_c1<0) S.w3_c1=startIdx; S.k2=a2; S.k3=a3; S.k4=a4; S.w3_end=w3e; }
                   }
 

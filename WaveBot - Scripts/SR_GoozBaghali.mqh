@@ -1,5 +1,3 @@
-
-// WaveBot/SR_GoozBaghali.mqh
 // WaveBot/SR_GoozBaghali.mqh
 #ifndef WAVEBOT_SR_GOOZBAGHALI_MQH
 #define WAVEBOT_SR_GOOZBAGHALI_MQH
@@ -976,4 +974,3 @@ inline void SR_GoozBaghali_OnBar_DOWN(const MqlRates &rates[],
 }
 
 #endif // WAVEBOT_SR_GOOZBAGHALI_MQH
-
