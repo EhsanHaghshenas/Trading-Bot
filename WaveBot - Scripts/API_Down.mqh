@@ -198,6 +198,13 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
       if(__hs > 0 && (__api_stop_time <= 0 || __api_stop_time > __hs))
          __api_stop_time = __hs;
    }
+   else
+   if(tf == PERIOD_M15 && bump_scan_id && Trigger_M15HardStopEnabled())
+   {
+      datetime __hs15 = Trigger_M15HardStopTime();
+      if(__hs15 > 0 && (__api_stop_time <= 0 || __api_stop_time > __hs15))
+         __api_stop_time = __hs15;
+   }
 
    MqlRates rates[]; int n = LoadRatesRange(sym, tf, from_adj, __api_stop_time, rates);
    if(n<=0)
@@ -262,6 +269,16 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
                   return pairs;
                }
                Trigger_M1HardStopMarkFinalBarIfNeeded(rates[i].time);
+            }
+            else
+            if(tf == PERIOD_M15 && bump_scan_id)
+            {
+               if(Trigger_M15HardStopShouldStopBeforeBar(rates[i].time))
+               {
+                  Race_LeaveAPIScan(__api_token);
+                  return pairs;
+               }
+               Trigger_M15HardStopMarkFinalBarIfNeeded(rates[i].time);
             }
 
             if(Race_CheckActiveRefBreak_Global(rates, n, i))
@@ -375,6 +392,16 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
                   return pairs;
                }
                Trigger_M1HardStopMarkFinalBarIfNeeded(rates[j].time);
+            }
+            else
+            if(tf == PERIOD_M15 && bump_scan_id)
+            {
+               if(Trigger_M15HardStopShouldStopBeforeBar(rates[j].time))
+               {
+                  Race_LeaveAPIScan(__api_token);
+                  return pairs;
+               }
+               Trigger_M15HardStopMarkFinalBarIfNeeded(rates[j].time);
             }
 
             if(Race_CheckActiveRefBreak_Global(rates, n, j))
