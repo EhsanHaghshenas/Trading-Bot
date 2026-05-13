@@ -229,6 +229,12 @@ inline void __WB15_StageResetAll()
    g_wb15_last_hwx_hwbb_stage_time = 0;
 }
 
+inline void WB15_ResetMinorStageState()
+{
+   if(!__WB15_IsMaster()) return;
+   __WB15_StageReset(g_wb15_stage_min);
+}
+
 
 
 // ============================================================================
@@ -1302,6 +1308,26 @@ inline void WB15_MasterOnM15Bar(const string sym,
 
    WBLOG_LogCandleAndFeatures(sym, PERIOD_M15, rates, n, bar_idx);
 
+   const int ns = __WB15_NS_FromMarkers();
+
+   // Process only the state that belongs to the currently executing world.
+   // During MIN archive scans the MAJ state must not be advanced by replayed
+   // minor bars, and during MAJ scans the MIN state must not be advanced by
+   // major bars.  Keeping the two states separated prevents repeated Stage-2/3
+   // replays and the visible M15 stall around MinorStarter.
+   if(ns == WB15_NS_MAJ)
+   {
+      __WB15_StageProcessStateOnBar(sym, g_wb15_stage_maj, rates, n, bar_idx);
+      return;
+   }
+
+   if(ns == WB15_NS_MIN)
+   {
+      __WB15_StageProcessStateOnBar(sym, g_wb15_stage_min, rates, n, bar_idx);
+      return;
+   }
+
+   // Legacy/standalone fallback when no namespace is available.
    __WB15_StageProcessStateOnBar(sym, g_wb15_stage_maj, rates, n, bar_idx);
    __WB15_StageProcessStateOnBar(sym, g_wb15_stage_min, rates, n, bar_idx);
 }

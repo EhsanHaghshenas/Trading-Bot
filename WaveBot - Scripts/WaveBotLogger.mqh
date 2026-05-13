@@ -272,8 +272,26 @@ inline bool WBLOG_OutputCanWriteNow()
    return g_wblog_scheduled_output_writing;
 }
 
+inline bool WBLOG_IsM15OwnedFile(const string filename)
+{
+   if(filename == "WaveBot_Candles_M15.csv") return true;
+   if(filename == "WaveBot_MarketFeatures_M15.csv") return true;
+   if(filename == "WaveBot_M15_MainSignals.csv") return true;
+   if(filename == "WaveBot_M15_FlipZones.csv") return true;
+   if(filename == "WaveBot_M15_GateEvents.csv") return true;
+   if(filename == "WaveBot_M15_To_M1_Bridge.csv") return true;
+   return false;
+}
+
 inline bool WBLOG_ShouldBufferBeforeScheduledWrite(const string filename)
 {
+   // In M1 final-only mode the M15 master owns the M15 diagnostic files.
+   // The M1 slave must not buffer and later replay/overwrite those files,
+   // otherwise final M1 output can erase valid M15 snapshots and leave
+   // header-only files.
+   if(g_wblog_final_only_output_enabled && WBLOG_IsM15OwnedFile(filename))
+      return false;
+
    if(filename == "WaveBot_Candles_M1.csv") return false;
    if(filename == "WaveBot_Candles_M15.csv") return false;
    if(filename == "WaveBot_MarketFeatures_M1.csv") return false;
@@ -344,6 +362,16 @@ inline void WBLOG_CloseAllFiles()
    ArrayResize(g_wblog_open_names, 0);
    ArrayResize(g_wblog_open_handles, 0);
    g_wblog_unflushed_rows = 0;
+}
+
+inline void WBLOG_DeleteFileIfCan(const string filename)
+{
+   if(!g_wblog_ready) return;
+   if(!WBLOG_OutputCanWriteNow()) return;
+
+   WBLOG_CloseOpenFile(filename);
+   string path = WBLOG_FilePath(filename);
+   FileDelete(path, FILE_COMMON);
 }
 
 inline bool WBLOG_OpenAppend(const string filename, int &handle)
@@ -475,6 +503,20 @@ inline void WBLOG_RewriteFileWithRows(const string filename, const string header
    FileClose(h);
 }
 
+inline void WBLOG_RewriteOptionalFileWithRows(const string filename, const string header, string &rows[])
+{
+   if(!g_wblog_ready) return;
+   if(!WBLOG_OutputCanWriteNow()) return;
+
+   if(ArraySize(rows) <= 0)
+   {
+      WBLOG_DeleteFileIfCan(filename);
+      return;
+   }
+
+   WBLOG_RewriteFileWithRows(filename, header, rows);
+}
+
 inline double WBLOG_PointOf(const string sym)
 {
    double p = SymbolInfoDouble(sym, SYMBOL_POINT);
@@ -596,6 +638,56 @@ inline string WBLOG_FileHeader(const string name)
    return "run_id,details";
 }
 
+inline bool WBLOG_BufferHasRowsFor(const string filename)
+{
+   int n = ArraySize(g_wblog_deferred_rows);
+   for(int i=0; i<n; ++i)
+   {
+      if(g_wblog_deferred_names[i] == filename)
+         return true;
+   }
+   return false;
+}
+
+inline bool WBLOG_ShouldReplayDeferredRowNow(const string filename)
+{
+   if(g_wblog_final_only_output_enabled && WBLOG_IsM15OwnedFile(filename))
+      return false;
+   return true;
+}
+
+inline void WBLOG_ResetM1FinalOnlyFiles()
+{
+   // M1 final-only output rebuilds only files owned by the M1 slave.
+   // M15 snapshot/bridge/gate/candle files are owned by the M15 master and must
+   // not be overwritten by the terminal M1 hard-stop flush.
+   g_wblog_last_m1_candle = 0;
+
+   WBLOG_ResetFile("WaveBot_RunConfig.csv", WBLOG_FileHeader("WaveBot_RunConfig.csv"));
+   WBLOG_ResetFile("WaveBot_Params.csv", WBLOG_FileHeader("WaveBot_Params.csv"));
+   WBLOG_ResetFile("WaveBot_Candles_M1.csv", WBLOG_FileHeader("WaveBot_Candles_M1.csv"));
+   WBLOG_ResetFile("WaveBot_M1_TriggerCandidates.csv", WBLOG_FileHeader("WaveBot_M1_TriggerCandidates.csv"));
+   WBLOG_ResetFile("WaveBot_M1_Triggers.csv", WBLOG_FileHeader("WaveBot_M1_Triggers.csv"));
+   WBLOG_ResetFile("WaveBot_TradeCandidates.csv", WBLOG_FileHeader("WaveBot_TradeCandidates.csv"));
+   WBLOG_ResetFile("WaveBot_Trades.csv", WBLOG_FileHeader("WaveBot_Trades.csv"));
+   WBLOG_ResetFile("WaveBot_TradePath_M1.csv", WBLOG_FileHeader("WaveBot_TradePath_M1.csv"));
+   WBLOG_ResetFile("WaveBot_TradeMAE_MFE.csv", WBLOG_FileHeader("WaveBot_TradeMAE_MFE.csv"));
+   WBLOG_ResetFile("WaveBot_EquityCurve.csv", WBLOG_FileHeader("WaveBot_EquityCurve.csv"));
+   WBLOG_ResetFile("WaveBot_StateTransitions.csv", WBLOG_FileHeader("WaveBot_StateTransitions.csv"));
+   WBLOG_ResetFile("WaveBot_ResetEvents.csv", WBLOG_FileHeader("WaveBot_ResetEvents.csv"));
+   WBLOG_ResetFile("WaveBot_SummaryByRun.csv", WBLOG_FileHeader("WaveBot_SummaryByRun.csv"));
+   WBLOG_ResetFile("WaveBot_MarketFeatures_M1.csv", WBLOG_FileHeader("WaveBot_MarketFeatures_M1.csv"));
+
+   // RejectedTriggers is sparse/optional. Keep it absent unless at least one
+   // rejected-trigger row exists in the final replay buffer.
+   WBLOG_DeleteFileIfCan("WaveBot_RejectedTriggers.csv");
+   if(WBLOG_BufferHasRowsFor("WaveBot_RejectedTriggers.csv"))
+      WBLOG_ResetFile("WaveBot_RejectedTriggers.csv", WBLOG_FileHeader("WaveBot_RejectedTriggers.csv"));
+
+   g_wblog_snapshot_dirty_contexts = false;
+   g_wblog_snapshot_dirty_zones    = false;
+}
+
 inline void WBLOG_ResetAllFiles()
 {
    // A clean rebuild must reset candle de-dup cursors as well as file contents.
@@ -619,7 +711,8 @@ inline void WBLOG_ResetAllFiles()
    WBLOG_ResetFile("WaveBot_EquityCurve.csv", WBLOG_FileHeader("WaveBot_EquityCurve.csv"));
    WBLOG_ResetFile("WaveBot_StateTransitions.csv", WBLOG_FileHeader("WaveBot_StateTransitions.csv"));
    WBLOG_ResetFile("WaveBot_ResetEvents.csv", WBLOG_FileHeader("WaveBot_ResetEvents.csv"));
-   WBLOG_ResetFile("WaveBot_RejectedTriggers.csv", WBLOG_FileHeader("WaveBot_RejectedTriggers.csv"));
+   // Sparse/optional file: keep absent unless a rejected trigger is actually logged.
+   WBLOG_DeleteFileIfCan("WaveBot_RejectedTriggers.csv");
    WBLOG_ResetFile("WaveBot_SummaryByRun.csv", WBLOG_FileHeader("WaveBot_SummaryByRun.csv"));
    WBLOG_ResetFile("WaveBot_MarketFeatures_M1.csv", WBLOG_FileHeader("WaveBot_MarketFeatures_M1.csv"));
    WBLOG_ResetFile("WaveBot_MarketFeatures_M15.csv", WBLOG_FileHeader("WaveBot_MarketFeatures_M15.csv"));
@@ -640,19 +733,30 @@ inline void WBLOG_BeginScheduledOutputWrite()
    g_wblog_scheduled_output_writing = true;
 
    // Create a clean CSV set exactly at the final/deferred output point.
-   WBLOG_ResetAllFiles();
+   if(g_wblog_final_only_output_enabled)
+      WBLOG_ResetM1FinalOnlyFiles();
+   else
+      WBLOG_ResetAllFiles();
 
    // Replay buffered low-frequency rows accumulated before the scheduled date.
    int n = ArraySize(g_wblog_deferred_rows);
    for(int i=0; i<n; ++i)
-      WBLOG_WriteLineAppend(g_wblog_deferred_names[i], g_wblog_deferred_rows[i]);
+   {
+      if(WBLOG_ShouldReplayDeferredRowNow(g_wblog_deferred_names[i]))
+         WBLOG_WriteLineAppend(g_wblog_deferred_names[i], g_wblog_deferred_rows[i]);
+   }
 
    ArrayResize(g_wblog_deferred_names, 0);
    ArrayResize(g_wblog_deferred_rows, 0);
 
-   // Context and zone files are snapshot files; rewrite their latest state once.
-   WBLOG_RewriteM15MainSignals();
-   WBLOG_RewriteM15Zones();
+   // Context and zone files are M15-master snapshot files. In M1 final-only
+   // mode they must be preserved from the M15 master, not rewritten from the
+   // M1 slave's local memory.
+   if(!g_wblog_final_only_output_enabled)
+   {
+      WBLOG_RewriteM15MainSignals();
+      WBLOG_RewriteM15Zones();
+   }
 }
 
 inline void WBLOG_EndScheduledOutputWrite(const bool mark_done)
@@ -919,6 +1023,14 @@ inline void WBLOG_ExportScheduledCandleSnapshots(const string sym,
                                                  const datetime from_time,
                                                  const datetime to_time)
 {
+   if(g_wblog_final_only_output_enabled)
+   {
+      // M1 hard-stop finalization is allowed to rebuild only M1-owned
+      // high-frequency files. M15 candle/feature files belong to the M15 master.
+      WBLOG_ExportCandlesSnapshotForTF(sym, PERIOD_M1, from_time, to_time);
+      return;
+   }
+
    WBLOG_ExportCandlesSnapshotForTF(sym, PERIOD_M15, from_time, to_time);
    WBLOG_ExportCandlesSnapshotForTF(sym, PERIOD_M1,  from_time, to_time);
 }
@@ -970,7 +1082,7 @@ inline void WBLOG_RewriteM15MainSignals()
       ArrayResize(rows, p+1);
       rows[p] = WBLOG_ContextRowToCSV(g_wblog_contexts[i]);
    }
-   WBLOG_RewriteFileWithRows("WaveBot_M15_MainSignals.csv", WBLOG_FileHeader("WaveBot_M15_MainSignals.csv"), rows);
+   WBLOG_RewriteOptionalFileWithRows("WaveBot_M15_MainSignals.csv", WBLOG_FileHeader("WaveBot_M15_MainSignals.csv"), rows);
 }
 
 inline string WBLOG_ZoneRowToCSV(const WBLogM15ZoneRow &z)
@@ -1014,7 +1126,7 @@ inline void WBLOG_RewriteM15Zones()
       ArrayResize(rows, p+1);
       rows[p] = WBLOG_ZoneRowToCSV(g_wblog_zones[i]);
    }
-   WBLOG_RewriteFileWithRows("WaveBot_M15_FlipZones.csv", WBLOG_FileHeader("WaveBot_M15_FlipZones.csv"), rows);
+   WBLOG_RewriteOptionalFileWithRows("WaveBot_M15_FlipZones.csv", WBLOG_FileHeader("WaveBot_M15_FlipZones.csv"), rows);
 }
 
 inline void WBLOG_AppendM15MainSignalSnapshot(const WBLogM15ContextRow &r)
@@ -1405,6 +1517,7 @@ inline void WBLOG_LogRejectedTrigger(const int type_id,
       cid = g_wblog_candidate_seq;
       g_wblog_last_candidate_id = cid;
    }
+   bool first_reject_row = (g_wblog_reject_seq <= 0);
    ++g_wblog_reject_seq;
    string trigger_type = (type_id == 2 ? "TYPE2_MAJICFLIP" : "TYPE1_FLIP");
    string row = "";
@@ -1426,6 +1539,8 @@ inline void WBLOG_LogRejectedTrigger(const int type_id,
    row = WBLOG_AppendCell(row, WBLOG_Double(zone_low, 8));
    row = WBLOG_AppendCell(row, WBLOG_Double(zone_high, 8));
    row = WBLOG_AppendCell(row, details);
+   if(first_reject_row && WBLOG_OutputCanWriteNow())
+      WBLOG_ResetFile("WaveBot_RejectedTriggers.csv", WBLOG_FileHeader("WaveBot_RejectedTriggers.csv"));
    WBLOG_WriteLineAppend("WaveBot_RejectedTriggers.csv", row);
 }
 

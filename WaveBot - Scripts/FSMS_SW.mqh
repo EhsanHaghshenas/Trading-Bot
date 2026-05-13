@@ -59,7 +59,17 @@ inline void __FSMS_SW_ResetHWMarkerLookupCache()
 
 inline bool __FSMS_SW_ShouldRunMinorWorldOnThisChart()
 {
-   return ((ENUM_TIMEFRAMES)Period() != PERIOD_M1);
+   if((ENUM_TIMEFRAMES)Period() == PERIOD_M1)
+      return false;
+
+   // Local MinorStarter/MinorOff lifecycle must be driven only by the MAJ world.
+   // During archived MIN scans this function must stay disabled; otherwise the
+   // MIN replay can advance MAJ-side MinorOff cursors and leave a real MAJ
+   // MinorStarter open until the end of the whole historical scan.
+   if(Markers_GetNamespace() == "MIN")
+      return false;
+
+   return true;
 }
 
 inline bool __FSMS_SW_ShouldRunCoreLogicOnThisChart()
@@ -561,6 +571,29 @@ inline bool FSMS_SW_IsMinorLineageExpired(const int dir_code,
    return true;
 }
 
+inline void FSMS_SW_ClearMinorStarterStateByTagDir(const string tag,
+                                                        const Direction dir,
+                                                        const bool mark_done)
+{
+   if(dir == DIR_UP)
+   {
+      if(tag == "" || g_minor_starter_u_tag == tag)
+      {
+         g_minor_starter_u_active = false;
+         if(mark_done)
+            g_minor_off_u_done = true;
+      }
+      return;
+   }
+
+   if(tag == "" || g_minor_starter_d_tag == tag)
+   {
+      g_minor_starter_d_active = false;
+      if(mark_done)
+         g_minor_off_d_done = true;
+   }
+}
+
 // اگر به هر دلیل یک Starter جدید آمد در حالی که session قبلی هنوز open بود،
 // قبلی را فورس-کلوز می‌کنیم تا invariant رعایت شود: حداکثر یک session باز.
 inline void FSMS_SW_Session_ForceCloseOpen(const int end_idx, const datetime end_time)
@@ -575,6 +608,10 @@ inline void FSMS_SW_Session_ForceCloseOpen(const int end_idx, const datetime end
       g_fsms_sw_sessions[i].off_time = end_time;
       if(end_idx > g_fsms_sw_sessions[i].starter_idx)
          g_fsms_sw_sessions[i].bars_between = (end_idx - g_fsms_sw_sessions[i].starter_idx);
+
+      FSMS_SW_ClearMinorStarterStateByTagDir(g_fsms_sw_sessions[i].tag,
+                                             g_fsms_sw_sessions[i].dir,
+                                             true);
 
       if(InpDebugPrints)
          Print("[FSMS–SESSION] Force-close open session #", g_fsms_sw_sessions[i].tag,
@@ -658,6 +695,8 @@ inline bool FSMS_SW_Session_Close(const string tag,
    g_fsms_sw_sessions[si].off_idx      = off_idx;
    g_fsms_sw_sessions[si].off_time     = off_time;
    g_fsms_sw_sessions[si].bars_between = bars_between;
+
+   FSMS_SW_ClearMinorStarterStateByTagDir(tag, dir, true);
 
    if(InpDebugPrints)
       Print("[FSMS–SESSION] Close #", tag,
@@ -2247,10 +2286,12 @@ inline void FSMS_SW_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
    if(g_fsms_sw_up_active)   __SW_Scan_DN_After_FSMS_U(rates, insideHL, bodyLowEff, bodyHighEff, n, upto_j);
    if(g_fsms_sw_dn_active)   __SW_Scan_UP_After_FSMS_D(rates, insideHL, bodyLowEff, bodyHighEff, n, upto_j);
 
-   // --- NEW: پایش MinorOff بعد از MinorStarter (فقط روی چارتی که local-minor مجاز است)
+   // --- NEW: پایش MinorOff بعد از MinorStarter
+   // Only the MAJ world is allowed to advance the MinorOff cursor.  Archived MIN
+   // scans are logical replays and must not touch MAJ-side starter/off state.
    if(__FSMS_SW_ShouldRunMinorWorldOnThisChart())
       FSMS_SW_CheckMinorOff(rates, n, upto_j);
-   else
+   else if((ENUM_TIMEFRAMES)Period() == PERIOD_M1)
       g_minor_off_last_j = upto_j;
 }
 

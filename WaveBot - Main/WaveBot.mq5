@@ -20,7 +20,7 @@ input Direction         InpDirection           = DIR_DOWN;
 input bool              InpMostRecentOnly      = false;
 input bool              InpUseMonthsAgo        = false;
 input int               InpMonthsAgo           = 40;
-input datetime          InpScanFromDate        = D'2026.01.00 00:00';
+input datetime          InpScanFromDate        = D'2015.01.00 00:00';
 
 // --- ???? ????????? ????? ????? (???? ?????) ---
 input bool              InpRequireCloseBreakAboveW2H1 = true;
@@ -761,7 +761,10 @@ void OnTimer()
    TriggerStatement_SetBulkScanMode(false);
 
    if(g_role == WBROLE_MASTER_M15)
+   {
+      WBWM_FinalizeOpenMinorAtScanEnd(stop);
       WB15_MasterEnd(InpSymbol, stop);
+   }
 
    if(g_role == WBROLE_SLAVE_M1)
    {

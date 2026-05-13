@@ -82,13 +82,14 @@ static datetime            g_wbwm_last_maj_time      = 0;
 // NEW: minor session lifecycle
 static FSMS_SW_MinorSession g_wbwm_minor_s;
 // ------------------------------------------------------------------
-// MinorOff Stop-Gate (MIN world only)
+// MinorOff Stop-Gate (MAJ-owned, used to close deferred MIN archives)
 // ???: ??? ???? ??? ???? ???? ?????? ?? ???/?????? MinorOff ?? MAJ
 // ------------------------------------------------------------------
 static bool     g_wbwm_minor_stop_armed  = false;
 static datetime g_wbwm_minor_stop_start = 0;
 static double   g_wbwm_minor_stop_l1    = 0.0;
 static double   g_wbwm_minor_stop_l2    = 0.0;
+static int      g_wbwm_minor_stop_last_idx = -1;
 
 inline void WBWM_MinorStop_Disarm()
 {
@@ -96,6 +97,7 @@ inline void WBWM_MinorStop_Disarm()
    g_wbwm_minor_stop_start  = 0;
    g_wbwm_minor_stop_l1     = 0.0;
    g_wbwm_minor_stop_l2     = 0.0;
+   g_wbwm_minor_stop_last_idx = -1;
 }
 
 inline void WBWM_MinorStop_Arm(const datetime starter_time,
@@ -106,6 +108,7 @@ inline void WBWM_MinorStop_Arm(const datetime starter_time,
    g_wbwm_minor_stop_start  = starter_time;
    g_wbwm_minor_stop_l1     = off_level_1;
    g_wbwm_minor_stop_l2     = off_level_2;
+   g_wbwm_minor_stop_last_idx = -1;
 }
 
 inline bool WBWM_MinorStop_ShouldStop(const MqlRates &r)
@@ -297,6 +300,46 @@ inline int __WBWM_FindMinorOffIndex(const MqlRates &rates[], const int n,
    return -1;
 }
 
+inline int __WBWM_FindMinorOffIndexUpTo(const MqlRates &rates[], const int n,
+                                       const int starter_idx,
+                                       const int upto_idx,
+                                       const double off_level_1,
+                                       const double off_level_2)
+{
+   if(n <= 0) return -1;
+   if(upto_idx < 0) return -1;
+
+   int last = upto_idx;
+   if(last >= n) last = n - 1;
+
+   int from = starter_idx + 1;
+   if(from < 0) from = 0;
+   if(from > last) return -1;
+
+   for(int i = from; i <= last; ++i)
+   {
+      const double low  = rates[i].low;
+      const double high = rates[i].high;
+
+      bool crossed = false;
+
+      if(off_level_1 > 0.0)
+      {
+         if(low <= off_level_1 && high >= off_level_1)
+            crossed = true;
+      }
+      if(!crossed && off_level_2 > 0.0)
+      {
+         if(low <= off_level_2 && high >= off_level_2)
+            crossed = true;
+      }
+
+      if(crossed) return i;
+   }
+
+   return -1;
+}
+
 // Apply initial ext LQ for minor world WITHOUT drawing any lines.
 inline void __WBWM_ApplyMinorInitialExtLQ_NoDraw(const FSMS_SW_MinorSession &s)
 {
@@ -353,6 +396,7 @@ inline void WBWM_MinorSession_Activate(const FSMS_SW_MinorSession &s)
    g_wbwm_minor_tag_suffix = "_minor_" + s.tag;
 
    WBWM_MinorStop_Arm(s.starter_time, s.off_level_1, s.off_level_2);
+   g_wbwm_minor_stop_last_idx = s.starter_idx;
 }
 
 inline void WBWM_MinorSession_Deactivate()
@@ -362,6 +406,7 @@ inline void WBWM_MinorSession_Deactivate()
    g_wbwm_minor_tag_suffix = "";
    WBWM_MinorStop_Disarm();
    FSMS_SW_RuntimeMinor_Clear();
+   WB15_ResetMinorStageState();
    Markers_SetPreviewMode(false);
 
    WBWM_ContextInit(g_wbwm_minor);
@@ -379,6 +424,134 @@ inline void WBWM_ExpireMinorLineageInCurrentWorld(const FSMS_SW_MinorSession &s)
    SRMIT_ExpireMinorLineages(dir_code, s.starter_time);
    SRGB_ExpireMinorLineages(dir_code, s.starter_time);
 }
+
+inline int WBWM_MinorSession_BarsBetween(const FSMS_SW_MinorSession &s,
+                                           const int off_idx)
+{
+   if(off_idx > s.starter_idx)
+      return (off_idx - s.starter_idx);
+
+   return 1;
+}
+
+inline void WBWM_DrawMinorOffFallback(const MqlRates &rates[],
+                                      const int n,
+                                      const FSMS_SW_MinorSession &s,
+                                      const int off_idx)
+{
+   if(!InpDrawMarkers) return;
+   if(off_idx < 0 || off_idx >= n) return;
+   if(s.starter_idx < 0 || s.starter_idx >= n) return;
+
+   const MqlRates r = rates[off_idx];
+
+   FSMS_SW_DrawMinorSequenceArchive(rates, n, s.dir, s.tag, s.starter_idx, off_idx);
+
+   double span = r.high - r.low;
+   if(span <= 0.0) span = 10.0 * _Point;
+   double pad = span * 0.25;
+   if(pad < 3.0 * _Point) pad = 3.0 * _Point;
+
+   if(s.dir == DIR_UP)
+   {
+      MarkCandleText("MinorOff_U_" + s.tag, r.time, r.high + pad, "MinorOff", clrRed);
+      return;
+   }
+
+   MarkCandleText("MinorOff_D_" + s.tag, r.time, r.low - pad, "MinorOff", clrRed);
+}
+
+inline bool WBWM_CloseActiveMinorByFallbackOff(const MqlRates &rates[],
+                                               const int n,
+                                               const int upto_idx,
+                                               FSMS_SW_MinorSession &closed_s)
+{
+   if(!g_wbwm_minor_active) return false;
+   if(upto_idx < 0 || upto_idx >= n) return false;
+
+   FSMS_SW_MinorSession s = g_wbwm_minor_sess;
+   if(!s.used) return false;
+   if(s.starter_time <= 0) return false;
+
+   // Use a WorldManager-owned incremental scan from the original MinorStarter
+   // up to the current MAJ candle.  This catches the exact first MinorOff even if
+   // the FSMS_SW cursor was advanced by an archived MIN replay, without rebuilding
+   // or rescanning the whole active session on every later candle.
+   int scan_from_idx = g_wbwm_minor_stop_last_idx;
+   if(scan_from_idx < s.starter_idx)
+      scan_from_idx = s.starter_idx;
+   if(scan_from_idx < -1)
+      scan_from_idx = -1;
+
+   const int off_idx = __WBWM_FindMinorOffIndexUpTo(rates, n,
+                                                    scan_from_idx,
+                                                    upto_idx,
+                                                    s.off_level_1,
+                                                    s.off_level_2);
+   if(off_idx < 0)
+   {
+      g_wbwm_minor_stop_last_idx = upto_idx;
+      return false;
+   }
+
+   g_wbwm_minor_stop_last_idx = off_idx;
+
+   const MqlRates r = rates[off_idx];
+   if(r.time <= s.starter_time) return false;
+
+   const int bars_between = WBWM_MinorSession_BarsBetween(s, off_idx);
+
+   bool first_level_cross = false;
+   if(s.dir == DIR_UP)
+   {
+      if(s.off_level_1 > 0.0 && r.low <= s.off_level_1)
+         first_level_cross = true;
+   }
+   else
+   {
+      if(s.off_level_1 > 0.0 && r.high >= s.off_level_1)
+         first_level_cross = true;
+   }
+
+   FSMS_SW_Session_Close(s.tag, s.dir, off_idx, r.time, bars_between);
+   FSMS_SW_ClearMinorStarterStateByTagDir(s.tag, s.dir, true);
+
+   closed_s = s;
+   FSMS_SW_MinorSession saved_s;
+   if(FSMS_SW_Session_FindByTagDir(s.tag, s.dir, saved_s))
+      closed_s = saved_s;
+   else
+   {
+      closed_s.open         = false;
+      closed_s.off_idx      = off_idx;
+      closed_s.off_time     = r.time;
+      closed_s.bars_between = bars_between;
+   }
+
+   WBWM_DrawMinorOffFallback(rates, n, closed_s, off_idx);
+
+   // Match the original bridge stop semantics used by FSMS_SW_CheckMinorOff.
+   if(first_level_cross)
+   {
+      if(s.dir == DIR_UP)
+         WB15_PublishStopMinorOffZone_MAJONLY(InpSymbol, DIR_DOWN, r.time);
+      else
+         WB15_PublishStopMinorOffZone_MAJONLY(InpSymbol, DIR_UP, r.time);
+   }
+
+   if(InpDebugPrints)
+   {
+      Print("[WBWM-MINOR-OFF-FALLBACK] #", s.tag,
+            " | dir=", (s.dir == DIR_UP ? "UP" : "DOWN"),
+            " | off=", T(r.time),
+            " | bars_between=", bars_between,
+            " | L1=", DoubleToString(s.off_level_1, _Digits),
+            " | L2=", DoubleToString(s.off_level_2, _Digits));
+   }
+
+   return true;
+}
+
 
 inline void WBWM_DeleteMinorLiveOnlyObjects_CurrentScan()
 {
@@ -479,6 +652,58 @@ inline void WBWM_FinalizeMinorArchive(const FSMS_SW_MinorSession &closed_s,
    WBWM_ContextImport(g_wbwm_major);
    Markers_SetNamespace("MAJ");
    g_scan_id = maj_scan_id;
+}
+
+inline void WBWM_FinalizeClosedMinorSession(const FSMS_SW_MinorSession &closed_s,
+                                            const int maj_scan_id,
+                                            const datetime major_to_time)
+{
+   WBWM_FinalizeMinorArchive(closed_s,
+                             g_wbwm_minor_scan_id,
+                             g_wbwm_minor_tag_suffix,
+                             maj_scan_id,
+                             major_to_time);
+
+   WBWM_ExpireMinorLineageInCurrentWorld(closed_s);
+   WBWM_MinorSession_Deactivate();
+
+   Markers_SetNamespace("MAJ");
+   g_scan_id = maj_scan_id;
+}
+
+inline void WBWM_FinalizeOpenMinorAtScanEnd(const datetime major_to_time)
+{
+   if(!g_wbwm_inited)
+      WBWM_Init();
+
+   // M1 is a slave chart and must never execute local MIN archives.
+   if((ENUM_TIMEFRAMES)Period() == PERIOD_M1)
+      return;
+
+   if(!g_wbwm_minor_active)
+      return;
+
+   const int maj_scan_id = g_scan_id;
+
+   // Important: do NOT archive an actually-open session to the scan end.
+   // The previous stall fix did that, and when a MAJ MinorOff was missed it
+   // painted every candle from that MinorStarter to today's market as MIN.
+   // Closed sessions are finalized immediately when MinorOff/next-starter is
+   // detected; an open session at scan end must remain unarchived.
+   if(FSMS_SW_Session_FindOpen(g_wbwm_minor_sess.tag, g_wbwm_minor_sess.dir) >= 0)
+   {
+      Markers_SetNamespace("MAJ");
+      g_scan_id = maj_scan_id;
+      return;
+   }
+
+   FSMS_SW_MinorSession closed_s = g_wbwm_minor_sess;
+   FSMS_SW_MinorSession saved_s;
+
+   if(FSMS_SW_Session_FindByTagDir(closed_s.tag, closed_s.dir, saved_s))
+      closed_s = saved_s;
+
+   WBWM_FinalizeClosedMinorSession(closed_s, maj_scan_id, major_to_time);
 }
 
 // ------------------------------------------------------------------
@@ -586,67 +811,28 @@ inline void WBWM_ProcessMinorStarterEvents(const MqlRates &rates[],
          return;
       }
 
-      // --- 3) Run MIN step only up to THIS MAJ candle time ---
-      datetime step_to_time = maj_t;
-      if(major_to_time > 0 && step_to_time > major_to_time)
-         step_to_time = major_to_time;
-
-      if(step_to_time < g_wbwm_minor_sess.starter_time)
+      // If FSMS_SW_CheckMinorOff missed the MAJ close because a MIN replay or
+      // cursor shift interfered with its internal state, close the session here
+      // using the same stored off-levels.  This keeps the MinorStarter/MinorOff
+      // range correct without bringing back the heavy per-candle MIN rescan.
+      FSMS_SW_MinorSession fallback_closed;
+      if(WBWM_CloseActiveMinorByFallbackOff(rates, n, upto_j, fallback_closed))
+      {
+         WBWM_FinalizeClosedMinorSession(fallback_closed, maj_scan_id, major_to_time);
          return;
-
-      // Export MAJ snapshot (so MAJ continues with no side effects)
-      WBWM_ContextExport(g_wbwm_major);
-
-      // Build a clean MIN world for this candle-step
-      WBWM_ContextInit(g_wbwm_minor);
-      g_wbwm_minor.markers_ns = "MIN";
-      g_wbwm_minor.scan_id    = g_wbwm_minor_scan_id;
-      WBWM_ContextImport(g_wbwm_minor);
-
-      // Clear previous MIN objects of THIS session (to avoid orphan objects during rescan)
-      WBWM_DeleteAllObjects_CurrentScan();
-
-      // Apply initial extLQ anchor for MIN logic (no draw)
-      __WBWM_ApplyMinorInitialExtLQ_NoDraw(g_wbwm_minor_sess);
-      FSMS_SW_RuntimeMinor_Set(g_wbwm_minor_sess);
-      Markers_SetPreviewMode(true);
-
-      // Run MIN scan up to current candle (NO bump scan id)
-      const ENUM_TIMEFRAMES runtime_tf = __WBWM_RuntimeTF();
-
-      if(g_wbwm_minor_sess.dir == DIR_UP)
-      {
-         API_RunScanSequential_W2W3_Hunter(InpSymbol, runtime_tf,
-                                          g_wbwm_minor_sess.starter_time,
-                                          step_to_time,
-                                          true,
-                                          g_wbwm_minor_sess.ext_init_price,
-                                          g_wbwm_minor_sess.ext_init_time,
-                                          g_wbwm_minor_tag_suffix,
-                                          false);
-      }
-      else
-      {
-         API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, runtime_tf,
-                                               g_wbwm_minor_sess.starter_time,
-                                               step_to_time,
-                                               true,
-                                               g_wbwm_minor_sess.ext_init_price,
-                                               g_wbwm_minor_sess.ext_init_time,
-                                               g_wbwm_minor_tag_suffix,
-                                               false);
       }
 
-      FSMS_SW_RuntimeMinor_Clear();
-      WBWM_DeleteAllObjects_CurrentScan();
-      Markers_SetPreviewMode(false);
-
-      // Restore MAJ snapshot
-      WBWM_ContextImport(g_wbwm_major);
-
-      // HARD safety: force MAJ back (even if something leaked)
-      Markers_SetNamespace("MAJ");
-      g_scan_id = maj_scan_id;
+      // --- 3) Deferred MIN archive mode --------------------------------------
+      // Old behavior rebuilt the whole MIN world from MinorStarter up to the
+      // current MAJ candle on every single M15 candle.  On long 2015+ scans this
+      // produced repeated WB15/FSMS/SR side effects around MinorStarter and made
+      // the visual tester look stuck for a long time.
+      //
+      // The MAJ-side MinorStarter/MinorOff detection above remains unchanged and
+      // is backed up by the direct off-level fallback above.  The MIN world is now
+      // archived exactly once when the session closes; truly-open scan-end
+      // sessions are not rendered as a false multi-year MIN range.
+      return;
    }
 }
 
