@@ -33,6 +33,32 @@ inline ENUM_TIMEFRAMES __WBWM_RuntimeTF()
 }
 
 
+inline bool WBWM_MinorWorldEnabledOnThisChart()
+{
+   ENUM_TIMEFRAMES chart_tf   = (ENUM_TIMEFRAMES)Period();
+   ENUM_TIMEFRAMES runtime_tf = __WBWM_RuntimeTF();
+
+   // M1 slave and M15 master both use only the normal/main scan path.
+   if(chart_tf == PERIOD_M1 || chart_tf == PERIOD_M15)
+      return false;
+
+   // Standalone scans configured as M15 must also stay in the main world.
+   if(runtime_tf == PERIOD_M15)
+      return false;
+
+   return true;
+}
+
+inline void WBWM_DiscardPendingMinorStarterEvents()
+{
+   FSMS_SW_MinorSession discard;
+   while(FSMS_SW_PopMinorStartEvent(discard))
+   {
+      // Drain stale MAJ->MIN events when local-minor execution is disabled.
+   }
+}
+
+
 // ------------------------------------------------------------------
 // World snapshot (MAJ / MIN)
 // ------------------------------------------------------------------
@@ -246,6 +272,9 @@ inline void WBWM_Init()
    FSMS_SW_RuntimeMinor_Clear();
    WBWM_MinorStop_Disarm();
    Markers_SetPreviewMode(false);
+
+   if(!WBWM_MinorWorldEnabledOnThisChart())
+      WBWM_DiscardPendingMinorStarterEvents();
 
    g_wbwm_inited = true;
 }
@@ -493,10 +522,15 @@ inline void WBWM_ProcessMinorStarterEvents(const MqlRates &rates[],
    if(!g_wbwm_inited)
       WBWM_Init();
 
-   // روی چارت اسلیو M1 دیگر هیچ اجرای محلیِ MIN مجاز نیست.
-   // فقط مستر M15 می‌تواند دنیای مینور را اجرا و از طریق bridge به M1 سیگنال بدهد.
-   if((ENUM_TIMEFRAMES)Period() == PERIOD_M1)
+   // M1 and M15 both run the normal/main scan only.
+   // When disabled, drain any stale MinorStarter pulse and never activate MIN.
+   if(!WBWM_MinorWorldEnabledOnThisChart())
+   {
+      WBWM_DiscardPendingMinorStarterEvents();
+      if(g_wbwm_minor_active)
+         WBWM_MinorSession_Deactivate();
       return;
+   }
 
    // Only MAJ drives MIN (never run inside MIN)
    if(Markers_GetNamespace() != "MAJ")

@@ -11,6 +11,7 @@
 #include <WaveBot/Wave3_Down.mqh>     // DOWN W3
 #include <WaveBot/W2W3_ChainInvalidation.mqh>
 #include <WaveBot/C1W2Gate.mqh>
+#include <WaveBot/C1PreLock.mqh>
 #include <WaveBot/ExtLQ.mqh>
 #include <WaveBot/ExtLQ_Down.mqh>
 #include <WaveBot/ShadowBreaker.mqh>
@@ -77,6 +78,113 @@ inline bool Race_RefDown_IsActive() { return (g_active_ref_down_time > g_active_
 // getters for checks
 inline double Race_ActiveRef_Up()   { return g_active_ref_up; }
 inline double Race_ActiveRef_Down() { return g_active_ref_down; }
+
+// --- MTC event memory ------------------------------------------------------
+// Keeps the latest MTC body-break candle so back-to-back MTC BB Special flips
+// can rebuild the next opposite reference from the local high/low between the
+// previous MTC candle and the current special MTC candle.
+static bool      g_race_last_mtc_valid = false;
+static Direction g_race_last_mtc_dir   = DIR_UP;
+static datetime  g_race_last_mtc_time  = 0;
+static int       g_race_last_mtc_index = -1;
+
+inline void Race_RecordMTCEvent(const Direction dir, const MqlRates &rates[], const int n, const int bodyIdx)
+{
+   if(bodyIdx < 0 || bodyIdx >= n) return;
+
+   g_race_last_mtc_valid = true;
+   g_race_last_mtc_dir   = dir;
+   g_race_last_mtc_time  = rates[bodyIdx].time;
+   g_race_last_mtc_index = bodyIdx;
+}
+
+inline double __Race_MaxHighBetweenTimes(const MqlRates &rates[], const int n,
+                                         const datetime t1, const datetime t2,
+                                         const double fallback)
+{
+   if(n <= 0 || t1 <= 0 || t2 <= 0) return fallback;
+
+   datetime from_t = t1;
+   datetime to_t   = t2;
+   if(from_t > to_t)
+   {
+      datetime tmp = from_t;
+      from_t = to_t;
+      to_t = tmp;
+   }
+
+   double best = -DBL_MAX;
+   bool found = false;
+
+   for(int i=0; i<n; ++i)
+   {
+      if(rates[i].time < from_t) continue;
+      if(rates[i].time > to_t) break;
+
+      if(!found || rates[i].high > best)
+      {
+         best = rates[i].high;
+         found = true;
+      }
+   }
+
+   return (found ? best : fallback);
+}
+
+inline double __Race_MinLowBetweenTimes(const MqlRates &rates[], const int n,
+                                        const datetime t1, const datetime t2,
+                                        const double fallback)
+{
+   if(n <= 0 || t1 <= 0 || t2 <= 0) return fallback;
+
+   datetime from_t = t1;
+   datetime to_t   = t2;
+   if(from_t > to_t)
+   {
+      datetime tmp = from_t;
+      from_t = to_t;
+      to_t = tmp;
+   }
+
+   double best = DBL_MAX;
+   bool found = false;
+
+   for(int i=0; i<n; ++i)
+   {
+      if(rates[i].time < from_t) continue;
+      if(rates[i].time > to_t) break;
+
+      if(!found || rates[i].low < best)
+      {
+         best = rates[i].low;
+         found = true;
+      }
+   }
+
+   return (found ? best : fallback);
+}
+
+inline double __Race_SpecialNextRefForMTCDown(const MqlRates &rates[], const int n,
+                                             const int bodyIdx, const double fallback)
+{
+   if(bodyIdx < 0 || bodyIdx >= n) return fallback;
+
+   if(g_race_last_mtc_valid && g_race_last_mtc_dir == DIR_UP && g_race_last_mtc_time > 0)
+      return __Race_MaxHighBetweenTimes(rates, n, g_race_last_mtc_time, rates[bodyIdx].time, fallback);
+
+   return fallback;
+}
+
+inline double __Race_SpecialNextRefForMTCUp(const MqlRates &rates[], const int n,
+                                           const int bodyIdx, const double fallback)
+{
+   if(bodyIdx < 0 || bodyIdx >= n) return fallback;
+
+   if(g_race_last_mtc_valid && g_race_last_mtc_dir == DIR_DOWN && g_race_last_mtc_time > 0)
+      return __Race_MinLowBetweenTimes(rates, n, g_race_last_mtc_time, rates[bodyIdx].time, fallback);
+
+   return fallback;
+}
 
 inline bool Race_ShouldDrawRefVisuals()
 {
@@ -220,6 +328,11 @@ struct RaceContext
    double    active_ref_down;       // ????? g_active_ref_down
    datetime  active_ref_down_time;  // ????? g_active_ref_down_time
 
+   bool      last_mtc_valid;
+   Direction last_mtc_dir;
+   datetime  last_mtc_time;
+   int       last_mtc_index;
+
    // ????? ????? Path-B ???? Mode=UP ? Mode=DOWN
    RacePathBState pb_up;         // snapshot ?? g_pb_up
    RacePathBState pb_down;       // snapshot ?? g_pb_down
@@ -278,6 +391,11 @@ inline void Race_ContextReset(RaceContext &ctx)
    ctx.active_ref_down      = 0.0;
    ctx.active_ref_down_time = 0;
 
+   ctx.last_mtc_valid = false;
+   ctx.last_mtc_dir   = DIR_UP;
+   ctx.last_mtc_time  = 0;
+   ctx.last_mtc_index = -1;
+
    Race_ResetPathB(ctx.pb_up);
    Race_ResetPathB(ctx.pb_down);
 }
@@ -305,6 +423,11 @@ inline void Race_ContextExport(RaceContext &ctx)
    ctx.active_ref_down      = g_active_ref_down;
    ctx.active_ref_down_time = g_active_ref_down_time;
 
+   ctx.last_mtc_valid = g_race_last_mtc_valid;
+   ctx.last_mtc_dir   = g_race_last_mtc_dir;
+   ctx.last_mtc_time  = g_race_last_mtc_time;
+   ctx.last_mtc_index = g_race_last_mtc_index;
+
    ctx.pb_up   = g_pb_up;
    ctx.pb_down = g_pb_down;
 }
@@ -331,6 +454,11 @@ inline void Race_ContextImport(const RaceContext &ctx)
    g_active_ref_up_time   = ctx.active_ref_up_time;
    g_active_ref_down      = ctx.active_ref_down;
    g_active_ref_down_time = ctx.active_ref_down_time;
+
+   g_race_last_mtc_valid = ctx.last_mtc_valid;
+   g_race_last_mtc_dir   = ctx.last_mtc_dir;
+   g_race_last_mtc_time  = ctx.last_mtc_time;
+   g_race_last_mtc_index = ctx.last_mtc_index;
 
    g_pb_up   = ctx.pb_up;
    g_pb_down = ctx.pb_down;
@@ -501,6 +629,14 @@ inline void __Race_ClearRegimeArtifacts()
    SW_DOWN_ClearSeed();
    SWGate_ResetGlobals();
    FSMS_SW_DisarmAll();
+}
+
+inline void __Race_PrepareMTCRegimeHandoff(const Direction new_dir)
+{
+   SR_AllowOnly(new_dir);
+   __Race_ClearRegimeArtifacts();
+   C1W2Gate_ResetGlobals();
+   C1Pre_ResetGlobals();
 }
 
 //--------------------------- ???? ?????? ?? HWBB ------------------------------
@@ -800,9 +936,8 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
                   // IMPORTANT: nested scan must run with race unlocked
                   Race_InternalClearAll();
 
-                  // Fail-safe cleanup (in case ref was missing)
-                  SR_AllowOnly(DIR_DOWN);
-                  __Race_ClearRegimeArtifacts();
+                  // Fail-safe cleanup (in case ref was missing) and clean W2/W3 handoff
+                  __Race_PrepareMTCRegimeHandoff(DIR_DOWN);
 
                   if(__prev_mode==DIR_UP && !Trigger_M1HardStopFinalizeRequested())
                      API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, runtime_tf, __from, __to,
@@ -1026,8 +1161,7 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
 
                   Race_InternalClearAll();
 
-                  SR_AllowOnly(DIR_UP);
-                  __Race_ClearRegimeArtifacts();
+                  __Race_PrepareMTCRegimeHandoff(DIR_UP);
 
                   if(__prev_mode==DIR_DOWN && !Trigger_M1HardStopFinalizeRequested())
                      API_RunScanSequential_W2W3_Hunter(InpSymbol, runtime_tf, __from, __to,
@@ -1104,6 +1238,9 @@ inline void Race_DrawW2W3_MTC_Down(const MqlRates &rates[], const int n, const R
       SB_DN_BringToFront();
    }
 
+   // Remember this MTC candle so the next back-to-back special can rebuild its reference.
+   Race_RecordMTCEvent(DIR_DOWN, rates, n, S.bodyBreakIdx);
+
    // --- IMPORTANT cleanup after MTC
    SR_AllowOnly(DIR_DOWN);
    __Race_ClearRegimeArtifacts();
@@ -1160,6 +1297,9 @@ inline void Race_DrawW2W3_MTC_Up(const MqlRates &rates[], const int n, const Rac
       SB_UP_BringToFront();
       SB_DN_BringToFront();
    }
+
+   // Remember this MTC candle so the next back-to-back special can rebuild its reference.
+   Race_RecordMTCEvent(DIR_UP, rates, n, S.bodyBreakIdx);
 
    SR_AllowOnly(DIR_UP);
    __Race_ClearRegimeArtifacts();
@@ -1230,6 +1370,8 @@ inline void Race_DrawMTCOnly_Down_ByRef(const MqlRates &rates[],
       g_active_ref_down_time = (bodyIdx>=0 && bodyIdx<n ? rates[bodyIdx].time : TimeCurrent());
    }
 
+   Race_RecordMTCEvent(DIR_DOWN, rates, n, bodyIdx);
+
    SR_AllowOnly(DIR_DOWN);
    __Race_ClearRegimeArtifacts();
 }
@@ -1282,6 +1424,8 @@ inline void Race_DrawMTCOnly_Up_ByRef(const MqlRates &rates[],
       g_active_ref_up_time = (bodyIdx>=0 && bodyIdx<n ? rates[bodyIdx].time : TimeCurrent());
    }
 
+   Race_RecordMTCEvent(DIR_UP, rates, n, bodyIdx);
+
    SR_AllowOnly(DIR_UP);
    __Race_ClearRegimeArtifacts();
 }
@@ -1298,19 +1442,20 @@ inline void Race_SpecialRefBreak_MTC_Down(const MqlRates &rates[], const int n, 
    g_race_winner      = "B";
    g_race_winner_time = bt;
 
+   const double next_ref_down = __Race_SpecialNextRefForMTCDown(rates, n, j, g_race_ref_mtc_down);
+
    // 0) ست‌کردن ext lq اولیهٔ جهت جدید از ref همین race
-   if(g_race_ref_mtc_down > 0.0)
-      ExtLQ_Down_Set(g_race_ref_mtc_down, bt);
+   if(next_ref_down > 0.0)
+      ExtLQ_Down_Set(next_ref_down, bt);
 
    // 1) ثبت MTC
    Race_MarkWin_B(DIR_UP, bt);
-   Race_DrawMTCOnly_Down_ByRef(rates, n, j, g_race_ref_mtc_down);
+   Race_DrawMTCOnly_Down_ByRef(rates, n, j, next_ref_down);
 
    // 2) handoff کامل به روند جدید
    Race_RequestAbortCurrentAPIScan();
    Race_InternalClearAll();
-   SR_AllowOnly(DIR_DOWN);
-   __Race_ClearRegimeArtifacts();
+   __Race_PrepareMTCRegimeHandoff(DIR_DOWN);
 
    // 3) launch اسکن DOWN از همین کندل
    __Race_LaunchSpecialDirectionScan(DIR_DOWN, rates, n, bt);
@@ -1323,16 +1468,17 @@ inline void Race_SpecialRefBreak_MTC_Up(const MqlRates &rates[], const int n, co
    g_race_winner      = "B";
    g_race_winner_time = bt;
 
-   if(g_race_ref_mtc_up > 0.0)
-      ExtLQ_Set(g_race_ref_mtc_up, bt);
+   const double next_ref_up = __Race_SpecialNextRefForMTCUp(rates, n, j, g_race_ref_mtc_up);
+
+   if(next_ref_up > 0.0)
+      ExtLQ_Set(next_ref_up, bt);
 
    Race_MarkWin_B(DIR_DOWN, bt);
-   Race_DrawMTCOnly_Up_ByRef(rates, n, j, g_race_ref_mtc_up);
+   Race_DrawMTCOnly_Up_ByRef(rates, n, j, next_ref_up);
 
    Race_RequestAbortCurrentAPIScan();
    Race_InternalClearAll();
-   SR_AllowOnly(DIR_UP);
-   __Race_ClearRegimeArtifacts();
+   __Race_PrepareMTCRegimeHandoff(DIR_UP);
 
    __Race_LaunchSpecialDirectionScan(DIR_UP, rates, n, bt);
 }
@@ -1343,7 +1489,8 @@ inline void Race_SpecialRefBreak_MTC_Up(const MqlRates &rates[], const int n, co
 inline void Race_SpecialRefBreak_ActiveRef_MTC_Down(const MqlRates &rates[], const int n, const int j)
 {
    const datetime bt = (j>=0 && j<n ? rates[j].time : TimeCurrent());
-   const double   ref_price = g_active_ref_down;
+   const double   fallback_ref = (g_active_ref_down > 0.0 ? g_active_ref_down : g_race_ref_mtc_down);
+   const double   ref_price = __Race_SpecialNextRefForMTCDown(rates, n, j, fallback_ref);
 
    ++g_race_counter;
    g_race_winner      = "B";
@@ -1358,8 +1505,7 @@ inline void Race_SpecialRefBreak_ActiveRef_MTC_Down(const MqlRates &rates[], con
 
    Race_RequestAbortCurrentAPIScan();
    Race_InternalClearAll();
-   SR_AllowOnly(DIR_DOWN);
-   __Race_ClearRegimeArtifacts();
+   __Race_PrepareMTCRegimeHandoff(DIR_DOWN);
 
    __Race_LaunchSpecialDirectionScan(DIR_DOWN, rates, n, bt);
 }
@@ -1367,7 +1513,8 @@ inline void Race_SpecialRefBreak_ActiveRef_MTC_Down(const MqlRates &rates[], con
 inline void Race_SpecialRefBreak_ActiveRef_MTC_Up(const MqlRates &rates[], const int n, const int j)
 {
    const datetime bt = (j>=0 && j<n ? rates[j].time : TimeCurrent());
-   const double   ref_price = g_active_ref_up;
+   const double   fallback_ref = (g_active_ref_up > 0.0 ? g_active_ref_up : g_race_ref_mtc_up);
+   const double   ref_price = __Race_SpecialNextRefForMTCUp(rates, n, j, fallback_ref);
 
    ++g_race_counter;
    g_race_winner      = "B";
@@ -1381,8 +1528,7 @@ inline void Race_SpecialRefBreak_ActiveRef_MTC_Up(const MqlRates &rates[], const
 
    Race_RequestAbortCurrentAPIScan();
    Race_InternalClearAll();
-   SR_AllowOnly(DIR_UP);
-   __Race_ClearRegimeArtifacts();
+   __Race_PrepareMTCRegimeHandoff(DIR_UP);
 
    __Race_LaunchSpecialDirectionScan(DIR_UP, rates, n, bt);
 }

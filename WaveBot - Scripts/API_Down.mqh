@@ -289,7 +289,8 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
             SR_Mitigator_OnBar_DOWN(rates, n, i);   // NEW
             SR_GoozBaghali_OnBar_DOWN(rates, n, i);
             FSMS_SW_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);   // NEW: parallel guard for FSMS–SW^
-            WBWM_ProcessMinorStarterEvents(rates, n, i, __api_stop_time);
+            if(WBWM_MinorWorldEnabledOnThisChart())
+               WBWM_ProcessMinorStarterEvents(rates, n, i, __api_stop_time);
             if(Race_ShouldAllowFSMS())
             {
                FSMS_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);
@@ -405,7 +406,8 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
             SB_DN_OnBarCtx(rates, insideHL, n, cend, j);   // ShadowBreaker + temp-c1-sw
             SR_GoozBaghali_OnBar_DOWN(rates, n, j);
             FSMS_SW_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, j);   // NEW: parallel guard for FSMS–SW
-            WBWM_ProcessMinorStarterEvents(rates, n, j, __api_stop_time);
+            if(WBWM_MinorWorldEnabledOnThisChart())
+               WBWM_ProcessMinorStarterEvents(rates, n, j, __api_stop_time);
             if(Race_ShouldAllowFSMS())
             {
                FSMS_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, j);

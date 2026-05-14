@@ -103,7 +103,9 @@ inline void __WB_ApplyHiddenVisualPolicies()
 
 inline void __WB_DeleteAllM15NumberingObjects()
 {
-   if((ENUM_TIMEFRAMES)Period() != PERIOD_M1) return;
+   ENUM_TIMEFRAMES chart_tf = (ENUM_TIMEFRAMES)Period();
+   if(chart_tf != PERIOD_M1 && chart_tf != PERIOD_M15)
+      return;
 
    for(int i = ObjectsTotal(0) - 1; i >= 0; --i)
    {

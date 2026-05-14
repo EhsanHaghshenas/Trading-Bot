@@ -59,7 +59,39 @@ inline void __FSMS_SW_ResetHWMarkerLookupCache()
 
 inline bool __FSMS_SW_ShouldRunMinorWorldOnThisChart()
 {
-   return ((ENUM_TIMEFRAMES)Period() != PERIOD_M1);
+   ENUM_TIMEFRAMES chart_tf = (ENUM_TIMEFRAMES)Period();
+
+   // M1 and M15 must both run the normal/main scan only.
+   // The FSMS-SW core guard remains active, but local MinorStarter / MinorOff
+   // sessions, FSMS_Minor labels and WorldManager MIN sessions are disabled.
+   if(chart_tf == PERIOD_M1 || chart_tf == PERIOD_M15)
+      return false;
+
+   // Standalone M15 scans can also run through InpTF even when the chart is not M15.
+   if(InpTF == PERIOD_M15)
+      return false;
+
+   return true;
+}
+
+inline bool __FSMS_SW_ShouldCloseFSMSLifecycleWithoutMinorOnThisChart()
+{
+   ENUM_TIMEFRAMES chart_tf = (ENUM_TIMEFRAMES)Period();
+   if(chart_tf == PERIOD_M15)
+      return true;
+   if(InpTF == PERIOD_M15 && chart_tf != PERIOD_M1)
+      return true;
+   return false;
+}
+
+inline void __FSMS_SW_RequestNormalModeTerminalWithoutMinor(const datetime terminal_time)
+{
+   if(!__FSMS_SW_ShouldCloseFSMSLifecycleWithoutMinorOnThisChart())
+      return;
+   if(terminal_time <= 0)
+      return;
+
+   FSMSLC_RequestTerminal(FSMSLC_TERM_FSMS_SW, terminal_time);
 }
 
 inline bool __FSMS_SW_ShouldRunCoreLogicOnThisChart()
@@ -1582,12 +1614,21 @@ inline void __SW_Scan_DN_After_FSMS_U(const MqlRates &rates[], const bool &insid
                      Print("[FSMS–SW] Disarmed (UP) due to the 2nd opposite pair DOWN after FSMS.",
                            " FSMS=",T(g_fsms_sw_up_seed_time)," | W2_C1=",T(c1t)," | BB=",T(bt));
                   
-                  // NEW: mark + log the minor W2/W3 that invalidates FSMS–SW (UP)
-                  FSMS_SW_RecordMinorPair_DN(rates, n, S);
-      
-                  // NEW: تبدیل کندل FSMS همین سناریو به FSMS_Minor + Textهای C1_W2/W3_Minor_U_#
-                  FSMS_SW_ConvertFSMS_U_ToMinor(rates, n);
-                  
+                  if(__FSMS_SW_ShouldRunMinorWorldOnThisChart())
+                  {
+                     // Legacy local-minor mode: mark/log the minor W2/W3 and open a MIN session.
+                     FSMS_SW_RecordMinorPair_DN(rates, n, S);
+
+                     // Convert the source FSMS into FSMS_Minor and draw the MinorZone labels.
+                     FSMS_SW_ConvertFSMS_U_ToMinor(rates, n);
+                  }
+                  else
+                  {
+                     // M15 normal-scan mode: do not create MinorStarter / MIN world.
+                     // Close the current FSMS lifecycle so the main M15 scan can continue normally.
+                     __FSMS_SW_RequestNormalModeTerminalWithoutMinor(bt);
+                  }
+
                   __SW_Disarm_UP();
                   g_sw_guard_after_u = S; // برای ثبات حالت (هرچند inactive می‌شود)
                   return;
@@ -1769,11 +1810,20 @@ inline void __SW_Scan_UP_After_FSMS_D(const MqlRates &rates[], const bool &insid
                      Print("[FSMS–SW] Disarmed (DOWN) due to the 2nd opposite pair UP after FSMS.",
                            " FSMS=",T(g_fsms_sw_dn_seed_time)," | W2_C1=",T(c1t)," | BB=",T(bt));
                   
-                  // NEW: mark + log the minor W2/W3 that invalidates FSMS–SW (DOWN)
-                  FSMS_SW_RecordMinorPair_UP(rates, n, S);
+                  if(__FSMS_SW_ShouldRunMinorWorldOnThisChart())
+                  {
+                     // Legacy local-minor mode: mark/log the minor W2/W3 and open a MIN session.
+                     FSMS_SW_RecordMinorPair_UP(rates, n, S);
 
-                  // NEW: تبدیل کندل FSMS همین سناریو به FSMS_Minor + Textهای C1_W2/W3_Minor_D_#
-                  FSMS_SW_ConvertFSMS_D_ToMinor(rates, n);
+                     // Convert the source FSMS into FSMS_Minor and draw the MinorZone labels.
+                     FSMS_SW_ConvertFSMS_D_ToMinor(rates, n);
+                  }
+                  else
+                  {
+                     // M15 normal-scan mode: do not create MinorStarter / MIN world.
+                     // Close the current FSMS lifecycle so the main M15 scan can continue normally.
+                     __FSMS_SW_RequestNormalModeTerminalWithoutMinor(bt);
+                  }
 
                   __SW_Disarm_DN();
                   g_sw_guard_after_d = S;
@@ -1801,8 +1851,10 @@ inline void FSMS_SW_DrawMinorSequenceArchive(const MqlRates &rates[],
                                              const int starter_idx,
                                              const int off_idx)
 {
-   // On the M1 chart no candle numbering should be shown anymore.
-   if((ENUM_TIMEFRAMES)Period() == PERIOD_M1) return;
+   // On M1 and M15, local minor-world visuals are disabled.
+   ENUM_TIMEFRAMES chart_tf = (ENUM_TIMEFRAMES)Period();
+   if(chart_tf == PERIOD_M1 || chart_tf == PERIOD_M15 || InpTF == PERIOD_M15)
+      return;
 
    if(!InpDrawMarkers) return;
    if(starter_idx < 0 || starter_idx >= n) return;
