@@ -367,6 +367,12 @@ inline bool WBLOG_OpenAppend(const string filename, int &handle)
    if(h == INVALID_HANDLE)
       return false;
 
+   // Optional diagnostic files are no longer pre-created with header-only
+   // contents. When the first real row is appended, create the CSV header
+   // on demand so non-empty files stay self-describing.
+   if(FileSize(h) <= 0)
+      FileWriteString(h, WBLOG_FileHeader(filename) + "\r\n");
+
    FileSeek(h, 0, SEEK_END);
 
    int pos = ArraySize(g_wblog_open_names);
@@ -463,12 +469,19 @@ inline void WBLOG_RewriteFileWithRows(const string filename, const string header
 {
    if(!g_wblog_ready) return;
    if(!WBLOG_OutputCanWriteNow()) return;
+
+   int n = ArraySize(rows);
+   if(n <= 0 && WBLOG_IsHeaderlessWhenEmptyFile(filename))
+   {
+      WBLOG_DeleteFileIfExists(filename);
+      return;
+   }
+
    WBLOG_CloseOpenFile(filename);
    string path = WBLOG_FilePath(filename);
    int h = FileOpen(path, FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);
    if(h == INVALID_HANDLE) return;
    FileWriteString(h, header + "\r\n");
-   int n = ArraySize(rows);
    for(int i=0; i<n; ++i)
       FileWriteString(h, rows[i] + "\r\n");
    FileFlush(h);
@@ -596,7 +609,47 @@ inline string WBLOG_FileHeader(const string name)
    return "run_id,details";
 }
 
-inline void WBLOG_ResetAllFiles()
+inline bool WBLOG_IsM15MasterDiagnosticFile(const string filename)
+{
+   if(filename == "WaveBot_M15_MainSignals.csv")  return true;
+   if(filename == "WaveBot_M15_FlipZones.csv")    return true;
+   if(filename == "WaveBot_M15_GateEvents.csv")   return true;
+   if(filename == "WaveBot_M15_To_M1_Bridge.csv") return true;
+   return false;
+}
+
+inline bool WBLOG_IsHeaderlessWhenEmptyFile(const string filename)
+{
+   if(WBLOG_IsM15MasterDiagnosticFile(filename)) return true;
+   if(filename == "WaveBot_RejectedTriggers.csv") return true;
+   return false;
+}
+
+inline bool WBLOG_ShouldPreserveM15MasterDiagnostics()
+{
+   // The M1 slave shares the same run directory with the M15 master. Its
+   // final/deferred CSV rebuild must not blank the M15 master-owned bridge,
+   // signal, zone, and gate diagnostics because the M1 chart cannot
+   // reconstruct those rows from its local memory.
+   if((ENUM_TIMEFRAMES)Period() != PERIOD_M1)
+      return false;
+
+   return (g_wblog_scheduled_output_enabled || g_wblog_final_only_output_enabled);
+}
+
+inline void WBLOG_DeleteFileIfExists(const string filename)
+{
+   if(!g_wblog_ready) return;
+   if(!WBLOG_OutputCanWriteNow()) return;
+
+   WBLOG_CloseOpenFile(filename);
+
+   string path = WBLOG_FilePath(filename);
+   if(FileIsExist(path, FILE_COMMON))
+      FileDelete(path, FILE_COMMON);
+}
+
+inline void WBLOG_ResetOutputFiles(const bool preserve_m15_master_diagnostics)
 {
    // A clean rebuild must reset candle de-dup cursors as well as file contents.
    g_wblog_last_m1_candle  = 0;
@@ -606,10 +659,18 @@ inline void WBLOG_ResetAllFiles()
    WBLOG_ResetFile("WaveBot_Params.csv", WBLOG_FileHeader("WaveBot_Params.csv"));
    WBLOG_ResetFile("WaveBot_Candles_M15.csv", WBLOG_FileHeader("WaveBot_Candles_M15.csv"));
    WBLOG_ResetFile("WaveBot_Candles_M1.csv", WBLOG_FileHeader("WaveBot_Candles_M1.csv"));
-   WBLOG_ResetFile("WaveBot_M15_MainSignals.csv", WBLOG_FileHeader("WaveBot_M15_MainSignals.csv"));
-   WBLOG_ResetFile("WaveBot_M15_FlipZones.csv", WBLOG_FileHeader("WaveBot_M15_FlipZones.csv"));
-   WBLOG_ResetFile("WaveBot_M15_GateEvents.csv", WBLOG_FileHeader("WaveBot_M15_GateEvents.csv"));
-   WBLOG_ResetFile("WaveBot_M15_To_M1_Bridge.csv", WBLOG_FileHeader("WaveBot_M15_To_M1_Bridge.csv"));
+
+   if(!preserve_m15_master_diagnostics)
+   {
+      // These files are event/snapshot diagnostics. Do not create 1 KB
+      // header-only CSVs; the first real row will create the file with a
+      // header via WBLOG_OpenAppend(), and rewrites with zero rows delete it.
+      WBLOG_DeleteFileIfExists("WaveBot_M15_MainSignals.csv");
+      WBLOG_DeleteFileIfExists("WaveBot_M15_FlipZones.csv");
+      WBLOG_DeleteFileIfExists("WaveBot_M15_GateEvents.csv");
+      WBLOG_DeleteFileIfExists("WaveBot_M15_To_M1_Bridge.csv");
+   }
+
    WBLOG_ResetFile("WaveBot_M1_TriggerCandidates.csv", WBLOG_FileHeader("WaveBot_M1_TriggerCandidates.csv"));
    WBLOG_ResetFile("WaveBot_M1_Triggers.csv", WBLOG_FileHeader("WaveBot_M1_Triggers.csv"));
    WBLOG_ResetFile("WaveBot_TradeCandidates.csv", WBLOG_FileHeader("WaveBot_TradeCandidates.csv"));
@@ -619,13 +680,26 @@ inline void WBLOG_ResetAllFiles()
    WBLOG_ResetFile("WaveBot_EquityCurve.csv", WBLOG_FileHeader("WaveBot_EquityCurve.csv"));
    WBLOG_ResetFile("WaveBot_StateTransitions.csv", WBLOG_FileHeader("WaveBot_StateTransitions.csv"));
    WBLOG_ResetFile("WaveBot_ResetEvents.csv", WBLOG_FileHeader("WaveBot_ResetEvents.csv"));
-   WBLOG_ResetFile("WaveBot_RejectedTriggers.csv", WBLOG_FileHeader("WaveBot_RejectedTriggers.csv"));
+
+   // Optional: create only when at least one rejection row really exists.
+   WBLOG_DeleteFileIfExists("WaveBot_RejectedTriggers.csv");
+
    WBLOG_ResetFile("WaveBot_SummaryByRun.csv", WBLOG_FileHeader("WaveBot_SummaryByRun.csv"));
    WBLOG_ResetFile("WaveBot_MarketFeatures_M1.csv", WBLOG_FileHeader("WaveBot_MarketFeatures_M1.csv"));
    WBLOG_ResetFile("WaveBot_MarketFeatures_M15.csv", WBLOG_FileHeader("WaveBot_MarketFeatures_M15.csv"));
 
    g_wblog_snapshot_dirty_contexts = false;
    g_wblog_snapshot_dirty_zones    = false;
+}
+
+inline void WBLOG_ResetM1FinalOutputFiles()
+{
+   WBLOG_ResetOutputFiles(true);
+}
+
+inline void WBLOG_ResetAllFiles()
+{
+   WBLOG_ResetOutputFiles(false);
 }
 
 inline void WBLOG_BeginScheduledOutputWrite()
@@ -639,8 +713,16 @@ inline void WBLOG_BeginScheduledOutputWrite()
 
    g_wblog_scheduled_output_writing = true;
 
+   const bool preserve_m15_master_diagnostics = WBLOG_ShouldPreserveM15MasterDiagnostics();
+
    // Create a clean CSV set exactly at the final/deferred output point.
-   WBLOG_ResetAllFiles();
+   // On the M1 slave, keep the master-owned M15 diagnostic files intact;
+   // otherwise the final M1 rebuild erases signal/zone/gate/bridge rows that
+   // were already produced by the M15 master.
+   if(preserve_m15_master_diagnostics)
+      WBLOG_ResetM1FinalOutputFiles();
+   else
+      WBLOG_ResetAllFiles();
 
    // Replay buffered low-frequency rows accumulated before the scheduled date.
    int n = ArraySize(g_wblog_deferred_rows);
@@ -650,9 +732,14 @@ inline void WBLOG_BeginScheduledOutputWrite()
    ArrayResize(g_wblog_deferred_names, 0);
    ArrayResize(g_wblog_deferred_rows, 0);
 
-   // Context and zone files are snapshot files; rewrite their latest state once.
-   WBLOG_RewriteM15MainSignals();
-   WBLOG_RewriteM15Zones();
+   // Context and zone files are snapshot files. The M1 slave must not rewrite
+   // them from its empty local context arrays because those rows belong to the
+   // M15 master and have already been written in the shared run directory.
+   if(!preserve_m15_master_diagnostics)
+   {
+      WBLOG_RewriteM15MainSignals();
+      WBLOG_RewriteM15Zones();
+   }
 }
 
 inline void WBLOG_EndScheduledOutputWrite(const bool mark_done)
@@ -768,6 +855,16 @@ inline void WBLOG_LogParam(const string name, const string value, const string s
 inline void WBLOG_FlushSnapshotFilesIfDirty()
 {
    if(!g_wblog_ready) return;
+
+   if(WBLOG_ShouldPreserveM15MasterDiagnostics())
+   {
+      // M1 final/deferred output shares the run directory but does not own the
+      // M15 snapshot arrays. Preserve the master files exactly as written by
+      // the M15 chart.
+      g_wblog_snapshot_dirty_contexts = false;
+      g_wblog_snapshot_dirty_zones    = false;
+      return;
+   }
 
    if(g_wblog_snapshot_dirty_contexts)
    {

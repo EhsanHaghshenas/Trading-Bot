@@ -162,6 +162,91 @@ inline int __API_TriggerCandidate_WAIT_UP(const int fallback_idx, const int w3_c
    return best;
 }
 
+
+// M1 performance cache for the deterministic Wave3 count check used inside the
+// main UP scan.  The original CheckWave3CountOnly_Local() scans forward up to
+// InpMaxBarsInWave from the same C1.  During M1 WAIT_CONFIRM the same startIdx
+// can be tested many times while the rates[] buffer is unchanged, so caching the
+// last result avoids repeated identical work without changing the trading logic.
+struct __API_W3Cache_UP
+{
+   bool     ready;
+   int      start_idx;
+   int      n;
+   datetime c1_time;
+   datetime last_time;
+   bool     ok;
+   int      k2;
+   int      k3;
+   int      k4;
+   int      end_idx;
+};
+
+inline void __API_W3Cache_UP_Reset(__API_W3Cache_UP &C)
+{
+   C.ready     = false;
+   C.start_idx = -1;
+   C.n         = -1;
+   C.c1_time   = 0;
+   C.last_time = 0;
+   C.ok        = false;
+   C.k2        = -1;
+   C.k3        = -1;
+   C.k4        = -1;
+   C.end_idx   = -1;
+}
+
+inline bool __API_CheckWave3_UP_Cached(__API_W3Cache_UP &C,
+                                       const bool use_cache,
+                                       const MqlRates &rates[],
+                                       const bool &insideHL[],
+                                       const double &bodyLowEff[],
+                                       const double &bodyHighEff[],
+                                       const int n,
+                                       const int startIdx,
+                                       int &a2, int &a3, int &a4, int &w3e)
+{
+   a2 = -1;
+   a3 = -1;
+   a4 = -1;
+   w3e = -1;
+
+   const datetime c1_time   = (startIdx >= 0 && startIdx < n ? rates[startIdx].time : 0);
+   const datetime last_time = (n > 0 ? rates[n-1].time : 0);
+
+   if(use_cache && C.ready &&
+      C.start_idx == startIdx &&
+      C.n         == n &&
+      C.c1_time   == c1_time &&
+      C.last_time == last_time)
+   {
+      a2   = C.k2;
+      a3   = C.k3;
+      a4   = C.k4;
+      w3e  = C.end_idx;
+      return C.ok;
+   }
+
+   bool ok = CheckWave3CountOnly_Local(rates, insideHL, bodyLowEff, bodyHighEff,
+                                       n, startIdx, a2, a3, a4, w3e);
+
+   if(use_cache)
+   {
+      C.ready     = true;
+      C.start_idx = startIdx;
+      C.n         = n;
+      C.c1_time   = c1_time;
+      C.last_time = last_time;
+      C.ok        = ok;
+      C.k2        = a2;
+      C.k3        = a3;
+      C.k4        = a4;
+      C.end_idx   = w3e;
+   }
+
+   return ok;
+}
+
 // ???? ???? (UP): W2 -> WAIT_CONFIRM(W3) + Hunter + ExtLQ
 int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf,
                                       const datetime from_time, const datetime to_time,
@@ -235,6 +320,10 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
 
    // ?????? ???? ?????? (?????? Low ?? cend ?? ???)
    int    w3_cand=-1; double w3_cand_low=DBL_MAX;
+
+   __API_W3Cache_UP w3_cache_up;
+   __API_W3Cache_UP_Reset(w3_cache_up);
+   const bool w3_cache_up_enabled = (tf == PERIOD_M1);
 
    // ???/?????? ??? ????
    bool   wickActive=false;
@@ -589,7 +678,8 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
             if(!have_w3 && startIdx >= 0 && !insideHL[startIdx])
             {
                int a2=-1,a3=-1,a4=-1, w3e=-1;
-               if(CheckWave3CountOnly_Local(rates, insideHL, bodyLowEff, bodyHighEff, n,
+               if(__API_CheckWave3_UP_Cached(w3_cache_up, w3_cache_up_enabled,
+                                            rates, insideHL, bodyLowEff, bodyHighEff, n,
                                             startIdx, a2, a3, a4, w3e))
                {
                   have_w3=true;

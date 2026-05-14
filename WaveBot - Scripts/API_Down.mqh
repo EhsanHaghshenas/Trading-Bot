@@ -163,6 +163,89 @@ inline int __API_Down_TriggerCandidate_WAIT_DN(const int fallback_idx, const int
    return best;
 }
 
+
+// M1 performance cache for the deterministic Wave3 count check used inside the
+// main DOWN scan.  It keeps the M15 path untouched while avoiding repeated
+// identical scans from the same C1 on large M1 histories.
+struct __API_DN_W3Cache_DOWN
+{
+   bool     ready;
+   int      start_idx;
+   int      n;
+   datetime c1_time;
+   datetime last_time;
+   bool     ok;
+   int      k2;
+   int      k3;
+   int      k4;
+   int      end_idx;
+};
+
+inline void __API_DN_W3Cache_DOWN_Reset(__API_DN_W3Cache_DOWN &C)
+{
+   C.ready     = false;
+   C.start_idx = -1;
+   C.n         = -1;
+   C.c1_time   = 0;
+   C.last_time = 0;
+   C.ok        = false;
+   C.k2        = -1;
+   C.k3        = -1;
+   C.k4        = -1;
+   C.end_idx   = -1;
+}
+
+inline bool __API_DN_CheckWave3_DOWN_Cached(__API_DN_W3Cache_DOWN &C,
+                                            const bool use_cache,
+                                            const MqlRates &rates[],
+                                            const bool &insideHL[],
+                                            const double &bodyLowEff[],
+                                            const double &bodyHighEff[],
+                                            const int n,
+                                            const int startIdx,
+                                            int &a2, int &a3, int &a4, int &w3e)
+{
+   a2 = -1;
+   a3 = -1;
+   a4 = -1;
+   w3e = -1;
+
+   const datetime c1_time   = (startIdx >= 0 && startIdx < n ? rates[startIdx].time : 0);
+   const datetime last_time = (n > 0 ? rates[n-1].time : 0);
+
+   if(use_cache && C.ready &&
+      C.start_idx == startIdx &&
+      C.n         == n &&
+      C.c1_time   == c1_time &&
+      C.last_time == last_time)
+   {
+      a2   = C.k2;
+      a3   = C.k3;
+      a4   = C.k4;
+      w3e  = C.end_idx;
+      return C.ok;
+   }
+
+   bool ok = CheckWave3CountOnly_Local_Down(rates, insideHL, bodyLowEff, bodyHighEff,
+                                            n, startIdx, a2, a3, a4, w3e);
+
+   if(use_cache)
+   {
+      C.ready     = true;
+      C.start_idx = startIdx;
+      C.n         = n;
+      C.c1_time   = c1_time;
+      C.last_time = last_time;
+      C.ok        = ok;
+      C.k2        = a2;
+      C.k3        = a3;
+      C.k4        = a4;
+      C.end_idx   = w3e;
+   }
+
+   return ok;
+}
+
 // full scan (DOWN)
 int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf,
                                            const datetime from_time, const datetime to_time,
@@ -235,6 +318,10 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
 
    // direct-path candidate for C1 (largest High from cend onward)
    int    w3_cand=-1; double w3_cand_high=-DBL_MAX;
+
+   __API_DN_W3Cache_DOWN w3_cache_down;
+   __API_DN_W3Cache_DOWN_Reset(w3_cache_down);
+   const bool w3_cache_down_enabled = (tf == PERIOD_M1);
 
    // wick-path & body-break management
    bool   wickActive=false;
@@ -626,7 +713,8 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
             if(!have_w3 && startIdx >= 0 && !insideHL[startIdx])
             {
                int a2=-1,a3=-1,a4=-1, w3e=-1;
-               if(CheckWave3CountOnly_Local_Down(rates, insideHL, bodyLowEff, bodyHighEff, n,
+               if(__API_DN_CheckWave3_DOWN_Cached(w3_cache_down, w3_cache_down_enabled,
+                                                 rates, insideHL, bodyLowEff, bodyHighEff, n,
                                                  startIdx, a2, a3, a4, w3e))
                {
                   have_w3=true;
