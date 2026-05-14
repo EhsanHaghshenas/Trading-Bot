@@ -98,29 +98,131 @@ inline void Race_RecordMTCEvent(const Direction dir, const MqlRates &rates[], co
    g_race_last_mtc_index = bodyIdx;
 }
 
-inline double __Race_MaxHighBetweenTimes(const MqlRates &rates[], const int n,
-                                         const datetime t1, const datetime t2,
-                                         const double fallback)
+inline bool __Race_IndexMatchesTime(const MqlRates &rates[], const int n,
+                                      const int idx, const datetime t)
 {
-   if(n <= 0 || t1 <= 0 || t2 <= 0) return fallback;
+   if(idx < 0 || idx >= n) return false;
+   if(t <= 0) return false;
+   return (rates[idx].time == t);
+}
+
+inline int __Race_FirstIndexAtOrAfterTime(const MqlRates &rates[], const int n,
+                                          const datetime t)
+{
+   if(n <= 0 || t <= 0) return -1;
+
+   int lo = 0;
+   int hi = n - 1;
+   int ans = -1;
+
+   while(lo <= hi)
+   {
+      int mid = (lo + hi) / 2;
+      if(rates[mid].time >= t)
+      {
+         ans = mid;
+         hi = mid - 1;
+      }
+      else
+      {
+         lo = mid + 1;
+      }
+   }
+
+   return ans;
+}
+
+inline int __Race_LastIndexAtOrBeforeTime(const MqlRates &rates[], const int n,
+                                          const datetime t)
+{
+   if(n <= 0 || t <= 0) return -1;
+
+   int lo = 0;
+   int hi = n - 1;
+   int ans = -1;
+
+   while(lo <= hi)
+   {
+      int mid = (lo + hi) / 2;
+      if(rates[mid].time <= t)
+      {
+         ans = mid;
+         lo = mid + 1;
+      }
+      else
+      {
+         hi = mid - 1;
+      }
+   }
+
+   return ans;
+}
+
+inline bool __Race_BuildBoundedIndexRange(const MqlRates &rates[], const int n,
+                                          const datetime t1, const datetime t2,
+                                          const int idx1, const int idx2,
+                                          int &from_i, int &to_i)
+{
+   from_i = -1;
+   to_i   = -1;
+
+   if(n <= 0 || t1 <= 0 || t2 <= 0) return false;
 
    datetime from_t = t1;
    datetime to_t   = t2;
+   int from_idx    = idx1;
+   int to_idx      = idx2;
+
    if(from_t > to_t)
    {
-      datetime tmp = from_t;
+      datetime tmp_t = from_t;
       from_t = to_t;
-      to_t = tmp;
+      to_t   = tmp_t;
+
+      int tmp_i = from_idx;
+      from_idx = to_idx;
+      to_idx   = tmp_i;
    }
+
+   // Fast path for the normal parent scan: reuse the remembered MTC index and
+   // current body-break index instead of scanning the whole M1 rates array from 0.
+   if(__Race_IndexMatchesTime(rates, n, from_idx, from_t) &&
+      __Race_IndexMatchesTime(rates, n, to_idx, to_t))
+   {
+      from_i = from_idx;
+      to_i   = to_idx;
+   }
+   else
+   {
+      // Safe fallback for nested scans where the saved index belongs to another
+      // rates[] buffer: locate the same timestamps in O(log n), then scan only
+      // the actual interval between the two MTC candles.
+      from_i = __Race_FirstIndexAtOrAfterTime(rates, n, from_t);
+      to_i   = __Race_LastIndexAtOrBeforeTime(rates, n, to_t);
+   }
+
+   if(from_i < 0 || to_i < 0) return false;
+   if(from_i >= n || to_i >= n) return false;
+   if(from_i > to_i) return false;
+
+   return true;
+}
+
+inline double __Race_MaxHighBetweenTimes(const MqlRates &rates[], const int n,
+                                         const datetime t1, const datetime t2,
+                                         const int idx1, const int idx2,
+                                         const double fallback)
+{
+   int from_i = -1;
+   int to_i   = -1;
+   if(!__Race_BuildBoundedIndexRange(rates, n, t1, t2, idx1, idx2, from_i, to_i))
+      return fallback;
 
    double best = -DBL_MAX;
    bool found = false;
 
-   for(int i=0; i<n; ++i)
+   for(int i=from_i; i<=to_i; ++i)
    {
-      if(rates[i].time < from_t) continue;
-      if(rates[i].time > to_t) break;
-
       if(!found || rates[i].high > best)
       {
          best = rates[i].high;
@@ -133,27 +235,19 @@ inline double __Race_MaxHighBetweenTimes(const MqlRates &rates[], const int n,
 
 inline double __Race_MinLowBetweenTimes(const MqlRates &rates[], const int n,
                                         const datetime t1, const datetime t2,
+                                        const int idx1, const int idx2,
                                         const double fallback)
 {
-   if(n <= 0 || t1 <= 0 || t2 <= 0) return fallback;
-
-   datetime from_t = t1;
-   datetime to_t   = t2;
-   if(from_t > to_t)
-   {
-      datetime tmp = from_t;
-      from_t = to_t;
-      to_t = tmp;
-   }
+   int from_i = -1;
+   int to_i   = -1;
+   if(!__Race_BuildBoundedIndexRange(rates, n, t1, t2, idx1, idx2, from_i, to_i))
+      return fallback;
 
    double best = DBL_MAX;
    bool found = false;
 
-   for(int i=0; i<n; ++i)
+   for(int i=from_i; i<=to_i; ++i)
    {
-      if(rates[i].time < from_t) continue;
-      if(rates[i].time > to_t) break;
-
       if(!found || rates[i].low < best)
       {
          best = rates[i].low;
@@ -170,7 +264,12 @@ inline double __Race_SpecialNextRefForMTCDown(const MqlRates &rates[], const int
    if(bodyIdx < 0 || bodyIdx >= n) return fallback;
 
    if(g_race_last_mtc_valid && g_race_last_mtc_dir == DIR_UP && g_race_last_mtc_time > 0)
-      return __Race_MaxHighBetweenTimes(rates, n, g_race_last_mtc_time, rates[bodyIdx].time, fallback);
+      return __Race_MaxHighBetweenTimes(rates, n,
+                                        g_race_last_mtc_time,
+                                        rates[bodyIdx].time,
+                                        g_race_last_mtc_index,
+                                        bodyIdx,
+                                        fallback);
 
    return fallback;
 }
@@ -181,7 +280,12 @@ inline double __Race_SpecialNextRefForMTCUp(const MqlRates &rates[], const int n
    if(bodyIdx < 0 || bodyIdx >= n) return fallback;
 
    if(g_race_last_mtc_valid && g_race_last_mtc_dir == DIR_DOWN && g_race_last_mtc_time > 0)
-      return __Race_MinLowBetweenTimes(rates, n, g_race_last_mtc_time, rates[bodyIdx].time, fallback);
+      return __Race_MinLowBetweenTimes(rates, n,
+                                       g_race_last_mtc_time,
+                                       rates[bodyIdx].time,
+                                       g_race_last_mtc_index,
+                                       bodyIdx,
+                                       fallback);
 
    return fallback;
 }
