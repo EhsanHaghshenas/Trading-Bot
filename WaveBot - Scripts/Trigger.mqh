@@ -99,6 +99,15 @@ static bool              g_trigger_m1_terminal_stop_mode   = false;
 static bool              g_trigger_m1_finalize_requested   = false;
 static datetime          g_trigger_m1_finalize_time        = 0;
 
+// Hard terminal boundary for the historical M15 master scan.
+// This is separated from the M1 hard stop: the M15 master can stop only its own
+// chart after publishing DONE, while the M1 slave continues from bridge events.
+static bool              g_trigger_m15_hard_stop_enabled   = false;
+static datetime          g_trigger_m15_hard_stop_time      = 0;
+static bool              g_trigger_m15_terminal_stop_mode  = false;
+static bool              g_trigger_m15_finalize_requested  = false;
+static datetime          g_trigger_m15_finalize_time       = 0;
+
 // Public functions implemented by Trigger_Type1.mqh / Trigger_Type2.mqh.
 void Trigger_Type1_ResetGlobals();
 bool Trigger_Type1_ProcessUP(const MqlRates &rates[], const int n, const int bar_idx, const datetime from_time, const datetime to_time);
@@ -270,6 +279,158 @@ inline void Trigger_FinalizeM1HardStop(const datetime stop_time)
    g_trigger_pending_refresh_time       = 0;
 }
 
+inline void Trigger_SetM15HardStop(const datetime stop_time, const bool terminal_stop_mode)
+{
+   if(stop_time > 0)
+   {
+      g_trigger_m15_hard_stop_enabled  = true;
+      g_trigger_m15_hard_stop_time     = stop_time;
+      g_trigger_m15_terminal_stop_mode = terminal_stop_mode;
+
+      if(!terminal_stop_mode)
+      {
+         g_trigger_m15_finalize_requested = false;
+         g_trigger_m15_finalize_time      = 0;
+      }
+   }
+   else
+   {
+      g_trigger_m15_hard_stop_enabled     = false;
+      g_trigger_m15_hard_stop_time        = 0;
+      g_trigger_m15_terminal_stop_mode    = false;
+      g_trigger_m15_finalize_requested    = false;
+      g_trigger_m15_finalize_time         = 0;
+   }
+}
+
+inline bool Trigger_M15HardStopEnabled()
+{
+   return g_trigger_m15_hard_stop_enabled;
+}
+
+inline datetime Trigger_M15HardStopTime()
+{
+   return g_trigger_m15_hard_stop_time;
+}
+
+inline bool Trigger_M15TerminalStopMode()
+{
+   return g_trigger_m15_terminal_stop_mode;
+}
+
+inline bool Trigger_M15HardStopFinalizeRequested()
+{
+   return g_trigger_m15_finalize_requested;
+}
+
+inline datetime Trigger_M15HardStopFinalizeTime()
+{
+   return g_trigger_m15_finalize_time;
+}
+
+inline bool __TRG_M15HardStopBeyondAllowed(const datetime t)
+{
+   if(!g_trigger_m15_hard_stop_enabled)
+      return false;
+   if(g_trigger_m15_hard_stop_time <= 0)
+      return false;
+   if(t <= 0)
+      return false;
+
+   // The configured stop time is the last M15 candle that is allowed to be
+   // processed. Only bars AFTER it are blocked before processing.
+   return (t > g_trigger_m15_hard_stop_time);
+}
+
+inline bool __TRG_M15HardStopFinalBarReached(const datetime t)
+{
+   if(!g_trigger_m15_hard_stop_enabled)
+      return false;
+   if(g_trigger_m15_hard_stop_time <= 0)
+      return false;
+   if(t <= 0)
+      return false;
+
+   return (t >= g_trigger_m15_hard_stop_time);
+}
+
+inline bool Trigger_M15HardStopReached(const datetime t)
+{
+   return __TRG_M15HardStopBeyondAllowed(t);
+}
+
+inline void Trigger_RequestM15HardStopFinalize(const datetime reached_time)
+{
+   if(!g_trigger_m15_hard_stop_enabled)
+      return;
+   if(g_trigger_m15_hard_stop_time <= 0)
+      return;
+
+   datetime use_time = reached_time;
+   if(use_time <= 0 || use_time > g_trigger_m15_hard_stop_time)
+      use_time = g_trigger_m15_hard_stop_time;
+
+   g_trigger_m15_finalize_requested = true;
+   g_trigger_m15_finalize_time      = use_time;
+}
+
+inline bool Trigger_M15HardStopShouldStopBeforeBar(const datetime t)
+{
+   if(g_trigger_m15_terminal_stop_mode)
+      return true;
+
+   if(g_trigger_m15_finalize_requested)
+      return true;
+
+   if(__TRG_M15HardStopBeyondAllowed(t))
+   {
+      Trigger_RequestM15HardStopFinalize(g_trigger_m15_hard_stop_time);
+      return true;
+   }
+
+   return false;
+}
+
+inline void Trigger_M15HardStopMarkFinalBarIfNeeded(const datetime t)
+{
+   if(g_trigger_m15_terminal_stop_mode)
+      return;
+
+   if(__TRG_M15HardStopFinalBarReached(t))
+      Trigger_RequestM15HardStopFinalize(t);
+}
+
+inline bool __TRG_M15HardStopBlocksProcessing(const datetime t)
+{
+   if(!g_trigger_m15_hard_stop_enabled)
+      return false;
+
+   if(g_trigger_m15_terminal_stop_mode)
+      return true;
+
+   return __TRG_M15HardStopBeyondAllowed(t);
+}
+
+inline void Trigger_FinalizeM15HardStop(const datetime stop_time)
+{
+   Trigger_SetM15HardStop(stop_time, true);
+
+   if(stop_time <= 0)
+      return;
+
+   g_trigger_m15_finalize_requested = true;
+   g_trigger_m15_finalize_time      = stop_time;
+}
+
+inline bool Trigger_AnyHistoricalHardStopFinalizeRequested()
+{
+   if(Trigger_M1HardStopFinalizeRequested())
+      return true;
+   if(Trigger_M15HardStopFinalizeRequested())
+      return true;
+   return false;
+}
+
 // ----------------------------------------------------------------------------
 // Worker / bridge helpers
 // ----------------------------------------------------------------------------
@@ -404,9 +565,17 @@ inline void Trigger_ResetGlobals()
    g_trigger_pending_refresh_time = 0;
    g_trigger_apply_next_event = 0;
    g_trigger_apply_last_time  = 0;
-   g_trigger_m1_hard_stop_enabled  = false;
-   g_trigger_m1_hard_stop_time     = 0;
-   g_trigger_m1_terminal_stop_mode = false;
+   g_trigger_m1_hard_stop_enabled     = false;
+   g_trigger_m1_hard_stop_time        = 0;
+   g_trigger_m1_terminal_stop_mode    = false;
+   g_trigger_m1_finalize_requested    = false;
+   g_trigger_m1_finalize_time         = 0;
+
+   g_trigger_m15_hard_stop_enabled    = false;
+   g_trigger_m15_hard_stop_time       = 0;
+   g_trigger_m15_terminal_stop_mode   = false;
+   g_trigger_m15_finalize_requested   = false;
+   g_trigger_m15_finalize_time        = 0;
 
    Trigger_Type1_ResetGlobals();
    Trigger_Type2_ResetGlobals();

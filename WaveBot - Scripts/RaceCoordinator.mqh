@@ -584,10 +584,42 @@ inline bool __Race_IsMajorWorld()
    return (ns == "" || ns == "MAJ");
 }
 
+inline bool __Race_HistoricalStopBlocksNestedScan()
+{
+   if(Trigger_M1HardStopFinalizeRequested())
+      return true;
+
+   // M15 hard stop must block only MAJ-world nested rescans. If a MIN archive
+   // scan exists on other timeframes, it remains bounded by its own range.
+   if(__Race_IsMajorWorld() && Trigger_M15HardStopFinalizeRequested())
+      return true;
+
+   return false;
+}
+
 inline datetime __Race_ScanToTime(const MqlRates &rates[], const int n)
 {
-   if(n > 0) return rates[n-1].time;
-   return TimeCurrent();
+   datetime to_time = TimeCurrent();
+   if(n > 0)
+      to_time = rates[n-1].time;
+
+   const ENUM_TIMEFRAMES runtime_tf = __Race_RuntimeTF();
+
+   if(runtime_tf == PERIOD_M1 && Trigger_M1HardStopEnabled())
+   {
+      datetime hs1 = Trigger_M1HardStopTime();
+      if(hs1 > 0 && (to_time <= 0 || to_time > hs1))
+         to_time = hs1;
+   }
+   else
+   if(runtime_tf == PERIOD_M15 && Trigger_M15HardStopEnabled())
+   {
+      datetime hs15 = Trigger_M15HardStopTime();
+      if(hs15 > 0 && (to_time <= 0 || to_time > hs15))
+         to_time = hs15;
+   }
+
+   return to_time;
 }
 
 // --- NEW: fail-safe unlock on new ext LQ (called by Hunter side)
@@ -939,7 +971,7 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
                   // Fail-safe cleanup (in case ref was missing) and clean W2/W3 handoff
                   __Race_PrepareMTCRegimeHandoff(DIR_DOWN);
 
-                  if(__prev_mode==DIR_UP && !Trigger_M1HardStopFinalizeRequested())
+                  if(__prev_mode==DIR_UP && !__Race_HistoricalStopBlocksNestedScan())
                      API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, runtime_tf, __from, __to,
                                                            false, 0.0, 0, "", __bump);
                }
@@ -1163,7 +1195,7 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
 
                   __Race_PrepareMTCRegimeHandoff(DIR_UP);
 
-                  if(__prev_mode==DIR_DOWN && !Trigger_M1HardStopFinalizeRequested())
+                  if(__prev_mode==DIR_DOWN && !__Race_HistoricalStopBlocksNestedScan())
                      API_RunScanSequential_W2W3_Hunter(InpSymbol, runtime_tf, __from, __to,
                                                       false, 0.0, 0, "", __bump);
                }
@@ -1317,7 +1349,7 @@ inline void __Race_LaunchSpecialDirectionScan(const Direction dir,
    const bool     __bump = __Race_IsMajorWorld();
    const ENUM_TIMEFRAMES runtime_tf = __Race_RuntimeTF();
 
-   if(Trigger_M1HardStopFinalizeRequested())
+   if(__Race_HistoricalStopBlocksNestedScan())
       return;
 
    if(dir == DIR_UP)

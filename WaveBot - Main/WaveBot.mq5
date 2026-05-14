@@ -73,6 +73,11 @@ bool     g_final_outputs_written = false;
 bool     g_m1_scan_hard_stopped  = false;
 datetime g_m1_scan_hard_stop_time = 0;
 
+// --- M15 hard end-of-scan stop guard ---
+bool     g_m15_scan_hard_stopped      = false;
+datetime g_m15_scan_hard_stop_time    = 0;
+bool     g_m15_master_end_published   = false;
+
 // --- NEW: Auto Master/Slave role based on chart timeframe (M15=Master, M1=Slave) ---
 enum WBRole { WBROLE_STANDALONE=0, WBROLE_MASTER_M15=1, WBROLE_SLAVE_M1=2 };
 WBRole g_role = WBROLE_STANDALONE;
@@ -363,6 +368,113 @@ inline void __WB_HardStopM1AtScanEnd(const datetime scan_stop)
       ExpertRemove();
 }
 
+inline bool __WB_ShouldHardStopM15Chart()
+{
+   return (g_role == WBROLE_MASTER_M15);
+}
+
+inline datetime __WB_ResolveM15HardStopBoundary(const datetime requested_stop)
+{
+   datetime use_stop = requested_stop;
+   if(use_stop <= 0)
+      use_stop = TimeCurrent();
+
+   // Freeze M15 to the last CLOSED candle. This prevents the live edge of the
+   // M15 chart from opening the final-days replay loop after the historical pass
+   // reaches today's market boundary.
+   datetime last_closed_m15 = iTime(InpSymbol, PERIOD_M15, 1);
+   if(last_closed_m15 > 0 && last_closed_m15 < use_stop)
+      use_stop = last_closed_m15;
+
+   if(use_stop <= 0)
+      use_stop = TimeCurrent();
+
+   return use_stop;
+}
+
+inline void __WB_PrimeM15HardStopBoundary(const datetime requested_stop)
+{
+   if(!__WB_ShouldHardStopM15Chart())
+   {
+      Trigger_SetM15HardStop(0, false);
+      return;
+   }
+
+   if(g_m15_scan_hard_stop_time <= 0)
+      g_m15_scan_hard_stop_time = __WB_ResolveM15HardStopBoundary(requested_stop);
+
+   if(g_m15_scan_hard_stop_time > 0)
+      Trigger_SetM15HardStop(g_m15_scan_hard_stop_time, false);
+}
+
+inline void __WB_PublishM15MasterEndOnce(const datetime scan_stop)
+{
+   if(g_role != WBROLE_MASTER_M15)
+      return;
+
+   if(g_m15_master_end_published)
+      return;
+
+   datetime use_stop = scan_stop;
+   if(use_stop <= 0)
+      use_stop = TimeCurrent();
+
+   WB15_MasterEnd(InpSymbol, use_stop);
+   g_m15_master_end_published = true;
+}
+
+inline void __WB_HardStopM15AtScanEnd(const datetime scan_stop)
+{
+   if(!__WB_ShouldHardStopM15Chart())
+      return;
+
+   datetime use_stop = scan_stop;
+   if(g_m15_scan_hard_stop_time > 0)
+      use_stop = g_m15_scan_hard_stop_time;
+   else
+      use_stop = __WB_ResolveM15HardStopBoundary(use_stop);
+
+   if(use_stop <= 0)
+      use_stop = TimeCurrent();
+
+   if(g_m15_scan_hard_stopped)
+   {
+      EventKillTimer();
+      return;
+   }
+
+   g_m15_scan_hard_stopped   = true;
+   g_m15_scan_hard_stop_time = use_stop;
+
+   Trigger_FinalizeM15HardStop(use_stop);
+   TriggerStatement_SetBulkScanMode(false);
+
+   // The M15 master must publish its final DONE marker before removing itself so
+   // the M1 slave can start/finish its own terminal scan from a stable bridge.
+   __WB_PublishM15MasterEndOnce(use_stop);
+
+   if(!__WB_FinalScanOutputCompleted())
+      __WB_FlushFinalScanOutputs(use_stop);
+
+   WBLOG_LogParam("M15HardStop", "true", "M15_SCAN_REACHED_END_OF_CHART");
+   WBLOG_LogParam("M15HardStopTime", WBLOG_Time(use_stop), "WaveBot.mq5");
+   WBLOG_FlushSnapshotFilesIfDirty();
+   WBLOG_FlushAllOpenFiles();
+
+   EventKillTimer();
+
+   if(InpDebugPrints)
+   {
+      Print("[WB-M15-HARD-STOP] Historical M15 scan reached final scan boundary @ ",
+            TimeToString(use_stop, TIME_DATE|TIME_SECONDS),
+            ". Master DONE published, timer killed, and M15 EA removal requested.");
+   }
+
+   // Do not call TesterStop() here: the M15 master may be feeding a separate M1
+   // slave chart. ExpertRemove() stops only this chart/EA after final log flush.
+   ExpertRemove();
+}
+
 inline void __WB_EnsureLiveTriggerStatementFile()
 {
    if(!__WB_ShouldHandleTriggerStatement())
@@ -577,7 +689,11 @@ int OnInit()
    g_final_outputs_written = false;
    g_m1_scan_hard_stopped = false;
    g_m1_scan_hard_stop_time = 0;
+   g_m15_scan_hard_stopped = false;
+   g_m15_scan_hard_stop_time = 0;
+   g_m15_master_end_published = false;
    Trigger_SetM1HardStop(0, false);
+   Trigger_SetM15HardStop(0, false);
    __WB_ApplyHiddenVisualPolicies();
    __WB_DeleteAllM15NumberingObjects();
    __WB_EnsureLiveTriggerStatementFile();
@@ -638,6 +754,12 @@ void OnTimer()
       return;
    }
 
+   if(g_role == WBROLE_MASTER_M15 && g_m15_scan_hard_stopped)
+   {
+      EventKillTimer();
+      return;
+   }
+
    // M1 keeps listening to the M15 bridge on every timer tick.
    // Local MIN-world execution on the slave is disabled and any old
    // local-minor artifacts are purged from the chart.
@@ -677,6 +799,19 @@ void OnTimer()
          if(final_stop <= 0)
             final_stop = TimeCurrent();
          __WB_HardStopM1AtScanEnd(final_stop);
+         return;
+      }
+
+      if(g_role == WBROLE_MASTER_M15)
+      {
+         datetime final_stop15 = g_m15_scan_hard_stop_time;
+         if(final_stop15 <= 0)
+            final_stop15 = g_stmt_scan_stop;
+         __WB_PrimeM15HardStopBoundary(final_stop15);
+         final_stop15 = g_m15_scan_hard_stop_time;
+         if(final_stop15 <= 0)
+            final_stop15 = TimeCurrent();
+         __WB_HardStopM15AtScanEnd(final_stop15);
          return;
       }
 
@@ -721,6 +856,13 @@ void OnTimer()
       if(g_m1_scan_hard_stop_time > 0)
          stop = g_m1_scan_hard_stop_time;
    }
+   else
+   if(g_role == WBROLE_MASTER_M15)
+   {
+      __WB_PrimeM15HardStopBoundary(stop);
+      if(g_m15_scan_hard_stop_time > 0)
+         stop = g_m15_scan_hard_stop_time;
+   }
    __WB_RememberTriggerStatementWindow(start, stop);
 
    // Bulk historical pass: avoid rebuilding the full Statement after each
@@ -763,7 +905,18 @@ void OnTimer()
    TriggerStatement_SetBulkScanMode(false);
 
    if(g_role == WBROLE_MASTER_M15)
-      WB15_MasterEnd(InpSymbol, stop);
+   {
+      __WB_PrimeM15HardStopBoundary(stop);
+      if(Trigger_M15HardStopFinalizeRequested() && Trigger_M15HardStopFinalizeTime() > 0)
+         stop = Trigger_M15HardStopFinalizeTime();
+      else
+      if(g_m15_scan_hard_stop_time > 0)
+         stop = g_m15_scan_hard_stop_time;
+
+      g_once = true;  // فقط یک‌بار اسکن کامل در هر اجرای EA
+      __WB_HardStopM15AtScanEnd(stop);
+      return;
+   }
 
    if(g_role == WBROLE_SLAVE_M1)
    {
