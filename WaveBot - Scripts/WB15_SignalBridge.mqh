@@ -257,6 +257,8 @@ inline void WB15_MasterBegin(const string sym)
    GlobalVariableSet(__WB15_Key(sym, "DONE"), 0.0);
    GlobalVariableSet(__WB15_Key(sym, "DONE_SEQ"), 0.0);
    GlobalVariableSet(__WB15_Key(sym, "SCAN_END"), 0.0);
+   GlobalVariableSet(__WB15_Key(sym, "PROGRESS"), 0.0);
+   GlobalVariableSet(__WB15_Key(sym, "PROGRESS_SEQ"), 0.0);
 
    __WB15_StageResetAll();
 }
@@ -274,7 +276,18 @@ inline void WB15_MasterEnd(const string sym, const datetime scan_end_time)
    if(GlobalVariableCheck(kSeq))
       seq = (int)GlobalVariableGet(kSeq);
 
-   GlobalVariableSet(__WB15_Key(sym, "SCAN_END"), (double)use_end);
+   datetime progress_end = use_end;
+   const string kProgress = __WB15_Key(sym, "PROGRESS");
+   if(GlobalVariableCheck(kProgress))
+   {
+      datetime streamed_progress = (datetime)GlobalVariableGet(kProgress);
+      if(streamed_progress > progress_end)
+         progress_end = streamed_progress;
+   }
+
+   GlobalVariableSet(__WB15_Key(sym, "SCAN_END"), (double)progress_end);
+   GlobalVariableSet(kProgress, (double)progress_end);
+   GlobalVariableSet(__WB15_Key(sym, "PROGRESS_SEQ"), (double)seq);
    GlobalVariableSet(__WB15_Key(sym, "DONE_SEQ"), (double)seq);
    GlobalVariableSet(__WB15_Key(sym, "DONE"), 1.0);
 }
@@ -307,6 +320,71 @@ inline bool WB15_MasterDoneInfo(const string sym, datetime &scan_end_time, int &
 
    if(scan_end_time <= 0)
       scan_end_time = TimeCurrent();
+
+   return true;
+}
+
+inline void WB15_MasterProgress(const string sym, const datetime progress_time)
+{
+   if(!__WB15_IsMaster()) return;
+   if(progress_time <= 0) return;
+
+   const string kProgress = __WB15_Key(sym, "PROGRESS");
+   datetime old_progress = 0;
+   if(GlobalVariableCheck(kProgress))
+      old_progress = (datetime)GlobalVariableGet(kProgress);
+
+   // Progress is monotonic and represents the latest M1 time for which all
+   // bridge START/STOP events from the M15 master are already known.
+   if(old_progress > 0 && progress_time < old_progress)
+      return;
+
+   int seq = 0;
+   const string kSeq = __WB15_Key(sym, "SEQ");
+   if(GlobalVariableCheck(kSeq))
+      seq = (int)GlobalVariableGet(kSeq);
+
+   GlobalVariableSet(kProgress, (double)progress_time);
+   GlobalVariableSet(__WB15_Key(sym, "PROGRESS_SEQ"), (double)seq);
+}
+
+inline bool WB15_MasterProgressInfo(const string sym, datetime &progress_time, int &progress_seq)
+{
+   progress_time = 0;
+   progress_seq  = 0;
+
+   datetime done_time = 0;
+   int done_seq = 0;
+   if(WB15_MasterDoneInfo(sym, done_time, done_seq))
+   {
+      progress_time = done_time;
+      progress_seq  = done_seq;
+      return (progress_time > 0);
+   }
+
+   const string kRun = __WB15_Key(sym, "RUN");
+   if(!GlobalVariableCheck(kRun))
+      return false;
+   if(GlobalVariableGet(kRun) <= 0.0)
+      return false;
+
+   const string kProgress = __WB15_Key(sym, "PROGRESS");
+   if(!GlobalVariableCheck(kProgress))
+      return false;
+
+   progress_time = (datetime)GlobalVariableGet(kProgress);
+   if(progress_time <= 0)
+      return false;
+
+   const string kProgressSeq = __WB15_Key(sym, "PROGRESS_SEQ");
+   if(GlobalVariableCheck(kProgressSeq))
+      progress_seq = (int)GlobalVariableGet(kProgressSeq);
+   else
+   {
+      const string kSeq = __WB15_Key(sym, "SEQ");
+      if(GlobalVariableCheck(kSeq))
+         progress_seq = (int)GlobalVariableGet(kSeq);
+   }
 
    return true;
 }
@@ -348,7 +426,6 @@ inline void WB15_MasterPushEvent(const string sym,
    if(GlobalVariableCheck(kSeq))
       seq = (int)GlobalVariableGet(kSeq);
    seq++;
-   GlobalVariableSet(kSeq, (double)seq);
 
    const int code = kind * 100 + ns * 10 + __WB15_DirCode(dir);
    GlobalVariableSet(__WB15_KeyT(sym, seq), (double)t);
@@ -361,6 +438,11 @@ inline void WB15_MasterPushEvent(const string sym,
    GlobalVariableSet(__WB15_Key(sym, "CTX_" + IntegerToString(seq)), (double)m15_context_id);
    GlobalVariableSet(__WB15_Key(sym, "ZONE_" + IntegerToString(seq)), (double)m15_zone_id);
    GlobalVariableSet(__WB15_Key(sym, "WIN_" + IntegerToString(seq)), (double)effective_window_id);
+
+   // Publish SEQ last.  The M1 slave treats SEQ as the commit pointer; if SEQ
+   // is advanced before T/C/metadata are written, a concurrent slave timer can
+   // skip a partially-written event permanently.
+   GlobalVariableSet(kSeq, (double)seq);
 
    string event_type = (kind < 10 ? "START" : "STOP");
    WBLOG_M15BridgeEvent(m15_context_id, m15_zone_id, effective_window_id, event_type, dir, t, t, kind, zone_source, zone_kind, zone_low, zone_high, (kind >= 10 ? t : 0), stop_reason, ns, seq);
@@ -1304,6 +1386,14 @@ inline void WB15_MasterOnM15Bar(const string sym,
 
    __WB15_StageProcessStateOnBar(sym, g_wb15_stage_maj, rates, n, bar_idx);
    __WB15_StageProcessStateOnBar(sym, g_wb15_stage_min, rates, n, bar_idx);
+
+   // Publish a streaming safe boundary after all M15 bridge events for this
+   // candle have been emitted. The M1 slave can process triggers up to this
+   // boundary without waiting for the final DONE marker.
+   datetime safe_until = __WB15_M15CloseTime(rates[bar_idx].time);
+   if(safe_until <= 0)
+      safe_until = rates[bar_idx].time;
+   WB15_MasterProgress(sym, safe_until);
 }
 
 
