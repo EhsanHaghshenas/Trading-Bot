@@ -48,8 +48,18 @@ bool FindMostRecentWave2_Down(const string sym, const ENUM_TIMEFRAMES tf,
    n = LoadRates(sym, tf, lookback, rates);
    if(n<=0){ if(InpDebugPrints) Print("LoadRates failed"); return false; }
 
-   double bodyLowEff[], bodyHighEff[]; BuildEffectiveBodies(rates, n, bodyLowEff, bodyHighEff);
-   bool insideHL[];                   BuildInsideClusterFlagsHL(rates, n, insideHL);
+   double bodyLowEff[], bodyHighEff[];
+   if(!BuildEffectiveBodies(rates, n, bodyLowEff, bodyHighEff))
+   {
+      if(InpDebugPrints) Print("BuildEffectiveBodies failed");
+      return false;
+   }
+   bool insideHL[];
+   if(!BuildInsideClusterFlagsHL(rates, n, insideHL))
+   {
+      if(InpDebugPrints) Print("BuildInsideClusterFlagsHL failed");
+      return false;
+   }
 
    int lastEnd=-1; int bc1=-1,bc2=-1,bc3=-1,bc4=-1;
 
@@ -297,8 +307,20 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
       return 0;
    }
 
-   double bodyLowEff[], bodyHighEff[]; BuildEffectiveBodies(rates, n, bodyLowEff, bodyHighEff);
-   bool insideHL[];                   BuildInsideClusterFlagsHL(rates, n, insideHL);
+   double bodyLowEff[], bodyHighEff[];
+   if(!BuildEffectiveBodies(rates, n, bodyLowEff, bodyHighEff))
+   {
+      if(InpDebugPrints) Print("BuildEffectiveBodies failed");
+      Race_LeaveAPIScan(__api_token);
+      return 0;
+   }
+   bool insideHL[];
+   if(!BuildInsideClusterFlagsHL(rates, n, insideHL))
+   {
+      if(InpDebugPrints) Print("BuildInsideClusterFlagsHL failed");
+      Race_LeaveAPIScan(__api_token);
+      return 0;
+   }
 
    int first_eff=0; while(first_eff<n && rates[first_eff].time<effective_start) first_eff++;
    int idx = MathMax(0, first_eff-2);
