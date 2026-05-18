@@ -35,13 +35,8 @@ bool Boot_FindFirstPair_UP(const string sym, const ENUM_TIMEFRAMES tf,
    MqlRates rates[]; int n = LoadRatesRange(sym, tf, from_adj, to_time, rates);
    if(n<=0) return false;
 
-   double bodyLowEff[], bodyHighEff[];
-   if(!BuildEffectiveBodies(rates, n, bodyLowEff, bodyHighEff))
-      return false;
-
-   bool insideHL[];
-   if(!BuildInsideClusterFlagsHL(rates, n, insideHL))
-      return false;
+   double bodyLowEff[], bodyHighEff[]; BuildEffectiveBodies(rates, n, bodyLowEff, bodyHighEff);
+   bool insideHL[];                    BuildInsideClusterFlagsHL(rates, n, insideHL);
 
    int first_eff=0; while(first_eff<n && rates[first_eff].time<effective_start) first_eff++;
    int idx = MathMax(0, first_eff-2);
@@ -229,13 +224,8 @@ bool Boot_FindFirstPair_DOWN(const string sym, const ENUM_TIMEFRAMES tf,
    MqlRates rates[]; int n = LoadRatesRange(sym, tf, from_adj, to_time, rates);
    if(n<=0) return false;
 
-   double bodyLowEff[], bodyHighEff[];
-   if(!BuildEffectiveBodies(rates, n, bodyLowEff, bodyHighEff))
-      return false;
-
-   bool insideHL[];
-   if(!BuildInsideClusterFlagsHL(rates, n, insideHL))
-      return false;
+   double bodyLowEff[], bodyHighEff[]; BuildEffectiveBodies(rates, n, bodyLowEff, bodyHighEff);
+   bool insideHL[];                    BuildInsideClusterFlagsHL(rates, n, insideHL);
 
    int first_eff=0; while(first_eff<n && rates[first_eff].time<effective_start) first_eff++;
    int idx = MathMax(0, first_eff-2);

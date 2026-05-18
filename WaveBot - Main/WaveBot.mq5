@@ -20,7 +20,7 @@ input Direction         InpDirection           = DIR_DOWN;
 input bool              InpMostRecentOnly      = false;
 input bool              InpUseMonthsAgo        = false;
 input int               InpMonthsAgo           = 40;
-input datetime          InpScanFromDate        = D'2020.01.00 00:00';
+input datetime          InpScanFromDate        = D'2025.05.01 00:00';
 
 // --- ???? ????????? ????? ????? (???? ?????) ---
 input bool              InpRequireCloseBreakAboveW2H1 = true;
@@ -77,7 +77,6 @@ datetime g_m1_scan_hard_stop_time = 0;
 bool     g_m15_scan_hard_stopped      = false;
 datetime g_m15_scan_hard_stop_time    = 0;
 bool     g_m15_master_end_published   = false;
-bool     g_m15_master_run_started     = false;
 
 // --- NEW: Auto Master/Slave role based on chart timeframe (M15=Master, M1=Slave) ---
 enum WBRole { WBROLE_STANDALONE=0, WBROLE_MASTER_M15=1, WBROLE_SLAVE_M1=2 };
@@ -274,12 +273,8 @@ inline void __WB_PrimeM1HardStopBoundary(const datetime requested_stop)
       return;
    }
 
-   datetime resolved_stop = __WB_ResolveM1HardStopBoundary(requested_stop);
    if(g_m1_scan_hard_stop_time <= 0)
-      g_m1_scan_hard_stop_time = resolved_stop;
-   else
-   if(resolved_stop > 0 && resolved_stop < g_m1_scan_hard_stop_time)
-      g_m1_scan_hard_stop_time = resolved_stop;
+      g_m1_scan_hard_stop_time = __WB_ResolveM1HardStopBoundary(requested_stop);
 
    if(g_m1_scan_hard_stop_time > 0)
       Trigger_SetM1HardStop(g_m1_scan_hard_stop_time, false);
@@ -331,10 +326,7 @@ inline void __WB_HardStopM1AtScanEnd(const datetime scan_stop)
 
    datetime use_stop = scan_stop;
    if(g_m1_scan_hard_stop_time > 0)
-   {
-      if(use_stop <= 0 || g_m1_scan_hard_stop_time < use_stop)
-         use_stop = g_m1_scan_hard_stop_time;
-   }
+      use_stop = g_m1_scan_hard_stop_time;
    else
       use_stop = __WB_ResolveM1HardStopBoundary(use_stop);
 
@@ -429,47 +421,6 @@ inline void __WB_PublishM15MasterEndOnce(const datetime scan_stop)
 
    WB15_MasterEnd(InpSymbol, use_stop);
    g_m15_master_end_published = true;
-}
-
-inline bool __WB_UpdateM1BridgeSafeBoundary(datetime &master_scan_end,
-                                            int      &master_done_seq,
-                                            bool     &master_done)
-{
-   master_scan_end = 0;
-   master_done_seq = 0;
-   master_done     = false;
-
-   if(g_role != WBROLE_SLAVE_M1)
-   {
-      Trigger_SetBridgeSafeUntil(0);
-      return false;
-   }
-
-   if(WB15_MasterDoneInfo(InpSymbol, master_scan_end, master_done_seq))
-   {
-      master_done = true;
-      if(master_scan_end > 0)
-         Trigger_SetBridgeSafeUntil(master_scan_end);
-      return true;
-   }
-
-   datetime master_progress = 0;
-   int      master_progress_seq = 0;
-   if(WB15_MasterProgressInfo(InpSymbol, master_progress, master_progress_seq))
-   {
-      master_scan_end = master_progress;
-      master_done_seq = master_progress_seq;
-      Trigger_SetBridgeSafeUntil(master_progress);
-      return true;
-   }
-
-   return false;
-}
-
-inline bool __WB_M1MasterDoneNow(datetime &master_scan_end, int &master_done_seq)
-{
-   bool done = false;
-   return (__WB_UpdateM1BridgeSafeBoundary(master_scan_end, master_done_seq, done) && done);
 }
 
 inline void __WB_HardStopM15AtScanEnd(const datetime scan_stop)
@@ -741,22 +692,11 @@ int OnInit()
    g_m15_scan_hard_stopped = false;
    g_m15_scan_hard_stop_time = 0;
    g_m15_master_end_published = false;
-   g_m15_master_run_started = false;
    Trigger_SetM1HardStop(0, false);
    Trigger_SetM15HardStop(0, false);
-   Trigger_SetBridgeSafeUntil(0);
    __WB_ApplyHiddenVisualPolicies();
    __WB_DeleteAllM15NumberingObjects();
    __WB_EnsureLiveTriggerStatementFile();
-
-   // M15 Master: clear stale bridge variables immediately on attach so a
-   // newly-started M1 slave never reads the previous run while waiting for
-   // the first M15 timer tick.
-   if(g_role == WBROLE_MASTER_M15)
-   {
-      WB15_MasterBegin(InpSymbol);
-      g_m15_master_run_started = true;
-   }
 
    // M1 Slave: start in idle mode and wait for Master signals
    if(g_role == WBROLE_SLAVE_M1)
@@ -828,32 +768,14 @@ void OnTimer()
       WB15_Slave_OnTimer(InpSymbol);
       __WB_DeleteAllM15NumberingObjects();
 
-      datetime __m1_master_end = 0;
-      int      __m1_master_seq = 0;
-      bool     __m1_master_done = false;
-      const bool __m1_bridge_ready = __WB_UpdateM1BridgeSafeBoundary(__m1_master_end, __m1_master_seq, __m1_master_done);
-
-      if(Trigger_M1HardStopFinalizeRequested() && g_once)
+      if(Trigger_M1HardStopFinalizeRequested())
       {
-         if(__m1_bridge_ready)
-            Trigger_OnTimer(InpSymbol);
-
-         if(__m1_master_done)
-         {
-            datetime requested_stop = Trigger_M1HardStopFinalizeTime();
-            if(__m1_master_end > 0 && (requested_stop <= 0 || requested_stop > __m1_master_end))
-               requested_stop = __m1_master_end;
-            if(requested_stop <= 0)
-               requested_stop = g_m1_scan_hard_stop_time;
-            if(requested_stop <= 0)
-               requested_stop = TimeCurrent();
-            __WB_HardStopM1AtScanEnd(requested_stop);
-         }
-         else
-         {
-            if(InpDebugPrints)
-               Print("[WB-M1] M1 scan reached its local boundary; waiting for streaming M15 master completion before final hard stop.");
-         }
+         datetime requested_stop = Trigger_M1HardStopFinalizeTime();
+         if(requested_stop <= 0)
+            requested_stop = g_m1_scan_hard_stop_time;
+         if(requested_stop <= 0)
+            requested_stop = TimeCurrent();
+         __WB_HardStopM1AtScanEnd(requested_stop);
          return;
       }
    }
@@ -869,30 +791,11 @@ void OnTimer()
    {
       if(g_role == WBROLE_SLAVE_M1)
       {
-         datetime master_scan_end = 0;
-         int      master_done_seq = 0;
-         bool     master_done = false;
-         const bool bridge_ready = __WB_UpdateM1BridgeSafeBoundary(master_scan_end, master_done_seq, master_done);
-
-         if(bridge_ready)
-            Trigger_OnTimer(InpSymbol);
-
-         if(!master_done)
-         {
-            if(InpDebugPrints)
-               Print("[WB-M1] Streaming mode: M1 is active and waiting for more M15 bridge progress/DONE.");
-            return;
-         }
-
          datetime final_stop = g_m1_scan_hard_stop_time;
-         if(master_scan_end > 0 && (final_stop <= 0 || final_stop > master_scan_end))
-            final_stop = master_scan_end;
          if(final_stop <= 0)
             final_stop = g_stmt_scan_stop;
          __WB_PrimeM1HardStopBoundary(final_stop);
          final_stop = g_m1_scan_hard_stop_time;
-         if(master_scan_end > 0 && final_stop > master_scan_end)
-            final_stop = master_scan_end;
          if(final_stop <= 0)
             final_stop = TimeCurrent();
          __WB_HardStopM1AtScanEnd(final_stop);
@@ -926,31 +829,26 @@ void OnTimer()
    }
 
    // MASTER (M15): start a fresh run for the M1 bridge (streamed signals)
-   if(g_role == WBROLE_MASTER_M15 && !g_m15_master_run_started)
-   {
+   if(g_role == WBROLE_MASTER_M15)
       WB15_MasterBegin(InpSymbol);
-      g_m15_master_run_started = true;
-   }
 
    datetime master_scan_end = 0;
    int      master_done_seq = 0;
-   bool     master_done = false;
    if(g_role == WBROLE_SLAVE_M1)
    {
-      // Streaming mode: the M1 slave can start as soon as the M15 master has
-      // begun publishing progress. Trigger evaluation is bounded by the latest
-      // safe M15 progress point and no longer waits for the final DONE marker.
-      if(!__WB_UpdateM1BridgeSafeBoundary(master_scan_end, master_done_seq, master_done))
+      // Do not start the terminal M1 historical pass until the M15 master has
+      // published all M15->M1 bridge events and its final scan boundary.
+      if(!WB15_MasterDoneInfo(InpSymbol, master_scan_end, master_done_seq))
       {
          if(InpDebugPrints)
-            Print("[WB-M1] Waiting for M15 master RUN/progress marker before starting streaming M1 scan.");
+            Print("[WB-M1] Waiting for M15 master DONE marker before terminal M1 historical scan.");
          return;
       }
    }
 
    datetime start=0, stop=0;
    ResolveWindow(start, stop);
-   if(g_role == WBROLE_SLAVE_M1 && master_done && master_scan_end > 0 && master_scan_end < stop)
+   if(g_role == WBROLE_SLAVE_M1 && master_scan_end > 0 && master_scan_end < stop)
       stop = master_scan_end;
    if(g_role == WBROLE_SLAVE_M1)
    {
@@ -1030,25 +928,7 @@ void OnTimer()
          stop = g_m1_scan_hard_stop_time;
 
       g_once = true;  // فقط یک‌بار اسکن کامل در هر اجرای EA
-
-      datetime final_master_end = 0;
-      int      final_master_seq = 0;
-      bool     final_master_done = false;
-      const bool final_bridge_ready = __WB_UpdateM1BridgeSafeBoundary(final_master_end, final_master_seq, final_master_done);
-      if(final_bridge_ready)
-         Trigger_OnTimer(InpSymbol);
-
-      if(final_master_done)
-      {
-         if(final_master_end > 0 && stop > final_master_end)
-            stop = final_master_end;
-         __WB_HardStopM1AtScanEnd(stop);
-      }
-      else
-      {
-         if(InpDebugPrints)
-            Print("[WB-M1] Initial M1 scan completed in streaming mode; keeping EA alive until M15 master DONE for final trigger catch-up/output.");
-      }
+      __WB_HardStopM1AtScanEnd(stop);
       return;
    }
 

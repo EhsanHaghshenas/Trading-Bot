@@ -90,13 +90,6 @@ static datetime          g_trigger_pending_refresh_time = 0;
 static int               g_trigger_apply_next_event = 0;
 static datetime          g_trigger_apply_last_time  = 0;
 
-// Streaming M15->M1 safety boundary. While the M15 master is still scanning,
-// the M1 slave may scan its own candles, but trigger evaluation must only run
-// up to the latest M15 progress point for which all bridge START/STOP events
-// are already known.
-static bool              g_trigger_bridge_safe_until_enabled = false;
-static datetime          g_trigger_bridge_safe_until_time    = 0;
-
 // Hard terminal boundary for the historical M1 scan.
 // When WaveBot.mq5 finishes the one-shot M1 pass, live timer processing must not
 // rewind into the last few days and rescan already-processed candles.
@@ -438,42 +431,6 @@ inline bool Trigger_AnyHistoricalHardStopFinalizeRequested()
    return false;
 }
 
-inline void Trigger_SetBridgeSafeUntil(const datetime safe_until_time)
-{
-   if(safe_until_time > 0)
-   {
-      g_trigger_bridge_safe_until_enabled = true;
-      g_trigger_bridge_safe_until_time    = safe_until_time;
-   }
-   else
-   {
-      g_trigger_bridge_safe_until_enabled = false;
-      g_trigger_bridge_safe_until_time    = 0;
-   }
-}
-
-inline bool Trigger_BridgeSafeUntilEnabled()
-{
-   return g_trigger_bridge_safe_until_enabled;
-}
-
-inline datetime Trigger_BridgeSafeUntilTime()
-{
-   return g_trigger_bridge_safe_until_time;
-}
-
-inline bool Trigger_BridgeSafeUntilBlocksProcessing(const datetime bar_time)
-{
-   if(!g_trigger_bridge_safe_until_enabled)
-      return false;
-   if(g_trigger_bridge_safe_until_time <= 0)
-      return false;
-   if(bar_time <= 0)
-      return false;
-
-   return (bar_time > g_trigger_bridge_safe_until_time);
-}
-
 // ----------------------------------------------------------------------------
 // Worker / bridge helpers
 // ----------------------------------------------------------------------------
@@ -573,25 +530,6 @@ inline void __TRG_SortBridgeEvents()
    }
 }
 
-inline datetime __TRG_EarliestEventBarTime()
-{
-   int n = ArraySize(g_trigger_events);
-   if(n <= 0)
-      return 0;
-
-   datetime best = 0;
-   for(int i=0; i<n; ++i)
-   {
-      datetime t = g_trigger_events[i].bar_time;
-      if(t <= 0)
-         continue;
-      if(best <= 0 || t < best)
-         best = t;
-   }
-
-   return best;
-}
-
 inline void __TRG_ResetWindowState()
 {
    Trigger_Type1_ResetGlobals();
@@ -638,9 +576,6 @@ inline void Trigger_ResetGlobals()
    g_trigger_m15_terminal_stop_mode   = false;
    g_trigger_m15_finalize_requested   = false;
    g_trigger_m15_finalize_time        = 0;
-
-   g_trigger_bridge_safe_until_enabled = false;
-   g_trigger_bridge_safe_until_time    = 0;
 
    Trigger_Type1_ResetGlobals();
    Trigger_Type2_ResetGlobals();
@@ -1250,12 +1185,6 @@ inline void __TRG_ProcessLoadedBar(const string    sym,
       return;
    }
 
-   if(Trigger_BridgeSafeUntilBlocksProcessing(bar_time))
-   {
-      TriggerStatement_ScheduledOutputMaybeAt(g_trigger_bridge_safe_until_time);
-      return;
-   }
-
    if(!force_reprocess &&
       g_trigger_core.last_processed_time > 0 &&
       bar_time <= g_trigger_core.last_processed_time)
@@ -1276,15 +1205,11 @@ inline void __TRG_ProcessLoadedBar(const string    sym,
    if(!g_trigger_core.active)
    {
       TriggerStatement_ScheduledOutputMaybeAt(bar_time);
-      g_trigger_core.last_processed_time = bar_time;
-      g_trigger_core.last_processed_idx  = bar_idx;
       return;
    }
    if(bar_time < g_trigger_core.active_start_bar_time)
    {
       TriggerStatement_ScheduledOutputMaybeAt(bar_time);
-      g_trigger_core.last_processed_time = bar_time;
-      g_trigger_core.last_processed_idx  = bar_idx;
       return;
    }
 
@@ -1330,7 +1255,7 @@ inline void Trigger_OnTimer(const string sym)
    if(!__TRG_IsMajorWorld()) return;
    if(sym == "") return;
 
-   if(g_trigger_m1_terminal_stop_mode)
+   if(g_trigger_m1_hard_stop_enabled)
    {
       TriggerStatement_ScheduledOutputMaybeAt(g_trigger_m1_hard_stop_time);
       return;
@@ -1348,19 +1273,7 @@ inline void Trigger_OnTimer(const string sym)
    else if(g_trigger_core.active && g_trigger_core.active_start_bar_time > 0)
       seed_time = g_trigger_core.active_start_bar_time;
    else
-      seed_time = __TRG_EarliestEventBarTime();
-
-   if(seed_time <= 0)
       return;
-
-   if(g_trigger_bridge_safe_until_enabled &&
-      g_trigger_bridge_safe_until_time > 0 &&
-      g_trigger_core.last_processed_time > 0 &&
-      g_trigger_core.last_processed_time >= g_trigger_bridge_safe_until_time)
-   {
-      TriggerStatement_ScheduledOutputMaybeAt(g_trigger_bridge_safe_until_time);
-      return;
-   }
 
    int tfsec = PeriodSeconds((ENUM_TIMEFRAMES)Period());
    if(tfsec <= 0)
@@ -1376,22 +1289,8 @@ inline void Trigger_OnTimer(const string sym)
    if(from_time < (datetime)0)
       from_time = 0;
 
-   datetime to_time = TimeCurrent();
-   if(g_trigger_bridge_safe_until_enabled &&
-      g_trigger_bridge_safe_until_time > 0 &&
-      g_trigger_bridge_safe_until_time < to_time)
-      to_time = g_trigger_bridge_safe_until_time;
-
-   if(g_trigger_m1_hard_stop_enabled &&
-      g_trigger_m1_hard_stop_time > 0 &&
-      g_trigger_m1_hard_stop_time < to_time)
-      to_time = g_trigger_m1_hard_stop_time;
-
-   if(to_time <= from_time)
-      return;
-
    MqlRates rates[];
-   int n = CopyRates(sym, (ENUM_TIMEFRAMES)Period(), from_time, to_time, rates);
+   int n = CopyRates(sym, (ENUM_TIMEFRAMES)Period(), from_time, TimeCurrent(), rates);
    if(n <= 0)
       return;
 
@@ -1400,16 +1299,6 @@ inline void Trigger_OnTimer(const string sym)
    datetime last_closed_time = iTime(sym, (ENUM_TIMEFRAMES)Period(), 1);
    if(last_closed_time <= 0)
       return;
-
-   if(g_trigger_bridge_safe_until_enabled &&
-      g_trigger_bridge_safe_until_time > 0 &&
-      g_trigger_bridge_safe_until_time < last_closed_time)
-      last_closed_time = g_trigger_bridge_safe_until_time;
-
-   if(g_trigger_m1_hard_stop_enabled &&
-      g_trigger_m1_hard_stop_time > 0 &&
-      g_trigger_m1_hard_stop_time < last_closed_time)
-      last_closed_time = g_trigger_m1_hard_stop_time;
 
    for(int i = 0; i < n; ++i)
    {

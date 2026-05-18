@@ -1200,12 +1200,10 @@ inline bool __TRGSTM_Boot_FindFirstPair_UP(const string          sym,
 
    double bodyLowEff[];
    double bodyHighEff[];
-   if(!BuildEffectiveBodies(rates, n, bodyLowEff, bodyHighEff))
-      return false;
+   BuildEffectiveBodies(rates, n, bodyLowEff, bodyHighEff);
 
    bool insideHL[];
-   if(!BuildInsideClusterFlagsHL(rates, n, insideHL))
-      return false;
+   BuildInsideClusterFlagsHL(rates, n, insideHL);
 
    int first_eff = 0;
    while(first_eff < n && rates[first_eff].time < effective_start)
@@ -1463,12 +1461,10 @@ inline bool __TRGSTM_Boot_FindFirstPair_DOWN(const string          sym,
 
    double bodyLowEff[];
    double bodyHighEff[];
-   if(!BuildEffectiveBodies(rates, n, bodyLowEff, bodyHighEff))
-      return false;
+   BuildEffectiveBodies(rates, n, bodyLowEff, bodyHighEff);
 
    bool insideHL[];
-   if(!BuildInsideClusterFlagsHL(rates, n, insideHL))
-      return false;
+   BuildInsideClusterFlagsHL(rates, n, insideHL);
 
    int first_eff = 0;
    while(first_eff < n && rates[first_eff].time < effective_start)
