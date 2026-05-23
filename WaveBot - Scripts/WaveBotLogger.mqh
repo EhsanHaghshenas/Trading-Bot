@@ -1,3 +1,4 @@
+// ============================================================================
 #ifndef WAVEBOT_LOGGER_MQH
 #define WAVEBOT_LOGGER_MQH
 

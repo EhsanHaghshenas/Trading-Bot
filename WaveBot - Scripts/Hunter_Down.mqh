@@ -1,3 +1,4 @@
+// ============================================================================
 #ifndef WAVEBOT_HUNTER_DOWN_MQH
 #define WAVEBOT_HUNTER_DOWN_MQH
 
@@ -178,12 +179,15 @@ inline void Hunter_Down_TryMarkIfValid(const MqlRates &rates[], const int n,
       MarkV("HW_"+tag+"_C1", rates[c1_index].time, clrViolet);
       MarkV("HW_"+tag+"_X",  rates[cross_idx].time, clrMagenta);
    }
+   bool __m15new_hwx_dn_ok = M15NewMarker_OnTarget(DIR_DOWN, WB_M15NEW_TARGET_HWX, rates, n, cross_idx);
+   Trigger_M1LocalGateRegister(DIR_DOWN, WB15_KIND_START_HWX, rates, n, cross_idx, c1_index);
    g_marked_for_lq_d = true;
 
    FSMSLC_RequestTerminal(FSMSLC_TERM_HWX, rates[cross_idx].time);
 
-   // NEW (H4->M15 bridge): HWX is a START trigger (intrabar)
-   WB15_PublishStartHWX(InpSymbol, DIR_DOWN, rates[cross_idx].time, ExtLQ_Down_Get());
+   // M15->M1 Stage-1 is now exclusive to FSMS/HWX/HWBB candles tagged "new".
+   if(__m15new_hwx_dn_ok)
+      WB15_PublishStartHWX(InpSymbol, DIR_DOWN, rates[cross_idx].time, ExtLQ_Down_Get());
 
    // بذر SW نزولی را فعال کن (Lowِ C1 هانتر)
    SW_DOWN_ActivateSeed(rates, n, c1_index, cross_idx);

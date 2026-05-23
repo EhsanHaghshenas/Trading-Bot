@@ -1,3 +1,4 @@
+// ============================================================================
 #property strict
 #property description "WaveBot – W2/W3 + Hunter + ExtLQ + SW (Bootstrap Direction Race)"
 
@@ -20,7 +21,7 @@ input Direction         InpDirection           = DIR_DOWN;
 input bool              InpMostRecentOnly      = false;
 input bool              InpUseMonthsAgo        = false;
 input int               InpMonthsAgo           = 40;
-input datetime          InpScanFromDate        = D'2026.01.00 00:00';
+input datetime          InpScanFromDate        = D'2025.01.00 00:00';
 
 // --- ???? ????????? ????? ????? (???? ?????) ---
 input bool              InpRequireCloseBreakAboveW2H1 = true;
@@ -674,14 +675,18 @@ int OnInit()
    WBLOG_LogParam("InpEnableTriggerStatement", (InpEnableTriggerStatement ? "true" : "false"), "input");
    WBLOG_LogParam("InpTriggerStatementInitialCapital", DoubleToString(InpTriggerStatementInitialCapital, 2), "input");
    WBLOG_LogParam("InpTriggerStatementRiskPercent", DoubleToString(InpTriggerStatementRiskPercent, 4), "input");
-   WBLOG_LogParam("TRGSL_MAX_RISK_PIPS", "25.0", "TriggerSLTP.mqh");
+   WBLOG_LogParam("TRGSL_MIN_RISK_PIPS", "1.4", "TriggerSLTP.mqh");
+   WBLOG_LogParam("TRGSL_MAX_RISK_PIPS", "6.0", "TriggerSLTP.mqh");
    WBLOG_LogParam("TRGSL_R_MULTIPLE", "3.0", "TriggerSLTP.mqh");
+   WBLOG_LogParam("M1_LOCAL_REF_MAX_TRADES", "2", "Trigger.mqh");
+   WBLOG_LogParam("M1_LOCAL_REF_MTC_INVALIDATION", "true", "RaceCoordinator.mqh");
 
    // Ensure WorldManager captures clean baselines before any scan starts
    Markers_SetNamespace("MAJ");
    WBWM_Init();
    Trigger_ResetGlobals();
    TriggerStatement_ResetGlobals();
+   M15NewMarker_ResetGlobals();
    TriggerStatement_SetFinalOnlyOutput(__m1_final_only_output);
    g_stmt_scan_start = 0;
    g_stmt_scan_stop  = 0;
@@ -720,6 +725,7 @@ void OnDeinit(const int reason)
    WBLOG_Finalize();
    Trigger_ResetGlobals();
    TriggerStatement_ResetGlobals();
+   M15NewMarker_ResetGlobals();
    EventKillTimer();
 }
 
@@ -936,4 +942,3 @@ void OnTimer()
 
    g_once = true;  // فقط یک‌بار اسکن کامل در هر اجرای EA
 }
-

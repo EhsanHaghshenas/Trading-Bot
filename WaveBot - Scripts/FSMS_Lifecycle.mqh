@@ -267,5 +267,3 @@ inline void FSMSLC_FinishTerminal(const datetime resume_after)
 }
 
 #endif // WAVEBOT_FSMS_LIFECYCLE_MQH
-
-

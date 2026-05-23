@@ -1,3 +1,4 @@
+// ============================================================================
 #ifndef WAVEBOT_API_MQH
 #define WAVEBOT_API_MQH
 
@@ -288,6 +289,7 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
             }
 
             Trigger_OnBarCandidate(InpSymbol, rates, insideHL, n, i, __API_TriggerActiveCandidate_ANY_UP(i));
+            M15NewZone_OnBar(rates, n, i);
 
             ExtLQ_OnBar(rates[i]);
             HW_BB_UP_OnBar(rates[i], rates, n, i);   // NEW (???? ???? ??? ?? ?? Seed ??????)
@@ -415,6 +417,7 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
             }
 
             Trigger_OnBarCandidate(InpSymbol, rates, insideHL, n, j, __API_TriggerCandidate_WAIT_UP(c1, w3_c1, w3_cand));
+            M15NewZone_OnBar(rates, n, j);
 
             ExtLQ_OnBar(rates[j]);
             if(Hunter_IsExtLQCross(rates[j]))
@@ -669,6 +672,8 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
                   Print("#",tag," Pair(UP) OK | W3 C1=",T(rates[w3_c1].time),
                         " | body-break @ ",T(rates[bodyBreakIdx>=0?bodyBreakIdx:idx].time));
             
+               M15NewMarker_OnNewWavePair(DIR_UP, rates[(bodyBreakIdx>=0 ? bodyBreakIdx : j)].time);
+
                idx=j; state=SEARCH_W2;
                C1Pre_UP_Reset(); ++pairs; progressed=true; break;
             }

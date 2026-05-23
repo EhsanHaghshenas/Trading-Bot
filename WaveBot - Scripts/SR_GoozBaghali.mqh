@@ -1,3 +1,4 @@
+// ============================================================================
 // WaveBot/SR_GoozBaghali.mqh
 #ifndef WAVEBOT_SR_GOOZBAGHALI_MQH
 #define WAVEBOT_SR_GOOZBAGHALI_MQH
@@ -831,7 +832,8 @@ inline void SR_GoozBaghali_OnBar_UP(const MqlRates &rates[],
          MarkCandleText(name, r.time, y, "GBU", clrMagenta);
 
          // NEW (H4->M15 bridge): GOOZBAGHALI is a START trigger (intrabar)
-         WB15_PublishStartGooz(InpSymbol, DIR_UP, r.time, z.price_bottom, z.price_top);
+         // M15->M1 Stage-1 is now restricted to FSMS/HWX/HWBB candles tagged "new".
+         // GoozBaghali remains detected/drawn, but it no longer publishes a Stage-1 START.
 
          // فقط اولین برخورد این ناحیه ⇒ بعد از این کندل دیگر برای این zone، GBU تکرار نمی‌شود
          z.gbu_marked = true;
@@ -953,7 +955,8 @@ inline void SR_GoozBaghali_OnBar_DOWN(const MqlRates &rates[],
          MarkCandleText(name, r.time, y, "GBD", clrMagenta);
 
          // NEW (H4->M15 bridge): GOOZBAGHALI is a START trigger (intrabar)
-         WB15_PublishStartGooz(InpSymbol, DIR_DOWN, r.time, z.price_bottom, z.price_top);
+         // M15->M1 Stage-1 is now restricted to FSMS/HWX/HWBB candles tagged "new".
+         // GoozBaghali remains detected/drawn, but it no longer publishes a Stage-1 START.
 
          z.gbu_marked = true;
          g_srgb_dn_zones[zi] = z;

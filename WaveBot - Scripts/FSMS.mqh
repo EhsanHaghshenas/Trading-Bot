@@ -1,3 +1,4 @@
+// ============================================================================
 #ifndef WAVEBOT_FSMS_MQH
 #define WAVEBOT_FSMS_MQH
 
@@ -488,8 +489,8 @@ inline void __FSMS_Mark_UP(const datetime t)
 
    FSMSLC_OnFormed(DIR_UP, t);
 
-   // NEW (H4->M15 bridge): FSMS (MAJ-only) is a START trigger (on close)
-   WB15_PublishStartFSMS_MAJONLY(InpSymbol, DIR_UP, t);
+   // Stage-1 M15->M1 publication is intentionally gated later by
+   // M15NewMarker_OnTarget(). Only FSMS with a confirmed "new" tag may publish.
 }
 inline void __FSMS_Mark_DN(const datetime t)
 {
@@ -499,8 +500,8 @@ inline void __FSMS_Mark_DN(const datetime t)
 
    FSMSLC_OnFormed(DIR_DOWN, t);
 
-   // NEW (H4->M15 bridge): FSMS (MAJ-only) is a START trigger (on close)
-   WB15_PublishStartFSMS_MAJONLY(InpSymbol, DIR_DOWN, t);
+   // Stage-1 M15->M1 publication is intentionally gated later by
+   // M15NewMarker_OnTarget(). Only FSMS with a confirmed "new" tag may publish.
 }
 
 // --- NEW: Text ??? C1 ???? ? C1 ???? ??????? ???? FSMS (UP) ---
@@ -791,7 +792,14 @@ inline void FSMS_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
                                              bt);
 
                      // ????? FSMS_U ??? ???? FSMS
+                     int fsms_idx = (S.bodyBreakIdx>=0 ? S.bodyBreakIdx : j);
+
                      __FSMS_Mark_UP(bt);
+
+                     bool __m15new_fsms_up_ok = M15NewMarker_OnTarget(DIR_UP, WB_M15NEW_TARGET_FSMS, rates, n, fsms_idx);
+                     Trigger_M1LocalGateRegister(DIR_UP, WB15_KIND_START_FSMS, rates, n, fsms_idx, S.c1);
+                     if(__m15new_fsms_up_ok)
+                        WB15_PublishStartFSMS_MAJONLY(InpSymbol, DIR_UP, bt);
 
                      // ?? ??? ?? ??? FSMS_W2 / FSMS_W3 ???? ??? ???? ????? ???? ?????????
                      // ??? ?? ??????? ?? ???? FSMS ?? FSMS_Minor ????? ???
@@ -985,7 +993,14 @@ inline void FSMS_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
                                              bt);
 
                      // ????? FSMS_D
+                     int fsms_idx = (S.bodyBreakIdx>=0 ? S.bodyBreakIdx : j);
+
                      __FSMS_Mark_DN(bt);
+
+                     bool __m15new_fsms_dn_ok = M15NewMarker_OnTarget(DIR_DOWN, WB_M15NEW_TARGET_FSMS, rates, n, fsms_idx);
+                     Trigger_M1LocalGateRegister(DIR_DOWN, WB15_KIND_START_FSMS, rates, n, fsms_idx, S.c1);
+                     if(__m15new_fsms_dn_ok)
+                        WB15_PublishStartFSMS_MAJONLY(InpSymbol, DIR_DOWN, bt);
 
                      // ??? Text ?? ??? FSMS_W2 / FSMS_W3 ???? ??? ???????
 
@@ -1004,4 +1019,3 @@ inline void FSMS_OnBarCtx(const MqlRates &rates[], const bool &insideHL[],
 }
 
 #endif // WAVEBOT_FSMS_MQH
-

@@ -1,3 +1,4 @@
+// ============================================================================
 // WaveBot/W2W3_ChainInvalidation.mqh
 #ifndef WAVEBOT_W2W3_CHAININVALIDATION_MQH
 #define WAVEBOT_W2W3_CHAININVALIDATION_MQH

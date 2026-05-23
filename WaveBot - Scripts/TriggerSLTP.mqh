@@ -1,3 +1,4 @@
+// ============================================================================
 #ifndef WAVEBOT_TRIGGER_SLTP_MQH
 #define WAVEBOT_TRIGGER_SLTP_MQH
 
@@ -5,7 +6,8 @@
 #include <WaveBot/Markers.mqh>
 #include <WaveBot/WaveBotLogger.mqh>
 
-#define TRGSL_MAX_RISK_PIPS 25.0
+#define TRGSL_MIN_RISK_PIPS 1.4
+#define TRGSL_MAX_RISK_PIPS 6.0
 #define TRGSL_R_MULTIPLE    3.0
 #define TRGSL_FORWARD_BARS  4
 
@@ -74,6 +76,50 @@ inline void TriggerSLTP_ResetGlobals()
 inline int TriggerSLTP_RecordCount()
 {
    return ArraySize(g_trgsl_records);
+}
+
+inline int TriggerSLTP_RemoveRecordsAtOrAfter(const datetime cutoff_time,
+                                             const int      context_id,
+                                             const int      zone_id,
+                                             const int      m1_window_id)
+{
+   if(cutoff_time <= 0)
+      return 0;
+
+   int total = ArraySize(g_trgsl_records);
+   if(total <= 0)
+      return 0;
+
+   int write_pos = 0;
+   int removed   = 0;
+
+   for(int i = 0; i < total; ++i)
+   {
+      TriggerSLTPRecord rec = g_trgsl_records[i];
+
+      bool match = rec.valid && rec.hit_time >= cutoff_time;
+
+      if(match && context_id > 0)
+         match = (rec.log_context_id == context_id);
+      if(match && zone_id > 0)
+         match = (rec.log_zone_id == zone_id);
+      if(match && m1_window_id > 0)
+         match = (rec.log_m1_window_id == m1_window_id);
+
+      if(match)
+      {
+         removed++;
+         continue;
+      }
+
+      g_trgsl_records[write_pos] = rec;
+      write_pos++;
+   }
+
+   if(removed > 0)
+      ArrayResize(g_trgsl_records, write_pos);
+
+   return removed;
 }
 
 inline bool TriggerSLTP_RecordGet(const int index, TriggerSLTPRecord &out)
@@ -176,6 +222,117 @@ inline void __TRGSL_StoreRecord(const TriggerSLTPRecord &rec)
    g_trgsl_records[pos] = rec;
 }
 
+inline int __TRGSL_FindFirstBarAtOrAfter(const MqlRates &rates[],
+                                         const int       n,
+                                         const datetime  t)
+{
+   if(n <= 0)
+      return -1;
+
+   for(int i = 0; i < n; ++i)
+   {
+      if(rates[i].time >= t)
+         return i;
+   }
+
+   return -1;
+}
+
+inline int __TRGSL_FindLastBarAtOrBefore(const MqlRates &rates[],
+                                         const int       n,
+                                         const datetime  t)
+{
+   if(n <= 0)
+      return -1;
+
+   int idx = -1;
+   for(int i = 0; i < n; ++i)
+   {
+      if(rates[i].time <= t)
+         idx = i;
+      else
+         break;
+   }
+
+   return idx;
+}
+
+inline bool __TRGSL_RecordClosedAtOrBefore(const TriggerSLTPRecord &rec,
+                                           const MqlRates          &rates[],
+                                           const int                n,
+                                           const datetime           current_time)
+{
+   if(!rec.valid)
+      return true;
+   if(current_time <= 0)
+      return false;
+
+   // If the new trigger is on the same candle/time as the previous entry,
+   // the previous trade is still treated as open for the one-open-trade gate.
+   if(rec.hit_time <= 0 || current_time <= rec.hit_time)
+      return false;
+
+   int start_idx = __TRGSL_FindFirstBarAtOrAfter(rates, n, rec.hit_time);
+   if(start_idx < 0)
+      start_idx = __TRGSL_FindLastBarAtOrBefore(rates, n, rec.hit_time);
+
+   if(start_idx < 0 || start_idx >= n)
+      return false;
+
+   for(int i = start_idx; i < n; ++i)
+   {
+      if(rates[i].time > current_time)
+         break;
+
+      bool hit_tp = false;
+      bool hit_sl = false;
+
+      if(rec.dir == DIR_UP)
+      {
+         hit_tp = (rates[i].high >= rec.tp_level);
+         hit_sl = (rates[i].low  <= rec.sl_level);
+      }
+      else
+      {
+         hit_tp = (rates[i].low  <= rec.tp_level);
+         hit_sl = (rates[i].high >= rec.sl_level);
+      }
+
+      if(hit_tp || hit_sl)
+         return true;
+   }
+
+   return false;
+}
+
+inline bool __TRGSL_HasOpenTradeBefore(const string    sym,
+                                       const MqlRates &rates[],
+                                       const int       n,
+                                       const datetime  current_time)
+{
+   if(current_time <= 0)
+      return false;
+
+   int total = ArraySize(g_trgsl_records);
+   for(int i = 0; i < total; ++i)
+   {
+      TriggerSLTPRecord rec = g_trgsl_records[i];
+      if(!rec.valid)
+         continue;
+
+      if(sym != "" && rec.symbol != "" && rec.symbol != sym)
+         continue;
+
+      if(rec.hit_time <= 0 || rec.hit_time > current_time)
+         continue;
+
+      if(!__TRGSL_RecordClosedAtOrBefore(rec, rates, n, current_time))
+         return true;
+   }
+
+   return false;
+}
+
 inline bool __TRGSL_BuildBull(const string    sym,
                               const int       type_id,
                               const int       src_idx,
@@ -193,21 +350,23 @@ inline bool __TRGSL_BuildBull(const string    sym,
       return false;
 
    // New Flip/MajicFlip SL rule:
-   // Bullish trigger => SL below the Low of the same Flip/MajicFlip candle.
+   // Bullish trigger => SL below the complete Flip/MajicFlip zone.
+   // This uses the lower boundary between the pattern source candle and breaker candle.
    double buffer = __TRGSL_PointOf(sym);
    if(buffer <= 0.0)
       buffer = _Point;
    if(buffer <= 0.0)
       buffer = 0.00000001;
 
-   double sl = rates[hit_idx].low - buffer;
+   double zone_bottom = MathMin(rates[src_idx].low, rates[hit_idx].low);
+   double sl = zone_bottom - buffer;
 
    double risk = (level - sl);
    if(risk <= 0.0)
       return false;
 
    double risk_pips = __TRGSL_ToPips(sym, risk);
-   if(risk_pips > TRGSL_MAX_RISK_PIPS)
+   if(risk_pips < TRGSL_MIN_RISK_PIPS || risk_pips > TRGSL_MAX_RISK_PIPS)
       return false;
 
    __TRGSL_ClearRecord(out);
@@ -244,21 +403,23 @@ inline bool __TRGSL_BuildBear(const string    sym,
       return false;
 
    // New Flip/MajicFlip SL rule:
-   // Bearish trigger => SL above the High of the same Flip/MajicFlip candle.
+   // Bearish trigger => SL above the complete Flip/MajicFlip zone.
+   // This uses the upper boundary between the pattern source candle and breaker candle.
    double buffer = __TRGSL_PointOf(sym);
    if(buffer <= 0.0)
       buffer = _Point;
    if(buffer <= 0.0)
       buffer = 0.00000001;
 
-   double sl = rates[hit_idx].high + buffer;
+   double zone_top = MathMax(rates[src_idx].high, rates[hit_idx].high);
+   double sl = zone_top + buffer;
 
    double risk = (sl - level);
    if(risk <= 0.0)
       return false;
 
    double risk_pips = __TRGSL_ToPips(sym, risk);
-   if(risk_pips > TRGSL_MAX_RISK_PIPS)
+   if(risk_pips < TRGSL_MIN_RISK_PIPS || risk_pips > TRGSL_MAX_RISK_PIPS)
       return false;
 
    __TRGSL_ClearRecord(out);
@@ -291,6 +452,37 @@ inline void TriggerSLTP_OnTriggerFired(const string    sym,
    if(use_sym == "")
       use_sym = _Symbol;
 
+   if(hit_idx >= 0 && hit_idx < n)
+   {
+      if(__TRGSL_HasOpenTradeBefore(use_sym, rates, n, rates[hit_idx].time))
+      {
+         WBLOG_LogRejectedTrigger(type_id,
+                                  dir,
+                                  rates[hit_idx].time,
+                                  hit_idx,
+                                  rates[hit_idx].open,
+                                  rates[hit_idx].high,
+                                  rates[hit_idx].low,
+                                  rates[hit_idx].close,
+                                  "one_open_trade_limit",
+                                  0.0,
+                                  0.0,
+                                  0.0,
+                                  "TriggerSLTP_OnTriggerFired_one_open_gate");
+
+         if(InpDebugPrints)
+         {
+            Print("[TRG-SLTP] Skip ",
+                  (dir == DIR_UP ? "UP" : "DOWN"),
+                  " trigger | breakout=", DoubleToString(level, __TRGSL_DigitsOf(use_sym)),
+                  " | src_idx=", src_idx,
+                  " | hit_idx=", hit_idx,
+                  " | reason=one_open_trade_already_active");
+         }
+         return;
+      }
+   }
+
    TriggerSLTPRecord rec;
    bool ok = false;
 
@@ -317,11 +509,11 @@ inline void TriggerSLTP_OnTriggerFired(const string    sym,
                                   rates[hit_idx].high,
                                   rates[hit_idx].low,
                                   rates[hit_idx].close,
-                                  "risk_gt_25pip_or_bad_flip_candle_range",
+                                  "risk_outside_1_4_to_6pip_or_bad_flip_zone_range",
                                   approx_risk_pips,
                                   0.0,
                                   0.0,
-                                  "TriggerSLTP_OnTriggerFired_rejected");
+                                  "TriggerSLTP_OnTriggerFired_risk_filter_rejected");
       }
 
       if(InpDebugPrints)
@@ -331,7 +523,7 @@ inline void TriggerSLTP_OnTriggerFired(const string    sym,
                " trigger | breakout=", DoubleToString(level, __TRGSL_DigitsOf(use_sym)),
                " | src_idx=", src_idx,
                " | hit_idx=", hit_idx,
-               " | reason=risk>25pip_or_bad_flip_candle_range");
+               " | reason=risk_outside_1_4_to_6pip_or_bad_flip_zone_range");
       }
       return;
    }

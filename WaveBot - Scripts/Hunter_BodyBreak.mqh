@@ -1,3 +1,4 @@
+// ============================================================================
 #ifndef WAVEBOT_HUNTER_BODYBREAK_MQH
 #define WAVEBOT_HUNTER_BODYBREAK_MQH
 
@@ -197,11 +198,14 @@ inline void HW_BB_UP_OnBar(const MqlRates &r, const MqlRates &rates[], const int
    {
       ++g_bb_counter_u;
       if(InpDrawMarkers) MarkV("HWBB_U_"+IntegerToString(g_bb_counter_u), r.time, clrRoyalBlue);
+      bool __m15new_hwbb_up_ok = M15NewMarker_OnTarget(DIR_UP, WB_M15NEW_TARGET_HWBB, rates, n, j);
+      Trigger_M1LocalGateRegister(DIR_UP, WB15_KIND_START_HWBB, rates, n, j, SW_UP_C1Index());
 
       FSMSLC_RequestTerminal(FSMSLC_TERM_HWBB, r.time);
 
-      // NEW (H4->M15 bridge): HWBB is a START trigger (intrabar)
-      WB15_PublishStartHWBB(InpSymbol, DIR_UP, r.time, g_bb_level_u, g_bb_cross_time_u);
+      // M15->M1 Stage-1 is now exclusive to FSMS/HWX/HWBB candles tagged "new".
+      if(__m15new_hwbb_up_ok)
+         WB15_PublishStartHWBB(InpSymbol, DIR_UP, r.time, g_bb_level_u, g_bb_cross_time_u);
 
       // set ref for POSSIBLE MTC_DOWN (High of Hunter-UP C1) + draw ref history now
       Race_SetRefLevelForMTC_Down(SW_UP_Level());
@@ -282,11 +286,14 @@ inline void HW_BB_DOWN_OnBar(const MqlRates &r, const MqlRates &rates[], const i
    {
       ++g_bb_counter_d;
       if(InpDrawMarkers) MarkV("HWBB_D_"+IntegerToString(g_bb_counter_d), r.time, clrDarkOrange);
+      bool __m15new_hwbb_dn_ok = M15NewMarker_OnTarget(DIR_DOWN, WB_M15NEW_TARGET_HWBB, rates, n, j);
+      Trigger_M1LocalGateRegister(DIR_DOWN, WB15_KIND_START_HWBB, rates, n, j, SW_DOWN_C1Index());
 
       FSMSLC_RequestTerminal(FSMSLC_TERM_HWBB, r.time);
 
-      // NEW (H4->M15 bridge): HWBB is a START trigger (intrabar)
-      WB15_PublishStartHWBB(InpSymbol, DIR_DOWN, r.time, g_bb_level_d, g_bb_cross_time_d);
+      // M15->M1 Stage-1 is now exclusive to FSMS/HWX/HWBB candles tagged "new".
+      if(__m15new_hwbb_dn_ok)
+         WB15_PublishStartHWBB(InpSymbol, DIR_DOWN, r.time, g_bb_level_d, g_bb_cross_time_d);
 
       // set ref for POSSIBLE MTC_UP (Low of Hunter-DOWN C1) + draw ref history now
       Race_SetRefLevelForMTC_Up(SW_DOWN_Level());

@@ -1,3 +1,4 @@
+// ============================================================================
 #ifndef WAVEBOT_WB15_SIGNAL_BRIDGE_MQH
 #define WAVEBOT_WB15_SIGNAL_BRIDGE_MQH
 
@@ -7,7 +8,10 @@
 // M15 publishes START/STOP signals; M1 draws ON/OFF markers as an overlay.
 // ============================================================================
 
-// NOTE: This module is intentionally standalone and implements the M15 three-stage signal gate.
+// NOTE: This module is intentionally standalone and now publishes the M15->M1
+// START directly from the confirmed Stage-1 "new" seed.  The legacy Stage-2/
+// Stage-3 Flip/MajicFlip helpers are kept below for compatibility, but they no
+// longer gate M1 activation.
 #include <WaveBot/WaveBotLogger.mqh>
 
 // ---- Signal namespace (world) ----
@@ -155,18 +159,19 @@ inline string __WB15_StartTypeText(const int kind, const int ns, const Direction
 }
 
 // ============================================================================
-// MASTER (M15): strict three-stage gate before publishing M1 START
-// Stage-1: primary M15 seed (HWX / HWBB / FSMS / GoozBaghali)
-// Stage-2: M15 Flip or MajicFlip forms before the original OFF
-// Stage-3: price retouches the registered Flip/MajicFlip zone
-// Only Stage-3 publishes the actual START event to M1.
+// MASTER (M15): direct Stage-1 publication to M1
+// Stage-1: confirmed M15 "new" seed (FSMS / HWX / HWBB only)
+// Result : publish the actual START event to M1 immediately at the mapped
+//          Stage-1 event time.
+// Legacy Stage-2/Stage-3 Flip/MajicFlip helpers remain in this file but are no
+// longer reached because Stage-1 sets on_sent=true as soon as it is armed.
 // ============================================================================
 
 struct WB15StageState
 {
    bool      active;          // Stage-1 is active
    bool      zone_active;     // Stage-2 is active
-   bool      on_sent;         // Stage-3 already published to M1
+   bool      on_sent;         // direct Stage-1 START already published to M1
 
    int       start_kind;
    int       start_ns;
@@ -361,6 +366,8 @@ inline void WB15_MasterPushEvent(const string sym,
    GlobalVariableSet(__WB15_Key(sym, "CTX_" + IntegerToString(seq)), (double)m15_context_id);
    GlobalVariableSet(__WB15_Key(sym, "ZONE_" + IntegerToString(seq)), (double)m15_zone_id);
    GlobalVariableSet(__WB15_Key(sym, "WIN_" + IntegerToString(seq)), (double)effective_window_id);
+   GlobalVariableSet(__WB15_Key(sym, "ZL_" + IntegerToString(seq)), zone_low);
+   GlobalVariableSet(__WB15_Key(sym, "ZH_" + IntegerToString(seq)), zone_high);
 
    string event_type = (kind < 10 ? "START" : "STOP");
    WBLOG_M15BridgeEvent(m15_context_id, m15_zone_id, effective_window_id, event_type, dir, t, t, kind, zone_source, zone_kind, zone_low, zone_high, (kind >= 10 ? t : 0), stop_reason, ns, seq);
@@ -676,6 +683,80 @@ inline void __WB15_StageClearZone(WB15StageState &st)
    st.log_zone_id      = 0;
 }
 
+inline void __WB15_StagePublishDirectON(const string sym,
+                                          WB15StageState &st)
+{
+   if(!__WB15_IsMaster()) return;
+   if(!st.active) return;
+   if(st.on_sent) return;
+   if(st.start_time <= 0) return;
+
+   // Direct Stage-1 mode:
+   // The confirmed M15 "new" seed is the actual M1 activation point.
+   // No M15 Flip/MajicFlip zone and no retouch are required anymore.
+   // However, the M1 trigger gate must know the exact NEW-zone bounds from
+   // the same M15 moment, so the current visual NEW zone is packed with the ON.
+   double direct_zone_low  = 0.0;
+   double direct_zone_high = 0.0;
+   int    direct_zone_id   = 0;
+
+   if(M15NewZone_CurrentDisplayBounds(st.start_dir, direct_zone_low, direct_zone_high))
+      direct_zone_id = M15NewZone_CurrentId();
+
+   if(direct_zone_id <= 0)
+      direct_zone_id = st.log_zone_id;
+
+   st.log_zone_id = direct_zone_id;
+
+   TriggerM15SignalGate_RecordExact(sym, st.start_kind, st.start_ns, st.start_dir, st.start_time);
+
+   WB15_MasterPushEvent(sym,
+                        st.start_kind,
+                        st.start_ns,
+                        st.start_dir,
+                        st.start_time,
+                        st.log_context_id,
+                        direct_zone_id,
+                        0,
+                        0,
+                        0,
+                        direct_zone_low,
+                        direct_zone_high,
+                        "STAGE1_NEW_DIRECT_ON");
+
+   st.on_sent = true;
+
+   WBLOG_LogM15GateEvent(st.log_context_id,
+                         0,
+                         "M1_START_SENT",
+                         st.start_dir,
+                         st.start_time,
+                         (int)st.start_time,
+                         0.0, 0.0, 0.0, 0.0,
+                         0.0, 0.0,
+                         "stage1_new_direct_start_published_to_m1");
+
+   WBLOG_LogStateTransition("WB15_SignalBridge",
+                            "STAGE_1_NEW_ACTIVE",
+                            "M1_ON_SENT_DIRECT",
+                            st.start_dir,
+                            st.log_context_id,
+                            0,
+                            0,
+                            0,
+                            "STAGE1_NEW_DIRECT_ON",
+                            st.start_time,
+                            PERIOD_M15,
+                            (int)st.start_time,
+                            0.0, 0.0, 0.0, 0.0);
+
+   if(InpDebugPrints)
+      Print("[WB15-STAGE] Stage-1 NEW -> direct M1 ON | kind=", __WB15_StartKindLabel(st.start_kind),
+            " | ns=", __WB15_NSLabel(st.start_ns),
+            " | dir=", (st.start_dir==DIR_UP ? "UP" : "DOWN"),
+            " | t=", TimeToString(st.start_time, TIME_DATE|TIME_SECONDS));
+}
+
 inline void __WB15_StageStartState(const string sym,
                                    WB15StageState &st,
                                    const int kind,
@@ -703,11 +784,13 @@ inline void __WB15_StageStartState(const string sym,
    st.log_context_id   = WBLOG_M15MainSignalStart(sym, kind, ns, dir, event_time, stage1_bar_time);
 
    if(InpDebugPrints)
-      Print("[WB15-STAGE] Stage-1 armed | kind=", __WB15_StartKindLabel(kind),
+      Print("[WB15-STAGE] Stage-1 NEW armed | kind=", __WB15_StartKindLabel(kind),
             " | ns=", __WB15_NSLabel(ns),
             " | dir=", (dir==DIR_UP ? "UP" : "DOWN"),
             " | t=", TimeToString(event_time, TIME_DATE|TIME_SECONDS),
             " | bar=", TimeToString(stage1_bar_time, TIME_DATE|TIME_SECONDS));
+
+   __WB15_StagePublishDirectON(sym, st);
 }
 
 inline void __WB15_StageStart(const string sym,
@@ -720,6 +803,12 @@ inline void __WB15_StageStart(const string sym,
    if(!__WB15_IsMaster()) return;
    if(event_time <= 0) return;
    if(stage1_bar_time <= 0) return;
+
+   // Direct M15->M1 Stage-1 is intentionally restricted to the three
+   // "new"-eligible families only. GoozBaghali and any legacy start wrapper
+   // must not open an M1 signal window.
+   if(kind != WB15_KIND_START_HWX && kind != WB15_KIND_START_HWBB && kind != WB15_KIND_START_FSMS)
+      return;
 
    if((kind == WB15_KIND_START_HWX || kind == WB15_KIND_START_HWBB) && event_time > g_wb15_last_hwx_hwbb_stage_time)
       g_wb15_last_hwx_hwbb_stage_time = event_time;
@@ -1276,17 +1365,19 @@ inline void __WB15_StageProcessStateOnBar(const string sym,
    if(!st.active) return;
    if(bar_idx < 0 || bar_idx >= n) return;
 
+   // Direct Stage-1 mode: a confirmed "new" seed publishes M1 ON immediately
+   // inside __WB15_StageStartState().  Once on_sent=true, Stage-2 and Stage-3
+   // must stay disabled so M15 Flip/MajicFlip zones cannot change the window.
+   if(st.on_sent)
+      return;
+
    bool had_zone_before_process = st.zone_active;
 
-   if(!st.zone_active && !st.on_sent)
+   if(!st.zone_active)
       __WB15_StageTryArmZoneOnBar(sym, st, rates, n, bar_idx);
 
    __WB15_StageProcessZoneRetouch(sym, st, rates[bar_idx]);
 
-   // If the previous Stage-2 zone was invalidated on this M15 candle, keep the
-   // Stage-1 signal alive and immediately resume Stage-2 search.  This allows
-   // the same closed M15 candle to become the new Flip/MajicFlip confirmation
-   // when it qualifies, while Stage-3 retouch is still blocked until later bars.
    if(had_zone_before_process && !st.zone_active && !st.on_sent && st.active)
       __WB15_StageTryArmZoneOnBar(sym, st, rates, n, bar_idx);
 }
@@ -1725,7 +1816,8 @@ inline void __WB15_DrawCountSequence(const string sym,
 
 inline bool __WB15_IsStartKind(const int kind)
 {
-   return (kind == WB15_KIND_START_HWX || kind == WB15_KIND_START_HWBB || kind == WB15_KIND_START_FSMS || kind == WB15_KIND_START_GOOZBAGHALI);
+   // M1 may only open a window from direct Stage-1 "new" signals.
+   return (kind == WB15_KIND_START_HWX || kind == WB15_KIND_START_HWBB || kind == WB15_KIND_START_FSMS);
 }
 
 inline bool __WB15_IsStopKind(const int kind)

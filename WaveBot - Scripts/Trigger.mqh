@@ -1,3 +1,4 @@
+// ============================================================================
 #ifndef WAVEBOT_TRIGGER_MQH
 #define WAVEBOT_TRIGGER_MQH
 
@@ -16,17 +17,20 @@ bool TriggerStatement_ScheduledOutputMaybeAt(const datetime current_time);
 // Trigger.mqh
 //
 // Current trigger architecture:
-//   - Trigger Type 1 = Flip.mqh.
-//     Every valid Flip candle becomes a Type-1 trigger on that same closed bar.
-//   - Trigger Type 2 = Majicflip.mqh.
-//     Every valid MajicFlip breaker candle becomes a Type-2 trigger on that
-//     same closed bar.
-//   - Both engines are evaluated on every worker M1 candle while an imported
-//     M15->M1 signal window is active.
-//   - Entry/breakout level is the close of the Flip/MajicFlip trigger candle.
-//   - TriggerSLTP.mqh builds SL/TP from the trigger candle itself.
-//   - No M1 trend-alignment check is performed here; the imported M15->M1
-//     bridge window is the only activation context for trigger search.
+//   - Imported M15 "new" ON opens an M1 search window and carries the exact
+//     same-moment M15 NEW-zone bounds.
+//   - M1 waits for a same-direction HWX/HWBB/FSMS candle that is fully inside
+//     that imported M15 NEW zone; after local expiry it may accept the next one.
+//   - Only after that local reference is accepted, Trigger Type 1 = Flip.mqh
+//     and Trigger Type 2 = Majicflip.mqh can become trades.
+//   - A Flip/MajicFlip trigger must be closer to the accepted local reference
+//     candle than to the relevant first-candle barrier.
+//   - Each accepted local M1 HWX/HWBB/FSMS reference is valid for max 2
+//     accepted trades only; after that, M1 must wait for the next local reference.
+//   - If any MTC forms after the accepted local M1 reference, that local reference
+//     is invalidated immediately and no further Flip/MajicFlip trigger may use it.
+//   - Each imported M15 "new" signal is still retired after 4 actual trades.
+//   - Legacy execution restrictions are disabled in TriggerStatement.mqh.
 // ============================================================================
 
 #define TRG_MAX_ACTIVE_SESSIONS  32
@@ -44,6 +48,8 @@ struct TriggerEvent
    int       context_id;
    int       zone_id;
    int       m1_window_id;
+   double    zone_low;
+   double    zone_high;
 };
 
 struct TriggerStartSession
@@ -75,6 +81,18 @@ struct TriggerWindowCore
    int           active_context_id;
    int           active_zone_id;
    int           active_m1_window_id;
+   double        active_zone_low;
+   double        active_zone_high;
+
+   int           active_trade_count;
+   int           retired_start_seq;
+
+   bool          local_ref_ready;
+   int           local_ref_kind;
+   int           local_ref_idx;
+   int           local_ref_barrier_idx;
+   datetime      local_ref_time;
+   int           local_ref_trade_count;
 
    datetime      last_processed_time;
    int           last_processed_idx;
@@ -274,6 +292,12 @@ inline void Trigger_FinalizeM1HardStop(const datetime stop_time)
    g_trigger_core.active_context_id     = 0;
    g_trigger_core.active_zone_id        = 0;
    g_trigger_core.active_m1_window_id   = 0;
+   g_trigger_core.local_ref_ready       = false;
+   g_trigger_core.local_ref_kind        = 0;
+   g_trigger_core.local_ref_idx         = -1;
+   g_trigger_core.local_ref_barrier_idx = -1;
+   g_trigger_core.local_ref_time        = 0;
+   g_trigger_core.local_ref_trade_count = 0;
    g_trigger_apply_next_event           = ArraySize(g_trigger_events);
    g_trigger_apply_last_time            = stop_time;
    g_trigger_pending_refresh_time       = 0;
@@ -530,10 +554,48 @@ inline void __TRG_SortBridgeEvents()
    }
 }
 
+inline void __TRG_ResetLocalM1Reference()
+{
+   g_trigger_core.local_ref_ready       = false;
+   g_trigger_core.local_ref_kind        = 0;
+   g_trigger_core.local_ref_idx         = -1;
+   g_trigger_core.local_ref_barrier_idx = -1;
+   g_trigger_core.local_ref_time        = 0;
+   g_trigger_core.local_ref_trade_count = 0;
+}
+
+inline void __TRG_InvalidateLocalM1Reference(const string reason,
+                                             const datetime t)
+{
+   if(!g_trigger_core.local_ref_ready)
+      return;
+
+   const datetime old_ref_time = g_trigger_core.local_ref_time;
+   const int      old_ref_kind = g_trigger_core.local_ref_kind;
+   const int      old_ref_trades = g_trigger_core.local_ref_trade_count;
+
+   __TRG_ResetLocalM1Reference();
+   Trigger_Type1_ResetGlobals();
+   Trigger_Type2_ResetGlobals();
+   Flip_ResetGlobals();
+   MajicFlip_ResetGlobals();
+
+   if(InpDebugPrints)
+   {
+      Print("[TRG-M1-REF] Invalidated local reference",
+            " | reason=", reason,
+            " | old_kind=", IntegerToString(old_ref_kind),
+            " | old_ref=", TimeToString(old_ref_time, TIME_DATE|TIME_SECONDS),
+            " | trades=", IntegerToString(old_ref_trades),
+            " | event=", TimeToString(t, TIME_DATE|TIME_SECONDS));
+   }
+}
+
 inline void __TRG_ResetWindowState()
 {
    Trigger_Type1_ResetGlobals();
    Trigger_Type2_ResetGlobals();
+   __TRG_ResetLocalM1Reference();
    g_trigger_core.last_processed_time = 0;
    g_trigger_core.last_processed_idx  = -1;
    g_trigger_pending_refresh_time     = 0;
@@ -554,6 +616,18 @@ inline void Trigger_ResetGlobals()
    g_trigger_core.active_context_id     = 0;
    g_trigger_core.active_zone_id        = 0;
    g_trigger_core.active_m1_window_id   = 0;
+   g_trigger_core.active_zone_low       = 0.0;
+   g_trigger_core.active_zone_high      = 0.0;
+
+   g_trigger_core.active_trade_count    = 0;
+   g_trigger_core.retired_start_seq     = -1;
+
+   g_trigger_core.local_ref_ready       = false;
+   g_trigger_core.local_ref_kind        = 0;
+   g_trigger_core.local_ref_idx         = -1;
+   g_trigger_core.local_ref_barrier_idx = -1;
+   g_trigger_core.local_ref_time        = 0;
+   g_trigger_core.local_ref_trade_count = 0;
 
    g_trigger_core.last_processed_time   = 0;
    g_trigger_core.last_processed_idx    = -1;
@@ -654,12 +728,25 @@ inline bool __TRG_RebuildBridgeEvents(const string sym)
       evt.zone_id = 0;
       evt.m1_window_id = i;
 
+      evt.zone_low  = 0.0;
+      evt.zone_high = 0.0;
+
       const string kctx  = __WB15_Key(sym, "CTX_" + IntegerToString(i));
       const string kzone = __WB15_Key(sym, "ZONE_" + IntegerToString(i));
       const string kwin  = __WB15_Key(sym, "WIN_" + IntegerToString(i));
+      const string kzl   = __WB15_Key(sym, "ZL_" + IntegerToString(i));
+      const string kzh   = __WB15_Key(sym, "ZH_" + IntegerToString(i));
       if(GlobalVariableCheck(kctx))  evt.context_id = (int)GlobalVariableGet(kctx);
       if(GlobalVariableCheck(kzone)) evt.zone_id = (int)GlobalVariableGet(kzone);
       if(GlobalVariableCheck(kwin))  evt.m1_window_id = (int)GlobalVariableGet(kwin);
+      if(GlobalVariableCheck(kzl))   evt.zone_low = GlobalVariableGet(kzl);
+      if(GlobalVariableCheck(kzh))   evt.zone_high = GlobalVariableGet(kzh);
+      if(evt.zone_high < evt.zone_low)
+      {
+         double tmpz = evt.zone_high;
+         evt.zone_high = evt.zone_low;
+         evt.zone_low = tmpz;
+      }
       if(evt.m1_window_id <= 0) evt.m1_window_id = i;
 
       int pos = ArraySize(g_trigger_events);
@@ -681,6 +768,10 @@ inline bool __TRG_RebuildBridgeEvents(const string sym)
       g_trigger_core.active_context_id     = 0;
       g_trigger_core.active_zone_id        = 0;
       g_trigger_core.active_m1_window_id   = 0;
+      g_trigger_core.active_zone_low       = 0.0;
+      g_trigger_core.active_zone_high      = 0.0;
+      g_trigger_core.active_trade_count    = 0;
+      g_trigger_core.retired_start_seq     = -1;
       __TRG_ResetWindowState();
       Flip_ResetGlobals();
       MajicFlip_ResetGlobals();
@@ -702,6 +793,8 @@ inline bool __TRG_SetActiveWindow(const bool      new_active,
                                   const int       new_context_id,
                                   const int       new_zone_id,
                                   const int       new_window_id,
+                                  const double    new_zone_low,
+                                  const double    new_zone_high,
                                   const datetime  event_bar_time,
                                   const bool      emit_logs)
 {
@@ -711,31 +804,80 @@ inline bool __TRG_SetActiveWindow(const bool      new_active,
    int       old_window_id  = g_trigger_core.active_m1_window_id;
    Direction old_dir        = g_trigger_core.active_dir;
 
+   bool      eff_active     = new_active;
+   int       eff_start_seq  = new_start_seq;
+   int       eff_start_kind = new_start_kind;
+   int       eff_start_ns   = new_start_ns;
+   Direction eff_dir        = new_dir;
+   datetime  eff_start_time = new_start_time;
+   datetime  eff_start_bar  = new_start_bar;
+   int       eff_context_id = new_context_id;
+   int       eff_zone_id    = new_zone_id;
+   int       eff_window_id  = new_window_id;
+   double    eff_zone_low   = new_zone_low;
+   double    eff_zone_high  = new_zone_high;
+
+   if(eff_zone_high < eff_zone_low)
+   {
+      double tmpz = eff_zone_high;
+      eff_zone_high = eff_zone_low;
+      eff_zone_low = tmpz;
+   }
+
+   // A M15 "new" window is retired after 4 actual trades. Historical window
+   // recomputation must not revive the same start sequence again.
+   if(eff_active && eff_start_seq == g_trigger_core.retired_start_seq)
+   {
+      eff_active     = false;
+      eff_start_seq  = -1;
+      eff_start_kind = 0;
+      eff_start_ns   = WB15_NS_NONE;
+      eff_dir        = DIR_UP;
+      eff_start_time = 0;
+      eff_start_bar  = 0;
+      eff_context_id = 0;
+      eff_zone_id    = 0;
+      eff_window_id  = 0;
+      eff_zone_low   = 0.0;
+      eff_zone_high  = 0.0;
+   }
+
    bool changed = false;
-   if(new_active     != g_trigger_core.active) changed = true;
-   if(new_start_seq  != g_trigger_core.active_start_seq) changed = true;
-   if(new_start_kind != g_trigger_core.active_start_kind) changed = true;
-   if(new_start_ns   != g_trigger_core.active_start_ns) changed = true;
-   if(new_dir        != g_trigger_core.active_dir) changed = true;
-   if(new_start_time != g_trigger_core.active_start_time) changed = true;
-   if(new_start_bar  != g_trigger_core.active_start_bar_time) changed = true;
-   if(new_context_id != g_trigger_core.active_context_id) changed = true;
-   if(new_zone_id    != g_trigger_core.active_zone_id) changed = true;
-   if(new_window_id  != g_trigger_core.active_m1_window_id) changed = true;
+   if(eff_active     != g_trigger_core.active) changed = true;
+   if(eff_start_seq  != g_trigger_core.active_start_seq) changed = true;
+   if(eff_start_kind != g_trigger_core.active_start_kind) changed = true;
+   if(eff_start_ns   != g_trigger_core.active_start_ns) changed = true;
+   if(eff_dir        != g_trigger_core.active_dir) changed = true;
+   if(eff_start_time != g_trigger_core.active_start_time) changed = true;
+   if(eff_start_bar  != g_trigger_core.active_start_bar_time) changed = true;
+   if(eff_context_id != g_trigger_core.active_context_id) changed = true;
+   if(eff_zone_id    != g_trigger_core.active_zone_id) changed = true;
+   if(eff_window_id  != g_trigger_core.active_m1_window_id) changed = true;
+   if(eff_zone_low   != g_trigger_core.active_zone_low) changed = true;
+   if(eff_zone_high  != g_trigger_core.active_zone_high) changed = true;
 
    if(!changed)
       return false;
 
-   g_trigger_core.active                = new_active;
-   g_trigger_core.active_start_seq      = new_start_seq;
-   g_trigger_core.active_start_kind     = new_start_kind;
-   g_trigger_core.active_start_ns       = new_start_ns;
-   g_trigger_core.active_dir            = new_dir;
-   g_trigger_core.active_start_time     = new_start_time;
-   g_trigger_core.active_start_bar_time = new_start_bar;
-   g_trigger_core.active_context_id     = new_context_id;
-   g_trigger_core.active_zone_id        = new_zone_id;
-   g_trigger_core.active_m1_window_id   = new_window_id;
+   const int old_start_seq = g_trigger_core.active_start_seq;
+
+   g_trigger_core.active                = eff_active;
+   g_trigger_core.active_start_seq      = eff_start_seq;
+   g_trigger_core.active_start_kind     = eff_start_kind;
+   g_trigger_core.active_start_ns       = eff_start_ns;
+   g_trigger_core.active_dir            = eff_dir;
+   g_trigger_core.active_start_time     = eff_start_time;
+   g_trigger_core.active_start_bar_time = eff_start_bar;
+   g_trigger_core.active_context_id     = eff_context_id;
+   g_trigger_core.active_zone_id        = eff_zone_id;
+   g_trigger_core.active_m1_window_id   = eff_window_id;
+   g_trigger_core.active_zone_low       = eff_zone_low;
+   g_trigger_core.active_zone_high      = eff_zone_high;
+
+   if(eff_active && eff_start_seq != old_start_seq)
+      g_trigger_core.active_trade_count = 0;
+   if(!eff_active)
+      g_trigger_core.active_trade_count = 0;
 
    __TRG_ResetWindowState();
    Flip_ResetGlobals();
@@ -743,15 +885,15 @@ inline bool __TRG_SetActiveWindow(const bool      new_active,
 
    if(emit_logs)
    {
-      if(new_active)
+      if(eff_active)
       {
-         WBLOG_LogStateTransition("Trigger", "M1_IDLE", "M1_WINDOW_ACTIVE", new_dir, new_context_id, new_zone_id, new_window_id, 0,
-                                  "BRIDGE_START_RECEIVED", new_start_time, PERIOD_M1, (int)new_start_bar, 0.0, 0.0, 0.0, 0.0);
+         WBLOG_LogStateTransition("Trigger", "M1_IDLE", "M1_WINDOW_ACTIVE", eff_dir, eff_context_id, eff_zone_id, eff_window_id, 0,
+                                  "BRIDGE_START_RECEIVED", eff_start_time, PERIOD_M1, (int)eff_start_bar, eff_zone_low, eff_zone_high, 0.0, 0.0);
       }
       else if(old_active)
       {
          WBLOG_LogResetEvent("M1_WINDOW_RESET", old_dir, old_context_id, old_zone_id, old_window_id,
-                             "BRIDGE_STOP_OR_NO_ACTIVE_SESSION", "M1_WINDOW_ACTIVE", "M1_IDLE", event_bar_time, PERIOD_M1, 0.0, 0.0, 0.0);
+                             "BRIDGE_STOP_OR_LIMIT", "M1_WINDOW_ACTIVE", "M1_IDLE", event_bar_time, PERIOD_M1, 0.0, 0.0, 0.0);
       }
    }
 
@@ -770,6 +912,8 @@ inline bool __TRG_RecomputeWindowAt(const datetime bar_time, const bool emit_log
    int       new_context_id = 0;
    int       new_zone_id    = 0;
    int       new_window_id  = 0;
+   double    new_zone_low   = 0.0;
+   double    new_zone_high  = 0.0;
 
    const int evt_count = ArraySize(g_trigger_events);
    int next_pos = 0;
@@ -797,6 +941,8 @@ inline bool __TRG_RecomputeWindowAt(const datetime bar_time, const bool emit_log
          new_context_id = evt.context_id;
          new_zone_id    = evt.zone_id;
          new_window_id  = evt.m1_window_id;
+         new_zone_low   = evt.zone_low;
+         new_zone_high  = evt.zone_high;
       }
       else
       {
@@ -818,6 +964,8 @@ inline bool __TRG_RecomputeWindowAt(const datetime bar_time, const bool emit_log
             new_context_id = 0;
             new_zone_id    = 0;
             new_window_id  = 0;
+            new_zone_low   = 0.0;
+            new_zone_high  = 0.0;
          }
       }
    }
@@ -832,7 +980,7 @@ inline bool __TRG_RecomputeWindowAt(const datetime bar_time, const bool emit_log
 
    return __TRG_SetActiveWindow(new_active, new_start_seq, new_start_kind, new_start_ns, new_dir,
                                 new_start_time, new_start_bar, new_context_id, new_zone_id,
-                                new_window_id, bar_time, emit_logs);
+                                new_window_id, new_zone_low, new_zone_high, bar_time, emit_logs);
 }
 
 inline bool __TRG_ApplyWindowAt(const datetime bar_time)
@@ -873,6 +1021,8 @@ inline bool __TRG_ApplyWindowAt(const datetime bar_time)
                                   evt.context_id,
                                   evt.zone_id,
                                   evt.m1_window_id,
+                                  evt.zone_low,
+                                  evt.zone_high,
                                   evt.bar_time,
                                   true))
             any_changed = true;
@@ -898,6 +1048,8 @@ inline bool __TRG_ApplyWindowAt(const datetime bar_time)
                                      0,
                                      0,
                                      0,
+                                     0.0,
+                                     0.0,
                                      evt.bar_time,
                                      true))
                any_changed = true;
@@ -1041,6 +1193,313 @@ inline void __TRG_DrawTriggerMarker(const int type_id,
    __TRG_DrawTextUnique(base + "_T", hit_t, level, __TRG_HitText(type_id), __TRG_EngineColor(type_id), 10);
 }
 
+
+inline string __TRG_LocalRefKindName(const int kind)
+{
+   if(kind == WB15_KIND_START_HWX)  return "HWX";
+   if(kind == WB15_KIND_START_HWBB) return "HWBB";
+   if(kind == WB15_KIND_START_FSMS) return "FSMS";
+   return "UNKNOWN";
+}
+
+inline double __TRG_AbsD(const double v)
+{
+   return (v < 0.0 ? -v : v);
+}
+
+inline double __TRG_DistanceToCandleRange(const double price,
+                                          const MqlRates &bar)
+{
+   if(price >= bar.low && price <= bar.high)
+      return 0.0;
+
+   if(price < bar.low)
+      return (bar.low - price);
+
+   return (price - bar.high);
+}
+
+inline bool __TRG_ActiveNewZoneIsUsable()
+{
+   if(g_trigger_core.active_zone_high < g_trigger_core.active_zone_low)
+      return false;
+
+   return (g_trigger_core.active_zone_high > g_trigger_core.active_zone_low + (2.0 * _Point));
+}
+
+inline bool __TRG_BarFullyInsideActiveNewZone(const MqlRates &bar)
+{
+   if(!__TRG_ActiveNewZoneIsUsable())
+      return false;
+
+   double bottom = g_trigger_core.active_zone_low;
+   double top    = g_trigger_core.active_zone_high;
+   if(top < bottom)
+   {
+      double tmp = top;
+      top = bottom;
+      bottom = tmp;
+   }
+
+   double eps = 2.0 * _Point;
+   if(eps <= 0.0)
+      eps = 0.00000001;
+
+   return (bar.low >= bottom - eps && bar.high <= top + eps);
+}
+
+inline bool __TRG_LocalReferenceDistanceOK(const MqlRates &rates[],
+                                           const int n,
+                                           const int hit_idx,
+                                           string &why)
+{
+   why = "";
+
+   if(!g_trigger_core.local_ref_ready)
+   {
+      why = "NO_M1_HWX_HWBB_FSMS_REFERENCE";
+      return false;
+   }
+
+   if(hit_idx < 0 || hit_idx >= n)
+   {
+      why = "BAD_TRIGGER_INDEX";
+      return false;
+   }
+
+   const int ref_idx = g_trigger_core.local_ref_idx;
+   const int barrier_idx = g_trigger_core.local_ref_barrier_idx;
+
+   if(ref_idx < 0 || ref_idx >= n)
+   {
+      why = "BAD_LOCAL_REFERENCE_INDEX";
+      return false;
+   }
+
+   if(barrier_idx < 0 || barrier_idx >= n)
+   {
+      why = "BAD_LOCAL_BARRIER_INDEX";
+      return false;
+   }
+
+   if(rates[hit_idx].time <= g_trigger_core.local_ref_time)
+   {
+      why = "TRIGGER_NOT_AFTER_LOCAL_REFERENCE";
+      return false;
+   }
+
+   const double entry_level = rates[hit_idx].close;
+   const double ref_dist    = __TRG_DistanceToCandleRange(entry_level, rates[ref_idx]);
+   const double barrier     = (g_trigger_core.active_dir == DIR_UP ? rates[barrier_idx].high : rates[barrier_idx].low);
+   const double barrier_dist= __TRG_AbsD(entry_level - barrier);
+
+   double eps = 2.0 * _Point;
+   if(eps <= 0.0)
+      eps = 0.00000001;
+
+   if(ref_dist <= barrier_dist + eps)
+      return true;
+
+   why = "TRIGGER_FARTHER_FROM_M1_REFERENCE_THAN_WAVE_FIRST_CANDLE";
+   return false;
+}
+
+inline void __TRG_DrawLocalReferenceMarker(const int ref_kind,
+                                           const Direction dir,
+                                           const MqlRates &bar,
+                                           const int start_seq)
+{
+   if(!InpDrawMarkers)
+      return;
+
+   double span = bar.high - bar.low;
+   if(span <= 0.0)
+      span = 10.0 * _Point;
+
+   double pad = span * 0.42;
+   if(pad < 6.0 * _Point)
+      pad = 6.0 * _Point;
+
+   const double y = (dir == DIR_UP ? bar.high + pad : bar.low - pad);
+
+   string dir_tag = (dir == DIR_UP ? "U" : "D");
+   string base = "TRG_M1_REF_" + IntegerToString(start_seq) + "_" + dir_tag + "_" +
+                 __TRG_LocalRefKindName(ref_kind) + "_" + IntegerToString((long)bar.time);
+
+   __TRG_DrawTextUnique(base, bar.time, y, "M1 " + __TRG_LocalRefKindName(ref_kind), clrGold, 9);
+}
+
+inline bool Trigger_M1LocalGateRegister(const Direction dir,
+                                        const int       ref_kind,
+                                        const MqlRates &rates[],
+                                        const int       n,
+                                        const int       ref_idx,
+                                        const int       barrier_idx)
+{
+   if(!__TRG_IsWorkerTF()) return false;
+   if(!__TRG_IsMajorWorld()) return false;
+   if(n <= 0) return false;
+   if(ref_idx < 0 || ref_idx >= n) return false;
+   if(barrier_idx < 0 || barrier_idx >= n) return false;
+
+   if(ref_kind != WB15_KIND_START_HWX &&
+      ref_kind != WB15_KIND_START_HWBB &&
+      ref_kind != WB15_KIND_START_FSMS)
+      return false;
+
+   const datetime ref_time = rates[ref_idx].time;
+   if(ref_time <= 0) return false;
+
+   if(!g_trigger_core.active)
+      return false;
+
+   if(g_trigger_core.active_start_seq == g_trigger_core.retired_start_seq)
+      return false;
+
+   if(g_trigger_core.active_trade_count >= 4)
+      return false;
+
+   if(g_trigger_core.local_ref_ready)
+      return false;
+
+   if(dir != g_trigger_core.active_dir)
+      return false;
+
+   if(ref_time < g_trigger_core.active_start_bar_time)
+      return false;
+
+   if(!__TRG_BarFullyInsideActiveNewZone(rates[ref_idx]))
+      return false;
+
+   g_trigger_core.local_ref_ready       = true;
+   g_trigger_core.local_ref_kind        = ref_kind;
+   g_trigger_core.local_ref_idx         = ref_idx;
+   g_trigger_core.local_ref_barrier_idx = barrier_idx;
+   g_trigger_core.local_ref_time        = ref_time;
+   g_trigger_core.local_ref_trade_count = 0;
+
+   Trigger_Type1_ResetGlobals();
+   Trigger_Type2_ResetGlobals();
+   Flip_ResetGlobals();
+   MajicFlip_ResetGlobals();
+
+   __TRG_DrawLocalReferenceMarker(ref_kind, dir, rates[ref_idx], g_trigger_core.active_start_seq);
+
+   if(InpDebugPrints)
+   {
+      Print("[TRG-M1-REF] Accepted first local ", __TRG_LocalRefKindName(ref_kind),
+            " | dir=", (dir == DIR_UP ? "UP" : "DOWN"),
+            " | ref=", TimeToString(ref_time, TIME_DATE|TIME_SECONDS),
+            " | barrier=", TimeToString(rates[barrier_idx].time, TIME_DATE|TIME_SECONDS),
+            " | M15-new-zone=", DoubleToString(g_trigger_core.active_zone_low, _Digits),
+            "..", DoubleToString(g_trigger_core.active_zone_high, _Digits));
+   }
+
+   return true;
+}
+
+inline bool Trigger_M1LocalGateOnMTC(const Direction mtc_dir,
+                                     const datetime  mtc_time)
+{
+   if(!__TRG_IsWorkerTF()) return false;
+   if(!__TRG_IsMajorWorld()) return false;
+   if(mtc_time <= 0) return false;
+   if(!g_trigger_core.active) return false;
+   if(!g_trigger_core.local_ref_ready) return false;
+
+   // Any MTC formed after the accepted M1 HWX/HWBB/FSMS reference invalidates
+   // that local reference. No Flip/MajicFlip trigger on or after the MTC candle
+   // may remain connected to it.
+   if(mtc_time <= g_trigger_core.local_ref_time)
+      return false;
+
+   int removed = TriggerSLTP_RemoveRecordsAtOrAfter(mtc_time,
+                                                    g_trigger_core.active_context_id,
+                                                    g_trigger_core.active_zone_id,
+                                                    g_trigger_core.active_m1_window_id);
+
+   if(removed > 0)
+   {
+      g_trigger_core.active_trade_count -= removed;
+      if(g_trigger_core.active_trade_count < 0)
+         g_trigger_core.active_trade_count = 0;
+
+      g_trigger_core.local_ref_trade_count -= removed;
+      if(g_trigger_core.local_ref_trade_count < 0)
+         g_trigger_core.local_ref_trade_count = 0;
+
+      if(mtc_time > g_trigger_pending_refresh_time)
+         g_trigger_pending_refresh_time = mtc_time;
+
+      if(InpDebugPrints)
+      {
+         Print("[TRG-M1-REF] Removed trigger record(s) created on/after MTC",
+               " | removed=", IntegerToString(removed),
+               " | mtc_dir=", (mtc_dir == DIR_UP ? "UP" : "DOWN"),
+               " | mtc=", TimeToString(mtc_time, TIME_DATE|TIME_SECONDS));
+      }
+   }
+
+   __TRG_InvalidateLocalM1Reference("MTC_AFTER_LOCAL_REFERENCE", mtc_time);
+   return true;
+}
+
+inline bool __TRG_CanAcceptPatternTrigger(const int       type_id,
+                                          const int       hit_idx,
+                                          const MqlRates &rates[],
+                                          const int       n)
+{
+   if(!g_trigger_core.active)
+      return false;
+
+   if(g_trigger_core.active_start_seq == g_trigger_core.retired_start_seq)
+      return false;
+
+   if(g_trigger_core.active_trade_count >= 4)
+      return false;
+
+   if(g_trigger_core.local_ref_trade_count >= 2)
+      return false;
+
+   string reason = "";
+   if(!__TRG_LocalReferenceDistanceOK(rates, n, hit_idx, reason))
+   {
+      if(InpDebugPrints && reason != "")
+      {
+         Print("[TRG-M1-GATE] Skip ", __TRG_EngineTag(type_id),
+               " | reason=", reason,
+               " | t=", (hit_idx >= 0 && hit_idx < n ? TimeToString(rates[hit_idx].time, TIME_DATE|TIME_SECONDS) : "n/a"));
+      }
+      return false;
+   }
+
+   return true;
+}
+
+inline void __TRG_RetireActiveWindowAfterTradeLimit(const datetime t)
+{
+   if(!g_trigger_core.active)
+      return;
+
+   g_trigger_core.retired_start_seq = g_trigger_core.active_start_seq;
+
+   __TRG_SetActiveWindow(false,
+                         -1,
+                         0,
+                         WB15_NS_NONE,
+                         DIR_UP,
+                         0,
+                         0,
+                         0,
+                         0,
+                         0,
+                         0.0,
+                         0.0,
+                         t,
+                         true);
+}
+
+
 inline void __TRG_FireTrigger(const int       type_id,
                               const int       src_idx,
                               const double    level,
@@ -1107,6 +1566,9 @@ inline void __TRG_FirePatternTrigger(const int       type_id,
 {
    if(hit_idx < 0 || hit_idx >= n) return;
 
+   if(!__TRG_CanAcceptPatternTrigger(type_id, hit_idx, rates, n))
+      return;
+
    int ref_idx = anchor_idx;
    if(ref_idx < 0 || ref_idx >= n)
       ref_idx = hit_idx;
@@ -1144,7 +1606,7 @@ inline void __TRG_FirePatternTrigger(const int       type_id,
    TriggerSLTP_OnTriggerFired(sym,
                               g_trigger_core.active_dir,
                               type_id,
-                              hit_idx,
+                              ref_idx,
                               entry_level,
                               hit_idx,
                               rates,
@@ -1157,8 +1619,24 @@ inline void __TRG_FirePatternTrigger(const int       type_id,
                            rates[hit_idx].time,
                            entry_level);
 
-   if(__trgsl_record_added && rates[hit_idx].time > g_trigger_pending_refresh_time)
-      g_trigger_pending_refresh_time = rates[hit_idx].time;
+   if(__trgsl_record_added)
+   {
+      g_trigger_core.active_trade_count++;
+      g_trigger_core.local_ref_trade_count++;
+
+      if(rates[hit_idx].time > g_trigger_pending_refresh_time)
+         g_trigger_pending_refresh_time = rates[hit_idx].time;
+
+      if(g_trigger_core.active_trade_count >= 4)
+      {
+         __TRG_RetireActiveWindowAfterTradeLimit(rates[hit_idx].time);
+      }
+      else
+      if(g_trigger_core.local_ref_trade_count >= 2)
+      {
+         __TRG_InvalidateLocalM1Reference("LOCAL_REFERENCE_TWO_TRADE_LIMIT", rates[hit_idx].time);
+      }
+   }
 }
 
 #include <WaveBot/Trigger_Type1.mqh>
@@ -1224,7 +1702,15 @@ inline void __TRG_ProcessLoadedBar(const string    sym,
                                   g_trigger_core.active_start_time,
                                   g_trigger_core.active_start_bar_time);
 
-   datetime from_time = g_trigger_core.active_start_bar_time;
+   if(!g_trigger_core.local_ref_ready || g_trigger_core.active_trade_count >= 4)
+   {
+      TriggerStatement_ScheduledOutputMaybeAt(bar_time);
+      g_trigger_core.last_processed_time = bar_time;
+      g_trigger_core.last_processed_idx  = bar_idx;
+      return;
+   }
+
+   datetime from_time = g_trigger_core.local_ref_time;
    datetime to_time   = bar_time;
 
    if(g_trigger_core.active_dir == DIR_UP)

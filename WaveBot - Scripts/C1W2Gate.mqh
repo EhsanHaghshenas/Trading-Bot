@@ -1,3 +1,4 @@
+// ============================================================================
 #ifndef WAVEBOT_C1W2GATE_MQH
 #define WAVEBOT_C1W2GATE_MQH
 
@@ -263,4 +264,3 @@ inline bool C1W2_PB_UP_ShouldAllowAt(const MqlRates &rates[], const int i, bool 
 }
 
 #endif // WAVEBOT_C1W2GATE_MQH
-

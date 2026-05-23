@@ -1,3 +1,4 @@
+// ============================================================================
 #ifndef WAVEBOT_MAJIC_FLIP_MQH
 #define WAVEBOT_MAJIC_FLIP_MQH
 

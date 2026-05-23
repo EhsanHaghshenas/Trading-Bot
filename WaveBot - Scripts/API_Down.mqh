@@ -1,3 +1,4 @@
+// ============================================================================
 #ifndef WAVEBOT_API_DOWN_MQH
 #define WAVEBOT_API_DOWN_MQH
 
@@ -288,6 +289,7 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
             }
 
             Trigger_OnBarCandidate(InpSymbol, rates, insideHL, n, i, __API_Down_TriggerActiveCandidate_ANY_DN(i));
+            M15NewZone_OnBar(rates, n, i);
 
             ExtLQ_Down_OnBar(rates[i]);
             HW_BB_DOWN_OnBar(rates[i], rates, n, i);
@@ -412,6 +414,7 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
             }
 
             Trigger_OnBarCandidate(InpSymbol, rates, insideHL, n, j, __API_Down_TriggerCandidate_WAIT_DN(c1, w3_c1, w3_cand));
+            M15NewZone_OnBar(rates, n, j);
 
             ExtLQ_Down_OnBar(rates[j]);
             if(Hunter_Down_IsExtLQCross(rates[j]))
@@ -660,6 +663,8 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
                   Print("#",tag," Pair(DOWN) OK | W3 C1=",T(rates[w3_c1].time),
                         " | body-break @ ",T(rates[bodyBreakIdx>=0?bodyBreakIdx:idx].time));
             
+               M15NewMarker_OnNewWavePair(DIR_DOWN, rates[(bodyBreakIdx>=0 ? bodyBreakIdx : j)].time);
+
                idx=j; state=SEARCH_W2;
                C1Pre_DN_Reset();   // NEW
                ++pairs; progressed=true; break;

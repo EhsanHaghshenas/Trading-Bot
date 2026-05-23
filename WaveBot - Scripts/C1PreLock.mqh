@@ -1,3 +1,4 @@
+// ============================================================================
 #ifndef WAVEBOT_C1PRELOCK_MQH
 #define WAVEBOT_C1PRELOCK_MQH
 
@@ -156,4 +157,3 @@ inline bool C1Pre_DN_ShouldAllowAt(const MqlRates &rates[], const int i, bool &r
 }
 
 #endif // WAVEBOT_C1PRELOCK_MQH
-
