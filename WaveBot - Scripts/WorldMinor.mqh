@@ -1,4 +1,3 @@
-// ============================================================================
 #ifndef WAVEBOT_WORLDMINOR_MQH
 #define WAVEBOT_WORLDMINOR_MQH
 

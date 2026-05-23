@@ -1,4 +1,3 @@
-// ============================================================================
 #ifndef WAVEBOT_HUNTER_BODYBREAK_MQH
 #define WAVEBOT_HUNTER_BODYBREAK_MQH
 

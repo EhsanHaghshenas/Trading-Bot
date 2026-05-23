@@ -1,4 +1,3 @@
-// ============================================================================
 // WaveBot/ShadowBreaker.mqh
 
 // WaveBot/ShadowBreaker.mqh

@@ -1,0 +1,35 @@
+WaveBot - FSMS_Lifecycle BOM Fix + Script Header Cleanup
+
+Applied on:
+- Source: WaveBot_NoLogFolder_NoCSV_Update.txt / WaveBot_NoLogFolder_NoCSV_Update.zip
+- Output: WaveBot_FSMSLifecycle_BOM_HeaderCleanup_Update.txt
+- Output ZIP: WaveBot_FSMSLifecycle_BOM_HeaderCleanup_Update.zip
+
+What was fixed:
+1) FSMS_Lifecycle.mqh
+   - Removed the hidden UTF-8 BOM character (U+FEFF) before:
+     #ifndef WAVEBOT_FSMS_LIFECYCLE_MQH
+   - This directly fixes MetaEditor error:
+     unknown symbol '' (0xFEFF)
+
+2) All .mq5/.mqh scripts
+   - Removed the leading decorative separator lines from the very beginning of every script:
+     // ============================================================================
+     // ============================================================================
+   - No internal logic blocks, functions, includes, defines, structs, enums, or variables were changed.
+
+3) Existing requested behavior preserved
+   - W3 non-wick reset Experts prints remain silenced.
+   - CSV diagnostic generation remains disabled.
+   - WaveBot_Logs folder creation remains removed.
+   - Final TXT TriggerStatement output remains active.
+   - M15/M1 scan, bridge, trigger, marker, SL/TP, and Statement logic remain unchanged.
+
+How to apply:
+1) Extract the ZIP file.
+2) Replace the existing WaveBot.mq5 and all .mqh files in:
+   MQL5/Experts/WaveBot/
+   or your exact current WaveBot source folder.
+3) Delete old compiled .ex5 files if MetaEditor does not refresh automatically.
+4) Compile WaveBot.mq5 again in MetaEditor.
+5) If a previous WaveBot_Logs folder already exists in Common/Files, you may delete it manually once; this version will not create it again.

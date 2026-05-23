@@ -1,4 +1,3 @@
-// ============================================================================
 #ifndef WAVEBOT_WB15_SIGNAL_BRIDGE_MQH
 #define WAVEBOT_WB15_SIGNAL_BRIDGE_MQH
 

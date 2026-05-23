@@ -1,4 +1,3 @@
-// ============================================================================
 #ifndef WAVEBOT_TRIGGER_STATEMENT_MQH
 #define WAVEBOT_TRIGGER_STATEMENT_MQH
 
@@ -2993,6 +2992,10 @@ inline void __TRGSTM_LogDiagnosticSnapshots(const string use_sym,
                                             const double expectancy_r,
                                             const double avg_risk_pips)
 {
+   // CSV diagnostics are disabled in this build.
+   // Keep Statement text generation intact, but do not reset/rebuild CSV files.
+   return;
+
    WBLOG_ResetFile("WaveBot_TradeCandidates.csv", WBLOG_FileHeader("WaveBot_TradeCandidates.csv"));
    WBLOG_ResetFile("WaveBot_Trades.csv", WBLOG_FileHeader("WaveBot_Trades.csv"));
    WBLOG_ResetFile("WaveBot_TradePath_M1.csv", WBLOG_FileHeader("WaveBot_TradePath_M1.csv"));

@@ -1,4 +1,3 @@
-// ============================================================================
 #ifndef WAVEBOT_HUNTER_DOWN_MQH
 #define WAVEBOT_HUNTER_DOWN_MQH
 

@@ -1,4 +1,3 @@
-// ============================================================================
 #ifndef WAVEBOT_LOGGER_MQH
 #define WAVEBOT_LOGGER_MQH
 
@@ -6,9 +5,25 @@
 
 // ============================================================================
 // WaveBotLogger.mqh
-// Pure diagnostic logger. This module only writes CSV/TXT diagnostics and does
-// not change trading, trigger, Flip, MajicFlip, bridge, or statement logic.
+// Pure diagnostic logger API shell. CSV diagnostics and the WaveBot_Logs folder
+// mechanism are fully disabled in this build to keep historical M15/M1 scanning
+// fast and to keep the MetaTrader Common\Files directory clean.
+// This module keeps its in-memory IDs/state available for other modules, but it
+// performs no diagnostic disk I/O and creates no folders.
 // ============================================================================
+
+// CSV/log-folder generation is intentionally disabled.
+// Keep this helper centralized so logic modules can still call WBLOG_* safely
+// without creating/flushing diagnostic files or folders on disk.
+inline bool WBLOG_CSVOutputEnabled()
+{
+   return false;
+}
+
+inline bool WBLOG_IsCSVFile(const string filename)
+{
+   return (StringFind(filename, ".csv") >= 0 || StringFind(filename, ".CSV") >= 0);
+}
 
 #define WBLOG_KIND_START_HWX          1
 #define WBLOG_KIND_START_HWBB         2
@@ -213,7 +228,10 @@ inline string WBLOG_AppendCell(const string row, const string cell)
 
 inline string WBLOG_FilePath(const string filename)
 {
-   return g_wblog_dir + "\\" + filename;
+
+   // Diagnostic folder/file output is disabled. The returned value is only a
+   // harmless placeholder for legacy callers; no WBLOG function opens it.
+   return filename;
 }
 
 inline int WBLOG_FindOpenFile(const string filename)
@@ -275,6 +293,8 @@ inline bool WBLOG_OutputCanWriteNow()
 
 inline bool WBLOG_ShouldBufferBeforeScheduledWrite(const string filename)
 {
+   if(WBLOG_IsCSVFile(filename) && !WBLOG_CSVOutputEnabled())
+      return false;
    if(filename == "WaveBot_Candles_M1.csv") return false;
    if(filename == "WaveBot_Candles_M15.csv") return false;
    if(filename == "WaveBot_MarketFeatures_M1.csv") return false;
@@ -300,6 +320,8 @@ inline bool WBLOG_ShouldBufferBeforeScheduledWrite(const string filename)
 
 inline void WBLOG_BufferScheduledRow(const string filename, const string line)
 {
+   if(WBLOG_IsCSVFile(filename) && !WBLOG_CSVOutputEnabled())
+      return;
    int n = ArraySize(g_wblog_deferred_rows);
    ArrayResize(g_wblog_deferred_names, n + 1);
    ArrayResize(g_wblog_deferred_rows,  n + 1);
@@ -309,16 +331,11 @@ inline void WBLOG_BufferScheduledRow(const string filename, const string line)
 
 inline void WBLOG_CloseOpenFile(const string filename)
 {
+
+   // Diagnostic file handles are never opened in this build.
    int idx = WBLOG_FindOpenFile(filename);
    if(idx < 0)
       return;
-
-   int h = g_wblog_open_handles[idx];
-   if(h != INVALID_HANDLE)
-   {
-      FileFlush(h);
-      FileClose(h);
-   }
 
    int total = ArraySize(g_wblog_open_names);
    for(int i=idx; i<total-1; ++i)
@@ -332,16 +349,8 @@ inline void WBLOG_CloseOpenFile(const string filename)
 
 inline void WBLOG_CloseAllFiles()
 {
-   int total = ArraySize(g_wblog_open_handles);
-   for(int i=0; i<total; ++i)
-   {
-      int h = g_wblog_open_handles[i];
-      if(h != INVALID_HANDLE)
-      {
-         FileFlush(h);
-         FileClose(h);
-      }
-   }
+
+   // Diagnostic file handles are never opened in this build.
    ArrayResize(g_wblog_open_names, 0);
    ArrayResize(g_wblog_open_handles, 0);
    g_wblog_unflushed_rows = 0;
@@ -349,35 +358,10 @@ inline void WBLOG_CloseAllFiles()
 
 inline bool WBLOG_OpenAppend(const string filename, int &handle)
 {
+
    handle = INVALID_HANDLE;
-   if(!g_wblog_ready) return false;
-   if(!WBLOG_OutputCanWriteNow()) return false;
-
-   int idx = WBLOG_FindOpenFile(filename);
-   if(idx >= 0)
-   {
-      handle = g_wblog_open_handles[idx];
-      return (handle != INVALID_HANDLE);
-   }
-
-   string path = WBLOG_FilePath(filename);
-   int h = FileOpen(path, FILE_READ|FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);
-   if(h == INVALID_HANDLE)
-      h = FileOpen(path, FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);
-
-   if(h == INVALID_HANDLE)
-      return false;
-
-   FileSeek(h, 0, SEEK_END);
-
-   int pos = ArraySize(g_wblog_open_names);
-   ArrayResize(g_wblog_open_names, pos + 1);
-   ArrayResize(g_wblog_open_handles, pos + 1);
-   g_wblog_open_names[pos]   = filename;
-   g_wblog_open_handles[pos] = h;
-
-   handle = h;
-   return true;
+   // Full diagnostic disk output is disabled: no FileOpen and no folder creation.
+   return false;
 }
 
 inline bool WBLOG_ShouldFlushImmediately(const string filename)
@@ -396,84 +380,37 @@ inline bool WBLOG_ShouldFlushImmediately(const string filename)
 
 inline void WBLOG_FlushAllOpenFiles()
 {
-   int total = ArraySize(g_wblog_open_handles);
-   for(int i=0; i<total; ++i)
-   {
-      int h = g_wblog_open_handles[i];
-      if(h != INVALID_HANDLE)
-         FileFlush(h);
-   }
+
+   // Full diagnostic disk output is disabled: nothing to flush.
    g_wblog_unflushed_rows = 0;
 }
 
 inline bool WBLOG_FlushOpenFileName(const string filename)
 {
-   int idx = WBLOG_FindOpenFile(filename);
-   if(idx < 0)
-      return false;
 
-   int h = g_wblog_open_handles[idx];
-   if(h == INVALID_HANDLE)
-      return false;
-
-   FileFlush(h);
-   return true;
+   // Full diagnostic disk output is disabled: nothing to flush.
+   return false;
 }
 
 inline void WBLOG_WriteLineAppend(const string filename, const string line)
 {
-   if((g_wblog_scheduled_output_enabled || g_wblog_final_only_output_enabled) && !g_wblog_scheduled_output_writing)
-   {
-      // Before the selected M1 date, avoid disk I/O completely. Keep only
-      // low-frequency event rows that cannot be reconstructed from snapshots.
-      if(!g_wblog_scheduled_output_done && WBLOG_ShouldBufferBeforeScheduledWrite(filename))
-         WBLOG_BufferScheduledRow(filename, line);
-      return;
-   }
 
-   int h = INVALID_HANDLE;
-   if(!WBLOG_OpenAppend(filename, h)) return;
-
-   FileWriteString(h, line + "\r\n");
-   g_wblog_unflushed_rows++;
-
-   // PERFORMANCE FIX #4:
-   // Immediate files should flush only their own handle. Flushing every open
-   // file on each trigger also flushes high-frequency candle/feature/equity
-   // files and creates a visible stall at trigger recognition.
-   if(WBLOG_ShouldFlushImmediately(filename))
-      WBLOG_FlushOpenFileName(filename);
-   else if(g_wblog_unflushed_rows >= WBLOG_FLUSH_EVERY_ROWS)
-      WBLOG_FlushAllOpenFiles();
+   // Full diagnostic disk output is disabled: no buffering, no FileWrite, no CSV.
+   return;
 }
 
 inline void WBLOG_ResetFile(const string filename, const string header)
 {
-   if(!g_wblog_ready) return;
-   if(!WBLOG_OutputCanWriteNow()) return;
-   WBLOG_CloseOpenFile(filename);
-   string path = WBLOG_FilePath(filename);
-   int h = FileOpen(path, FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);
-   if(h == INVALID_HANDLE) return;
-   FileWriteString(h, header + "\r\n");
-   FileFlush(h);
-   FileClose(h);
+
+   // Full diagnostic disk output is disabled: no file reset and no header write.
+   return;
 }
 
 inline void WBLOG_RewriteFileWithRows(const string filename, const string header, string &rows[])
 {
-   if(!g_wblog_ready) return;
-   if(!WBLOG_OutputCanWriteNow()) return;
-   WBLOG_CloseOpenFile(filename);
-   string path = WBLOG_FilePath(filename);
-   int h = FileOpen(path, FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);
-   if(h == INVALID_HANDLE) return;
-   FileWriteString(h, header + "\r\n");
-   int n = ArraySize(rows);
-   for(int i=0; i<n; ++i)
-      FileWriteString(h, rows[i] + "\r\n");
-   FileFlush(h);
-   FileClose(h);
+
+   // Full diagnostic disk output is disabled: no rewrite and no FileOpen.
+   return;
 }
 
 inline double WBLOG_PointOf(const string sym)
@@ -599,31 +536,17 @@ inline string WBLOG_FileHeader(const string name)
 
 inline void WBLOG_ResetAllFiles()
 {
-   // A clean rebuild must reset candle de-dup cursors as well as file contents.
+
+   // A clean in-memory reset must keep candle de-dup cursors and diagnostic
+   // arrays consistent, but it must not create WaveBot_Logs or any CSV file.
    g_wblog_last_m1_candle  = 0;
    g_wblog_last_m15_candle = 0;
 
-   WBLOG_ResetFile("WaveBot_RunConfig.csv", WBLOG_FileHeader("WaveBot_RunConfig.csv"));
-   WBLOG_ResetFile("WaveBot_Params.csv", WBLOG_FileHeader("WaveBot_Params.csv"));
-   WBLOG_ResetFile("WaveBot_Candles_M15.csv", WBLOG_FileHeader("WaveBot_Candles_M15.csv"));
-   WBLOG_ResetFile("WaveBot_Candles_M1.csv", WBLOG_FileHeader("WaveBot_Candles_M1.csv"));
-   WBLOG_ResetFile("WaveBot_M15_MainSignals.csv", WBLOG_FileHeader("WaveBot_M15_MainSignals.csv"));
-   WBLOG_ResetFile("WaveBot_M15_FlipZones.csv", WBLOG_FileHeader("WaveBot_M15_FlipZones.csv"));
-   WBLOG_ResetFile("WaveBot_M15_GateEvents.csv", WBLOG_FileHeader("WaveBot_M15_GateEvents.csv"));
-   WBLOG_ResetFile("WaveBot_M15_To_M1_Bridge.csv", WBLOG_FileHeader("WaveBot_M15_To_M1_Bridge.csv"));
-   WBLOG_ResetFile("WaveBot_M1_TriggerCandidates.csv", WBLOG_FileHeader("WaveBot_M1_TriggerCandidates.csv"));
-   WBLOG_ResetFile("WaveBot_M1_Triggers.csv", WBLOG_FileHeader("WaveBot_M1_Triggers.csv"));
-   WBLOG_ResetFile("WaveBot_TradeCandidates.csv", WBLOG_FileHeader("WaveBot_TradeCandidates.csv"));
-   WBLOG_ResetFile("WaveBot_Trades.csv", WBLOG_FileHeader("WaveBot_Trades.csv"));
-   WBLOG_ResetFile("WaveBot_TradePath_M1.csv", WBLOG_FileHeader("WaveBot_TradePath_M1.csv"));
-   WBLOG_ResetFile("WaveBot_TradeMAE_MFE.csv", WBLOG_FileHeader("WaveBot_TradeMAE_MFE.csv"));
-   WBLOG_ResetFile("WaveBot_EquityCurve.csv", WBLOG_FileHeader("WaveBot_EquityCurve.csv"));
-   WBLOG_ResetFile("WaveBot_StateTransitions.csv", WBLOG_FileHeader("WaveBot_StateTransitions.csv"));
-   WBLOG_ResetFile("WaveBot_ResetEvents.csv", WBLOG_FileHeader("WaveBot_ResetEvents.csv"));
-   WBLOG_ResetFile("WaveBot_RejectedTriggers.csv", WBLOG_FileHeader("WaveBot_RejectedTriggers.csv"));
-   WBLOG_ResetFile("WaveBot_SummaryByRun.csv", WBLOG_FileHeader("WaveBot_SummaryByRun.csv"));
-   WBLOG_ResetFile("WaveBot_MarketFeatures_M1.csv", WBLOG_FileHeader("WaveBot_MarketFeatures_M1.csv"));
-   WBLOG_ResetFile("WaveBot_MarketFeatures_M15.csv", WBLOG_FileHeader("WaveBot_MarketFeatures_M15.csv"));
+   ArrayResize(g_wblog_open_names, 0);
+   ArrayResize(g_wblog_open_handles, 0);
+   ArrayResize(g_wblog_deferred_names, 0);
+   ArrayResize(g_wblog_deferred_rows, 0);
+   g_wblog_unflushed_rows = 0;
 
    g_wblog_snapshot_dirty_contexts = false;
    g_wblog_snapshot_dirty_zones    = false;
@@ -631,6 +554,7 @@ inline void WBLOG_ResetAllFiles()
 
 inline void WBLOG_BeginScheduledOutputWrite()
 {
+
    if(!g_wblog_scheduled_output_enabled && !g_wblog_final_only_output_enabled)
       return;
    if(g_wblog_scheduled_output_done)
@@ -638,32 +562,22 @@ inline void WBLOG_BeginScheduledOutputWrite()
    if(!g_wblog_ready)
       return;
 
+   // Keep the scheduled/final-output handshake intact for the Statement layer,
+   // but do not create/rebuild any diagnostic CSV set or WaveBot_Logs folder.
    g_wblog_scheduled_output_writing = true;
-
-   // Create a clean CSV set exactly at the final/deferred output point.
-   WBLOG_ResetAllFiles();
-
-   // Replay buffered low-frequency rows accumulated before the scheduled date.
-   int n = ArraySize(g_wblog_deferred_rows);
-   for(int i=0; i<n; ++i)
-      WBLOG_WriteLineAppend(g_wblog_deferred_names[i], g_wblog_deferred_rows[i]);
-
    ArrayResize(g_wblog_deferred_names, 0);
    ArrayResize(g_wblog_deferred_rows, 0);
-
-   // Context and zone files are snapshot files; rewrite their latest state once.
-   WBLOG_RewriteM15MainSignals();
-   WBLOG_RewriteM15Zones();
 }
 
 inline void WBLOG_EndScheduledOutputWrite(const bool mark_done)
 {
+
    if(!g_wblog_scheduled_output_enabled && !g_wblog_final_only_output_enabled)
       return;
 
-   WBLOG_FlushAllOpenFiles();
-   WBLOG_CloseAllFiles();
    g_wblog_scheduled_output_writing = false;
+   ArrayResize(g_wblog_deferred_names, 0);
+   ArrayResize(g_wblog_deferred_rows, 0);
    if(mark_done)
       g_wblog_scheduled_output_done = true;
 }
@@ -690,65 +604,46 @@ inline void WBLOG_Initialize(const string sym,
                              const string version_tag,
                              const bool force_new_run)
 {
+
    string use_sym = sym;
    if(use_sym == "") use_sym = _Symbol;
 
-   string key = "WBLOG_RUN_" + use_sym;
-   StringReplace(key, ".", "_");
-   StringReplace(key, "#", "_");
+   // Keep a run id only for in-memory diagnostic IDs. Do NOT create
+   // WaveBot_Logs, do NOT call FolderCreate, and do NOT reset/write CSV files.
+   datetime run_time = TimeCurrent();
+   if(run_time <= 0)
+      run_time = scan_from;
+   if(run_time <= 0)
+      run_time = scan_to;
 
-   double gv = 0.0;
-   if(force_new_run || !GlobalVariableCheck(key))
-   {
-      gv = (double)TimeCurrent();
-      GlobalVariableSet(key, gv);
-   }
-   else
-   {
-      gv = GlobalVariableGet(key);
-      if(gv <= 0.0)
-      {
-         gv = (double)TimeCurrent();
-         GlobalVariableSet(key, gv);
-      }
-   }
-
-   datetime run_time = (datetime)gv;
    g_wblog_run_id = WBLOG_MakeRunId(use_sym, run_time);
-   g_wblog_dir = "WaveBot_Logs\\" + g_wblog_run_id;
+   g_wblog_dir    = "";
+   g_wblog_ready  = true;
 
-   FolderCreate("WaveBot_Logs", FILE_COMMON);
-   FolderCreate(g_wblog_dir, FILE_COMMON);
+   g_wblog_event_seq      = 0;
+   g_wblog_context_seq    = 0;
+   g_wblog_zone_seq       = 0;
+   g_wblog_bridge_seq     = 0;
+   g_wblog_candidate_seq  = 0;
+   g_wblog_reject_seq     = 0;
+   g_wblog_reset_seq      = 0;
+   g_wblog_state_seq      = 0;
+   g_wblog_last_m1_candle = 0;
+   g_wblog_last_m15_candle= 0;
 
-   g_wblog_ready = true;
+   g_wblog_cur_context_id = 0;
+   g_wblog_cur_zone_id    = 0;
+   g_wblog_cur_window_id  = 0;
+   g_wblog_cur_start_kind = 0;
+   g_wblog_cur_start_ns   = 0;
+   g_wblog_cur_dir        = DIR_UP;
+   g_wblog_cur_window_start = 0;
+   g_wblog_cur_window_bar   = 0;
+   g_wblog_last_candidate_id= 0;
 
-   string init_key = "WBLOG_INIT_" + g_wblog_run_id;
-   bool need_reset = force_new_run || !GlobalVariableCheck(init_key);
-   if(need_reset)
-   {
-      WBLOG_ResetAllFiles();
-      GlobalVariableSet(init_key, 1.0);
-   }
-
-   string row = "";
-   row = WBLOG_AppendCell(row, g_wblog_run_id);
-   row = WBLOG_AppendCell(row, use_sym);
-   row = WBLOG_AppendCell(row, AccountInfoString(ACCOUNT_COMPANY));
-   row = WBLOG_AppendCell(row, "SERVER_TIME");
-   row = WBLOG_AppendCell(row, "SERVER_TIME");
-   row = WBLOG_AppendCell(row, WBLOG_Time(scan_from));
-   row = WBLOG_AppendCell(row, WBLOG_Time(scan_to));
-   row = WBLOG_AppendCell(row, "WaveBot");
-   row = WBLOG_AppendCell(row, version_tag);
-   row = WBLOG_AppendCell(row, input_direction);
-   row = WBLOG_AppendCell(row, WBLOG_TFName(master_tf));
-   row = WBLOG_AppendCell(row, WBLOG_TFName(slave_tf));
-   row = WBLOG_AppendCell(row, WBLOG_Double(initial_capital, 2));
-   row = WBLOG_AppendCell(row, WBLOG_Double(risk_percent, 4));
-   row = WBLOG_AppendCell(row, "BAR_SPREAD_FIELD");
-   row = WBLOG_AppendCell(row, "NOT_APPLIED_IN_STATEMENT");
-   row = WBLOG_AppendCell(row, "diagnostic_logger_initialized");
-   WBLOG_WriteLineAppend("WaveBot_RunConfig.csv", row);
+   ArrayResize(g_wblog_contexts, 0);
+   ArrayResize(g_wblog_zones, 0);
+   WBLOG_ResetAllFiles();
 }
 
 inline string WBLOG_RunId()
@@ -768,60 +663,23 @@ inline void WBLOG_LogParam(const string name, const string value, const string s
 
 inline void WBLOG_FlushSnapshotFilesIfDirty()
 {
-   if(!g_wblog_ready) return;
 
-   if(g_wblog_snapshot_dirty_contexts)
-   {
-      WBLOG_RewriteM15MainSignals();
-      g_wblog_snapshot_dirty_contexts = false;
-   }
-
-   if(g_wblog_snapshot_dirty_zones)
-   {
-      WBLOG_RewriteM15Zones();
-      g_wblog_snapshot_dirty_zones = false;
-   }
+   // Snapshot CSV files are disabled. Keep dirty flags clean so callers can
+   // continue safely without causing disk I/O.
+   g_wblog_snapshot_dirty_contexts = false;
+   g_wblog_snapshot_dirty_zones    = false;
 }
 
 inline void WBLOG_Finalize()
 {
-   if(!g_wblog_ready)
-      return;
 
-   // In deferred M1 output mode, no extra final write is allowed here. The only
-   // output write happens at terminal M1 hard stop. Finalize only closes handles.
-   if(g_wblog_scheduled_output_enabled || g_wblog_final_only_output_enabled)
-   {
-      WBLOG_CloseAllFiles();
-      g_wblog_ready = false;
-      return;
-   }
-
-   WBLOG_FlushSnapshotFilesIfDirty();
-
-   string row = "";
-   row = WBLOG_AppendCell(row, WBLOG_RunId());
-   row = WBLOG_AppendCell(row, IntegerToString(++g_wblog_state_seq));
-   row = WBLOG_AppendCell(row, WBLOG_Time(TimeCurrent()));
-   row = WBLOG_AppendCell(row, WBLOG_TFName((ENUM_TIMEFRAMES)Period()));
-   row = WBLOG_AppendCell(row, "WaveBotLogger");
-   row = WBLOG_AppendCell(row, "RUNNING");
-   row = WBLOG_AppendCell(row, "FINALIZED");
-   row = WBLOG_AppendCell(row, "");
-   row = WBLOG_AppendCell(row, IntegerToString(g_wblog_cur_context_id));
-   row = WBLOG_AppendCell(row, IntegerToString(g_wblog_cur_zone_id));
-   row = WBLOG_AppendCell(row, IntegerToString(g_wblog_cur_window_id));
-   row = WBLOG_AppendCell(row, "0");
-   row = WBLOG_AppendCell(row, "WaveBotLogger_Finalize");
-   row = WBLOG_AppendCell(row, "0");
-   row = WBLOG_AppendCell(row, "0");
-   row = WBLOG_AppendCell(row, "0");
-   row = WBLOG_AppendCell(row, "0");
-   row = WBLOG_AppendCell(row, "0");
-   WBLOG_WriteLineAppend("WaveBot_StateTransitions.csv", row);
-
-   WBLOG_FlushAllOpenFiles();
+   // No diagnostic files/folders are opened in this build. Finalize only clears
+   // in-memory handle/deferred buffers and marks the logger shell inactive.
    WBLOG_CloseAllFiles();
+   ArrayResize(g_wblog_deferred_names, 0);
+   ArrayResize(g_wblog_deferred_rows, 0);
+   g_wblog_snapshot_dirty_contexts = false;
+   g_wblog_snapshot_dirty_zones    = false;
    g_wblog_ready = false;
 }
 
@@ -831,6 +689,8 @@ inline void WBLOG_LogCandleAndFeatures(const string sym,
                                        const int n,
                                        const int bar_idx)
 {
+   if(!WBLOG_CSVOutputEnabled())
+      return;
    if(!g_wblog_ready) return;
    if(!WBLOG_OutputCanWriteNow()) return;
    if(n <= 0 || bar_idx < 0 || bar_idx >= n) return;
@@ -895,33 +755,18 @@ inline void WBLOG_ExportCandlesSnapshotForTF(const string sym,
                                                const datetime from_time,
                                                const datetime to_time)
 {
-   if(!g_wblog_ready) return;
-   if(!WBLOG_OutputCanWriteNow()) return;
-   if(to_time <= 0) return;
 
-   datetime use_from = from_time;
-   if(use_from <= 0)
-      use_from = (datetime)1;
-   if(to_time < use_from)
-      return;
-
-   MqlRates rr[];
-   ArrayFree(rr);
-   int copied = CopyRates(sym, tf, use_from, to_time, rr);
-   if(copied <= 0)
-      return;
-
-   ArraySetAsSeries(rr, false);
-   for(int i=0; i<copied; ++i)
-      WBLOG_LogCandleAndFeatures(sym, tf, rr, copied, i);
+   // Scheduled candle CSV snapshots are disabled to avoid CopyRates/File I/O.
+   return;
 }
 
 inline void WBLOG_ExportScheduledCandleSnapshots(const string sym,
                                                  const datetime from_time,
                                                  const datetime to_time)
 {
-   WBLOG_ExportCandlesSnapshotForTF(sym, PERIOD_M15, from_time, to_time);
-   WBLOG_ExportCandlesSnapshotForTF(sym, PERIOD_M1,  from_time, to_time);
+
+   // Scheduled candle CSV snapshots are disabled to avoid CopyRates/File I/O.
+   return;
 }
 
 inline bool WBLOG_GetM15BarByTime(const string sym, const datetime t, MqlRates &bar, int &bar_index)

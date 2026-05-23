@@ -1,4 +1,3 @@
-// ============================================================================
 #property strict
 #property description "WaveBot – W2/W3 + Hunter + ExtLQ + SW (Bootstrap Direction Race)"
 
@@ -21,7 +20,7 @@ input Direction         InpDirection           = DIR_DOWN;
 input bool              InpMostRecentOnly      = false;
 input bool              InpUseMonthsAgo        = false;
 input int               InpMonthsAgo           = 40;
-input datetime          InpScanFromDate        = D'2025.01.00 00:00';
+input datetime          InpScanFromDate        = D'2026.01.00 00:00';
 
 // --- ???? ????????? ????? ????? (???? ?????) ---
 input bool              InpRequireCloseBreakAboveW2H1 = true;
@@ -303,10 +302,9 @@ inline void __WB_FlushFinalScanOutputs(const datetime scan_stop)
 
    if(TriggerStatement_ScheduledOutputActive())
    {
-      // M1 final-only output mode: rebuild Statement and diagnostic CSV
-      // snapshots once, exactly after the terminal M1 hard stop.
+      // M1 final-only output mode: write the final Statement only.
+      // CSV diagnostics are disabled in this build to keep scanning fast.
       WBLOG_BeginScheduledOutputWrite();
-      WBLOG_ExportScheduledCandleSnapshots(InpSymbol, use_start, use_stop);
       __WB_WriteTriggerStatementReportFinal(use_stop);
       WBLOG_EndScheduledOutputWrite(TriggerStatement_LastWriteOK());
    }
@@ -498,7 +496,7 @@ inline void __WB_EnsureLiveTriggerStatementFile()
       initial_cutoff = (datetime)1;
 
    // Do not write the Statement at initialization. On M1 the full Statement
-   // and CSV diagnostics are rebuilt once after the terminal hard stop.
+   // is rebuilt once after the terminal hard stop; CSV diagnostics are disabled.
    TriggerStatement_LiveMarkDirty(initial_cutoff);
 }
 // ============================================================================

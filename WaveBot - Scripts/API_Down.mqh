@@ -1,4 +1,3 @@
-// ============================================================================
 #ifndef WAVEBOT_API_DOWN_MQH
 #define WAVEBOT_API_DOWN_MQH
 
@@ -544,8 +543,7 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
                int c1_eff = (w3_c1>=0 ? w3_c1 : w3_cand);
                if(c1_eff >= 0 && rates[j].high > rates[c1_eff].high)
                {
-                  if(InpDebugPrints)
-                     Print("#",tag," W3(DOWN) RESET (non-wick): H > H(C1) before body-break. Restart W3 from this bar.");
+                  // Experts cleanup: noisy non-wick W3 reset message intentionally silenced.
                   // reset ONLY W3 and restart from the very bar that caused invalidation
                   have_w3=false; w3_end=-1; k2=k3=k4=-1;
                   w3_c1 = -1;

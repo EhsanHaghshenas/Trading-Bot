@@ -1,4 +1,3 @@
-// ============================================================================
 #ifndef WAVEBOT_TRIGGER_TYPE1_MQH
 #define WAVEBOT_TRIGGER_TYPE1_MQH
 

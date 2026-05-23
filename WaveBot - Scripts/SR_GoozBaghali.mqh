@@ -1,4 +1,3 @@
-// ============================================================================
 // WaveBot/SR_GoozBaghali.mqh
 #ifndef WAVEBOT_SR_GOOZBAGHALI_MQH
 #define WAVEBOT_SR_GOOZBAGHALI_MQH

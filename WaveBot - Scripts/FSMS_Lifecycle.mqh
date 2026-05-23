@@ -1,4 +1,4 @@
-﻿#ifndef WAVEBOT_FSMS_LIFECYCLE_MQH
+#ifndef WAVEBOT_FSMS_LIFECYCLE_MQH
 #define WAVEBOT_FSMS_LIFECYCLE_MQH
 
 #include <WaveBot/Types.mqh>

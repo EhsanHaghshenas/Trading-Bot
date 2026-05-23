@@ -1,4 +1,3 @@
-// ============================================================================
 #ifndef WAVEBOT_WORLDMANAGER_MQH
 #define WAVEBOT_WORLDMANAGER_MQH
 

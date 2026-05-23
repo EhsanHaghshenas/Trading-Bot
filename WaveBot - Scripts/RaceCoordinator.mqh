@@ -1,4 +1,3 @@
-// ============================================================================
 #ifndef WAVEBOT_RACECOORDINATOR_MQH
 #define WAVEBOT_RACECOORDINATOR_MQH
 

@@ -1,4 +1,3 @@
-// ============================================================================
 #ifndef WAVEBOT_API_MQH
 #define WAVEBOT_API_MQH
 
@@ -553,8 +552,7 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
                int c1_eff = (w3_c1>=0 ? w3_c1 : w3_cand); // ?????? ???? C1 ?? ?? ?? ????
                if(c1_eff >= 0 && rates[j].low < rates[c1_eff].low)
                {
-                  if(InpDebugPrints)
-                     Print("#",tag," W3(UP) RESET (non-wick): L < L(C1) before body-break. Restart W3 from this bar.");
+                  // Experts cleanup: noisy non-wick W3 reset message intentionally silenced.
                   have_w3=false; w3_end=-1; k2=k3=k4=-1;
                   w3_c1 = -1;
                   w3_cand     = j;                 // ???? ????? C1 ????
