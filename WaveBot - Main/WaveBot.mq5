@@ -20,7 +20,7 @@ input Direction         InpDirection           = DIR_DOWN;
 input bool              InpMostRecentOnly      = false;
 input bool              InpUseMonthsAgo        = false;
 input int               InpMonthsAgo           = 40;
-input datetime          InpScanFromDate        = D'2026.01.00 00:00';
+input datetime          InpScanFromDate        = D'2025.01.00 00:00';
 
 // --- ???? ????????? ????? ????? (???? ?????) ---
 input bool              InpRequireCloseBreakAboveW2H1 = true;
@@ -35,6 +35,223 @@ input bool              InpEnableTriggerStatement          = true;
 input double            InpTriggerStatementInitialCapital  = 10000.0;
 input double            InpTriggerStatementRiskPercent     = 1.0;
 input string            InpTriggerStatementFileTag         = "WaveBot_TriggerStatement";
+
+// ===== M1 trade-limit and SL runtime settings =====
+// These inputs are saved by the M15 chart and automatically reused by the M1 chart
+// through MetaTrader terminal GlobalVariables, so the same values do not need to
+// be entered twice when running the M15 master first and the M1 slave second.
+input int               InpM1MaxTradesPerM15NewSignal = 4;
+input int               InpM1MaxOpenTrades            = 1;
+input double            InpM1MinSLPips                 = 1.4;
+input double            InpM1MaxSLPips                 = 6.0;
+input int               InpM1MaxTradesPerLocalRef     = 2;
+
+#define WB_CFG_DEFAULT_MAX_TRADES_PER_M15_NEW 4
+#define WB_CFG_DEFAULT_MAX_OPEN_TRADES        1
+#define WB_CFG_DEFAULT_MIN_SL_PIPS            1.4
+#define WB_CFG_DEFAULT_MAX_SL_PIPS            6.0
+#define WB_CFG_DEFAULT_MAX_TRADES_LOCAL_REF   2
+
+int    g_WB_M1MaxTradesPerM15NewSignal = WB_CFG_DEFAULT_MAX_TRADES_PER_M15_NEW;
+int    g_WB_M1MaxOpenTrades            = WB_CFG_DEFAULT_MAX_OPEN_TRADES;
+double g_WB_M1MinSLPips                 = WB_CFG_DEFAULT_MIN_SL_PIPS;
+double g_WB_M1MaxSLPips                 = WB_CFG_DEFAULT_MAX_SL_PIPS;
+int    g_WB_M1MaxTradesPerLocalRef     = WB_CFG_DEFAULT_MAX_TRADES_LOCAL_REF;
+bool   g_WB_M1RuntimeConfigLoadedFromTerminal = false;
+
+inline string __WB_ConfigSymbolKeyPart()
+{
+   string sym = InpSymbol;
+   if(sym == "")
+      sym = _Symbol;
+   if(sym == "")
+      sym = "DEFAULT";
+   return sym;
+}
+
+inline string __WB_ConfigGVKey(const string suffix)
+{
+   return "WaveBot.M1RuntimeConfig." + __WB_ConfigSymbolKeyPart() + "." + suffix;
+}
+
+inline int __WB_ConfigNormalizeInt(const int value, const int fallback, const int minimum)
+{
+   int v = value;
+   if(v < minimum)
+      v = fallback;
+   if(v < minimum)
+      v = minimum;
+   return v;
+}
+
+inline double __WB_ConfigNormalizeDouble(const double value, const double fallback, const double minimum)
+{
+   double v = value;
+   if(v < minimum)
+      v = fallback;
+   if(v < minimum)
+      v = minimum;
+   return v;
+}
+
+inline void __WB_ConfigNormalizeRuntime()
+{
+   g_WB_M1MaxTradesPerM15NewSignal = __WB_ConfigNormalizeInt(g_WB_M1MaxTradesPerM15NewSignal,
+                                                             WB_CFG_DEFAULT_MAX_TRADES_PER_M15_NEW,
+                                                             1);
+   g_WB_M1MaxOpenTrades            = __WB_ConfigNormalizeInt(g_WB_M1MaxOpenTrades,
+                                                             WB_CFG_DEFAULT_MAX_OPEN_TRADES,
+                                                             1);
+   g_WB_M1MaxTradesPerLocalRef     = __WB_ConfigNormalizeInt(g_WB_M1MaxTradesPerLocalRef,
+                                                             WB_CFG_DEFAULT_MAX_TRADES_LOCAL_REF,
+                                                             1);
+
+   g_WB_M1MinSLPips = __WB_ConfigNormalizeDouble(g_WB_M1MinSLPips,
+                                                 WB_CFG_DEFAULT_MIN_SL_PIPS,
+                                                 0.0);
+   g_WB_M1MaxSLPips = __WB_ConfigNormalizeDouble(g_WB_M1MaxSLPips,
+                                                 WB_CFG_DEFAULT_MAX_SL_PIPS,
+                                                 0.0);
+
+   if(g_WB_M1MaxSLPips <= 0.0)
+      g_WB_M1MaxSLPips = WB_CFG_DEFAULT_MAX_SL_PIPS;
+
+   if(g_WB_M1MinSLPips > g_WB_M1MaxSLPips)
+   {
+      double tmp = g_WB_M1MinSLPips;
+      g_WB_M1MinSLPips = g_WB_M1MaxSLPips;
+      g_WB_M1MaxSLPips = tmp;
+   }
+}
+
+inline void __WB_ConfigApplyInputs()
+{
+   g_WB_M1MaxTradesPerM15NewSignal = InpM1MaxTradesPerM15NewSignal;
+   g_WB_M1MaxOpenTrades            = InpM1MaxOpenTrades;
+   g_WB_M1MinSLPips                = InpM1MinSLPips;
+   g_WB_M1MaxSLPips                = InpM1MaxSLPips;
+   g_WB_M1MaxTradesPerLocalRef     = InpM1MaxTradesPerLocalRef;
+   g_WB_M1RuntimeConfigLoadedFromTerminal = false;
+   __WB_ConfigNormalizeRuntime();
+}
+
+inline bool __WB_ConfigLoadInt(const string suffix, int &out_value)
+{
+   string key = __WB_ConfigGVKey(suffix);
+   if(!GlobalVariableCheck(key))
+      return false;
+
+   out_value = (int)MathRound(GlobalVariableGet(key));
+   return true;
+}
+
+inline bool __WB_ConfigLoadDouble(const string suffix, double &out_value)
+{
+   string key = __WB_ConfigGVKey(suffix);
+   if(!GlobalVariableCheck(key))
+      return false;
+
+   out_value = GlobalVariableGet(key);
+   return true;
+}
+
+inline bool __WB_ConfigLoadFromTerminal()
+{
+   bool loaded = false;
+
+   int vi = 0;
+   double vd = 0.0;
+
+   if(__WB_ConfigLoadInt("MaxTradesPerM15NewSignal", vi))
+   {
+      g_WB_M1MaxTradesPerM15NewSignal = vi;
+      loaded = true;
+   }
+   if(__WB_ConfigLoadInt("MaxOpenTrades", vi))
+   {
+      g_WB_M1MaxOpenTrades = vi;
+      loaded = true;
+   }
+   if(__WB_ConfigLoadDouble("MinSLPips", vd))
+   {
+      g_WB_M1MinSLPips = vd;
+      loaded = true;
+   }
+   if(__WB_ConfigLoadDouble("MaxSLPips", vd))
+   {
+      g_WB_M1MaxSLPips = vd;
+      loaded = true;
+   }
+   if(__WB_ConfigLoadInt("MaxTradesPerLocalRef", vi))
+   {
+      g_WB_M1MaxTradesPerLocalRef = vi;
+      loaded = true;
+   }
+
+   __WB_ConfigNormalizeRuntime();
+   g_WB_M1RuntimeConfigLoadedFromTerminal = loaded;
+   return loaded;
+}
+
+inline void __WB_ConfigSaveToTerminal()
+{
+   __WB_ConfigNormalizeRuntime();
+
+   GlobalVariableSet(__WB_ConfigGVKey("MaxTradesPerM15NewSignal"), (double)g_WB_M1MaxTradesPerM15NewSignal);
+   GlobalVariableSet(__WB_ConfigGVKey("MaxOpenTrades"),            (double)g_WB_M1MaxOpenTrades);
+   GlobalVariableSet(__WB_ConfigGVKey("MinSLPips"),                g_WB_M1MinSLPips);
+   GlobalVariableSet(__WB_ConfigGVKey("MaxSLPips"),                g_WB_M1MaxSLPips);
+   GlobalVariableSet(__WB_ConfigGVKey("MaxTradesPerLocalRef"),     (double)g_WB_M1MaxTradesPerLocalRef);
+   GlobalVariableSet(__WB_ConfigGVKey("SavedAt"),                  (double)TimeCurrent());
+}
+
+inline void WB_ConfigInitialize(const bool save_inputs_to_terminal,
+                                const bool load_saved_from_terminal)
+{
+   __WB_ConfigApplyInputs();
+
+   if(load_saved_from_terminal)
+      __WB_ConfigLoadFromTerminal();
+
+   if(save_inputs_to_terminal)
+      __WB_ConfigSaveToTerminal();
+}
+
+inline int WB_Config_MaxTradesPerM15NewSignal()
+{
+   return __WB_ConfigNormalizeInt(g_WB_M1MaxTradesPerM15NewSignal,
+                                  WB_CFG_DEFAULT_MAX_TRADES_PER_M15_NEW,
+                                  1);
+}
+
+inline int WB_Config_MaxOpenTrades()
+{
+   return __WB_ConfigNormalizeInt(g_WB_M1MaxOpenTrades,
+                                  WB_CFG_DEFAULT_MAX_OPEN_TRADES,
+                                  1);
+}
+
+inline double WB_Config_MinSLPips()
+{
+   return g_WB_M1MinSLPips;
+}
+
+inline double WB_Config_MaxSLPips()
+{
+   return g_WB_M1MaxSLPips;
+}
+
+inline int WB_Config_MaxTradesPerLocalRef()
+{
+   return __WB_ConfigNormalizeInt(g_WB_M1MaxTradesPerLocalRef,
+                                  WB_CFG_DEFAULT_MAX_TRADES_LOCAL_REF,
+                                  1);
+}
+
+inline string WB_Config_SourceText()
+{
+   return (g_WB_M1RuntimeConfigLoadedFromTerminal ? "terminal-global-from-M15" : "ea-inputs");
+}
 
 // ===== Includes (??? ?? Inputs) =====
 #include <WaveBot/Utils.mqh>
@@ -643,6 +860,9 @@ int OnInit()
 {
    g_role = __WB_DetectRole();
 
+   WB_ConfigInitialize((g_role == WBROLE_MASTER_M15 || g_role == WBROLE_STANDALONE),
+                       (g_role == WBROLE_SLAVE_M1));
+
    datetime __wblog_scan_from = 0;
    datetime __wblog_scan_to   = 0;
    ResolveWindow(__wblog_scan_from, __wblog_scan_to);
@@ -673,10 +893,18 @@ int OnInit()
    WBLOG_LogParam("InpEnableTriggerStatement", (InpEnableTriggerStatement ? "true" : "false"), "input");
    WBLOG_LogParam("InpTriggerStatementInitialCapital", DoubleToString(InpTriggerStatementInitialCapital, 2), "input");
    WBLOG_LogParam("InpTriggerStatementRiskPercent", DoubleToString(InpTriggerStatementRiskPercent, 4), "input");
-   WBLOG_LogParam("TRGSL_MIN_RISK_PIPS", "1.4", "TriggerSLTP.mqh");
-   WBLOG_LogParam("TRGSL_MAX_RISK_PIPS", "6.0", "TriggerSLTP.mqh");
+   WBLOG_LogParam("InpM1MaxTradesPerM15NewSignal", IntegerToString(InpM1MaxTradesPerM15NewSignal), "input");
+   WBLOG_LogParam("InpM1MaxOpenTrades", IntegerToString(InpM1MaxOpenTrades), "input");
+   WBLOG_LogParam("InpM1MinSLPips", DoubleToString(InpM1MinSLPips, 2), "input");
+   WBLOG_LogParam("InpM1MaxSLPips", DoubleToString(InpM1MaxSLPips, 2), "input");
+   WBLOG_LogParam("InpM1MaxTradesPerLocalRef", IntegerToString(InpM1MaxTradesPerLocalRef), "input");
+   WBLOG_LogParam("M1RuntimeConfigSource", WB_Config_SourceText(), "WaveBot.mq5");
+   WBLOG_LogParam("M1_MAX_TRADES_PER_M15_NEW_SIGNAL", IntegerToString(WB_Config_MaxTradesPerM15NewSignal()), "runtime-config");
+   WBLOG_LogParam("M1_MAX_OPEN_TRADES", IntegerToString(WB_Config_MaxOpenTrades()), "runtime-config");
+   WBLOG_LogParam("TRGSL_MIN_RISK_PIPS", DoubleToString(WB_Config_MinSLPips(), 2), "runtime-config");
+   WBLOG_LogParam("TRGSL_MAX_RISK_PIPS", DoubleToString(WB_Config_MaxSLPips(), 2), "runtime-config");
    WBLOG_LogParam("TRGSL_R_MULTIPLE", "3.0", "TriggerSLTP.mqh");
-   WBLOG_LogParam("M1_LOCAL_REF_MAX_TRADES", "2", "Trigger.mqh");
+   WBLOG_LogParam("M1_LOCAL_REF_MAX_TRADES", IntegerToString(WB_Config_MaxTradesPerLocalRef()), "runtime-config");
    WBLOG_LogParam("M1_LOCAL_REF_MTC_INVALIDATION", "true", "RaceCoordinator.mqh");
 
    // Ensure WorldManager captures clean baselines before any scan starts

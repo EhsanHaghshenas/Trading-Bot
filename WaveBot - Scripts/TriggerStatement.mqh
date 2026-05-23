@@ -34,7 +34,7 @@
 
 #define TRGSTMT_LOCK_AFTER_LOSSES       3
 #define TRGSTMT_LOCAL_LOCK_AFTER_LOSSES 2
-#define TRGSTMT_MAX_OPEN_TRADES         1
+#define TRGSTMT_MAX_OPEN_TRADES         WB_Config_MaxOpenTrades()
 #define TRGSTMT_DAILY_MAX_LOSS_PCT      3.5
 
 struct TriggerStatementTrade
@@ -3528,9 +3528,9 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
       }
 
       // All legacy execution restrictions are intentionally disabled in this
-      // version. Valid TriggerSLTP records are executed after the one-open-trade
-      // gate. The per-signal cap is enforced upstream in Trigger.mqh: max 4
-      // accepted trades per imported M15 "new" signal.
+      // version. Valid TriggerSLTP records are executed after the configured
+      // max-open-trades gate. The per-signal cap is enforced upstream in
+      // Trigger.mqh using WB_Config_MaxTradesPerM15NewSignal().
       if(first_win_seen_in_m15 && post_win_wait_active)
       {
          post_win_wait_active   = false;
@@ -3549,7 +3549,7 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
       trades[i].note = __TRGSTM_AppendNote(trades[i].note,
                                            "LEGACY_EXECUTION_LIMITS_DISABLED");
       trades[i].note = __TRGSTM_AppendNote(trades[i].note,
-                                           "MAX_4_TRADES_PER_M15_NEW_SIGNAL_ENFORCED_IN_TRIGGER");
+                                           "MAX_" + IntegerToString(WB_Config_MaxTradesPerM15NewSignal()) + "_TRADES_PER_M15_NEW_SIGNAL_ENFORCED_IN_TRIGGER");
 
       if(trades[i].rec.dir == DIR_UP)
          buy_total++;
@@ -3813,10 +3813,10 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "Scan To                : " + __TRGSTM_SafeTime(use_scan_to));
    __TRGSTM_WriteLine(handle, "Initial Capital        : " + __TRGSTM_Money(initial_capital));
    __TRGSTM_WriteLine(handle, "Fixed Risk Per Trade   : " + __TRGSTM_Pct(risk_percent) + " = " + __TRGSTM_Money(risk_money));
-   __TRGSTM_WriteLine(handle, "SL/TP Source           : TriggerSLTP.mqh valid triggers only (SL outside full Flip/MajicFlip zone | 1.4..6.0 pip)");
+   __TRGSTM_WriteLine(handle, "SL/TP Source           : TriggerSLTP.mqh valid triggers only (SL outside full Flip/MajicFlip zone | " + DoubleToString(WB_Config_MinSLPips(), 2) + ".." + DoubleToString(WB_Config_MaxSLPips(), 2) + " pip)");
    __TRGSTM_WriteLine(handle, "Trigger Source         : Type-1 = Flip.mqh | Type-2 = Majicflip.mqh");
-   __TRGSTM_WriteLine(handle, "Execution Model        : Imported M15->M1 NEW signal + first valid M1 HWX/HWBB/FSMS inside M15 NEW zone + same-direction Flip/MajicFlip distance gate | one open trade max | max 4 accepted trades per M15 NEW signal");
-   __TRGSTM_WriteLine(handle, "Protection Rule        : ONE OPEN TRADE ONLY + SL 1.4..6.0 pip | legacy loss/post-win/daily limits disabled");
+   __TRGSTM_WriteLine(handle, "Execution Model        : Imported M15->M1 NEW signal + first valid M1 HWX/HWBB/FSMS inside M15 NEW zone + same-direction Flip/MajicFlip distance gate | max open trades=" + IntegerToString(WB_Config_MaxOpenTrades()) + " | max " + IntegerToString(WB_Config_MaxTradesPerM15NewSignal()) + " accepted trades per M15 NEW signal");
+   __TRGSTM_WriteLine(handle, "Protection Rule        : Max open trades=" + IntegerToString(WB_Config_MaxOpenTrades()) + " + SL " + DoubleToString(WB_Config_MinSLPips(), 2) + ".." + DoubleToString(WB_Config_MaxSLPips(), 2) + " pip | legacy loss/post-win/daily limits disabled");
    __TRGSTM_WriteLine(handle, "Trend Filter           : DISABLED (M1 trend alignment is not used as an execution gate)");
    __TRGSTM_WriteLine(handle, "Local M1 Signal Gate   : ENABLED before every trade | first M1 HWX/HWBB/FSMS in direction must be fully inside the imported M15 NEW zone");
    __TRGSTM_WriteLine(handle, "Post-Win Re-Entry Rule : DISABLED");
@@ -3864,7 +3864,7 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "Worst Trade            : " + worst_trade_text);
    __TRGSTM_WriteLine(handle, "Max Win Streak         : " + IntegerToString(max_win_streak));
    __TRGSTM_WriteLine(handle, "Max Loss Streak        : " + IntegerToString(max_loss_streak));
-   __TRGSTM_WriteLine(handle, "Max Open Trades Limit  : 1 open trade at a time | skipped=" + IntegerToString(skipped_max_open_trades));
+   __TRGSTM_WriteLine(handle, "Max Open Trades Limit  : " + IntegerToString(WB_Config_MaxOpenTrades()) + " open trade(s) at a time | skipped=" + IntegerToString(skipped_max_open_trades));
    __TRGSTM_WriteLine(handle, "Daily Max Loss Limit   : DISABLED | skipped=" + IntegerToString(skipped_daily_loss_limit));
    __TRGSTM_WriteLine(handle, "M15 Window Lockout     : DISABLED | activations=" + IntegerToString(lockout_activations) + " | releases=" + IntegerToString(lockout_releases));
    __TRGSTM_WriteLine(handle, "Post-Win Re-Entry Wait : DISABLED | arms=" + IntegerToString(post_win_wait_arms) + " | releases=" + IntegerToString(post_win_wait_releases));
@@ -3876,7 +3876,7 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "Ambiguous Losses       : " + IntegerToString(ambiguous_losses));
    __TRGSTM_WriteLine(handle, "Trigger-Bar Ambiguous  : " + IntegerToString(trigger_bar_ambiguous));
    __TRGSTM_WriteLine(handle, "Risk Pips Min/Avg/Max  : " + DoubleToString(min_risk_pips, 1) + " / " + DoubleToString(avg_risk_pips, 1) + " / " + DoubleToString(max_risk_pips, 1));
-   __TRGSTM_WriteLine(handle, "Target Model           : 3R fixed from TriggerSLTP.mqh | SL range filter 1.4..6.0 pip");
+   __TRGSTM_WriteLine(handle, "Target Model           : 3R fixed from TriggerSLTP.mqh | SL range filter " + DoubleToString(WB_Config_MinSLPips(), 2) + ".." + DoubleToString(WB_Config_MaxSLPips(), 2) + " pip");
    __TRGSTM_WriteLine(handle, "");
 
    __TRGSTM_WriteLine(handle, "EXECUTED TRADE LIST");
@@ -3969,14 +3969,14 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "USAGE NOTES");
    __TRGSTM_WriteLine(handle, "------------------------------------------------------------");
    __TRGSTM_WriteLine(handle, "1) This statement only evaluates triggers and state that already exist up to Scan To; in synchronized live updates, Scan To is the current trigger bar reached by the normal M1 scan.");
-   __TRGSTM_WriteLine(handle, "2) Legacy 3-loss M15 lockout is disabled; valid triggers are controlled by the imported M15 NEW window, the local M1 reference gate, the one-open-trade gate, and the 4-trade cap.");
-   __TRGSTM_WriteLine(handle, "3) Only one trade may be open at a time; any later trigger is skipped until the active trade closes.");
-   __TRGSTM_WriteLine(handle, "4) Post-win re-entry waiting is disabled; a trigger can execute only when no previous trade is still open.");
+   __TRGSTM_WriteLine(handle, "2) Legacy 3-loss M15 lockout is disabled; valid triggers are controlled by the imported M15 NEW window, the local M1 reference gate, the configured max-open-trades gate, and the configured per-signal trade cap.");
+   __TRGSTM_WriteLine(handle, "3) At most " + IntegerToString(WB_Config_MaxOpenTrades()) + " trade(s) may be open at the same time; any later trigger is skipped until enough active trades close.");
+   __TRGSTM_WriteLine(handle, "4) Post-win re-entry waiting is disabled; a trigger can execute only when the configured max-open-trades gate allows it.");
    __TRGSTM_WriteLine(handle, "5) There is no M1 trend-alignment execution gate; the imported M15->M1 signal window only controls trigger creation upstream.");
    __TRGSTM_WriteLine(handle, "6) Local M1 loss lockout is disabled; the accepted local HWX/HWBB/FSMS reference and distance gate are handled upstream in Trigger.mqh.");
    __TRGSTM_WriteLine(handle, "7) If the imported M15->M1 signal-off arrives, raw trigger creation stops upstream and the next M15 signal-on starts a new execution window.");
-   __TRGSTM_WriteLine(handle, "8) A new trigger is skipped whenever one previous trade is still open at that trigger time.");
-   __TRGSTM_WriteLine(handle, "9) Daily max loss is disabled in this version; only the one-open-trade gate and SL 1.4..6.0 pip filter are active.");
+   __TRGSTM_WriteLine(handle, "8) A new trigger is skipped whenever the number of already-open trades reaches " + IntegerToString(WB_Config_MaxOpenTrades()) + " at that trigger time.");
+   __TRGSTM_WriteLine(handle, "9) Daily max loss is disabled in this version; only the configured max-open-trades gate and SL " + DoubleToString(WB_Config_MinSLPips(), 2) + ".." + DoubleToString(WB_Config_MaxSLPips(), 2) + " pip filter are active.");
    __TRGSTM_WriteLine(handle, "10) Risk per executed trade is fixed on initial capital, not compounded trade-by-trade.");
    __TRGSTM_WriteLine(handle, "11) Ambiguous same-bar outcomes are counted conservatively as SL to avoid optimistic bias; SL is placed beyond the full Flip/MajicFlip zone.");
 

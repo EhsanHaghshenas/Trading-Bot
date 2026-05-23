@@ -1,7 +1,8 @@
-// UPDATE APPLIED: FSMS_Lifecycle BOM Fix + Script Header Cleanup
-// - Removed the embedded UTF-8 BOM character that caused MetaEditor error: unknown symbol '' (0xFEFF).
-// - Removed the leading decorative separator lines from the beginning of every .mq5/.mqh script.
-// - M15/M1 scan logic, trigger logic, Statement output, and NoCSV/NoLogFolder behavior remain unchanged.
+// UPDATE APPLIED: Configurable M1 Trade Limits + Shared M15/M1 Runtime Inputs
+// - Added EA inputs for max trades per M15 NEW signal, max open trades, min/max SL pips, and max trades per local M1 reference.
+// - Default values remain unchanged: 4 trades per M15 NEW, 1 open trade, SL 1.4..6.0 pip, and 2 trades per local reference.
+// - M15 chart saves these values into MetaTrader terminal GlobalVariables; M1 chart automatically loads them when started after M15.
+// - M15/M1 scan logic, bridge logic, trigger detection, NoCSV/NoLogFolder behavior, and Statement TXT output remain unchanged.
 
 // BEGIN FILE 01: API.mqh
 #ifndef WAVEBOT_API_MQH
@@ -13859,11 +13860,13 @@ bool TriggerStatement_ScheduledOutputMaybeAt(const datetime current_time);
 //     and Trigger Type 2 = Majicflip.mqh can become trades.
 //   - A Flip/MajicFlip trigger must be closer to the accepted local reference
 //     candle than to the relevant first-candle barrier.
-//   - Each accepted local M1 HWX/HWBB/FSMS reference is valid for max 2
-//     accepted trades only; after that, M1 must wait for the next local reference.
+//   - Each accepted local M1 HWX/HWBB/FSMS reference is valid for a
+//     configurable max trade count (default 2); after that, M1 must wait
+//     for the next local reference.
 //   - If any MTC forms after the accepted local M1 reference, that local reference
 //     is invalidated immediately and no further Flip/MajicFlip trigger may use it.
-//   - Each imported M15 "new" signal is still retired after 4 actual trades.
+//   - Each imported M15 "new" signal is retired after a configurable
+//     actual trade count (default 4).
 //   - Legacy execution restrictions are disabled in TriggerStatement.mqh.
 // ============================================================================
 
@@ -14658,8 +14661,8 @@ inline bool __TRG_SetActiveWindow(const bool      new_active,
       eff_zone_low = tmpz;
    }
 
-   // A M15 "new" window is retired after 4 actual trades. Historical window
-   // recomputation must not revive the same start sequence again.
+   // A M15 "new" window is retired after the configured actual-trade cap.
+   // Historical window recomputation must not revive the same start sequence again.
    if(eff_active && eff_start_seq == g_trigger_core.retired_start_seq)
    {
       eff_active     = false;
@@ -15190,7 +15193,7 @@ inline bool Trigger_M1LocalGateRegister(const Direction dir,
    if(g_trigger_core.active_start_seq == g_trigger_core.retired_start_seq)
       return false;
 
-   if(g_trigger_core.active_trade_count >= 4)
+   if(g_trigger_core.active_trade_count >= WB_Config_MaxTradesPerM15NewSignal())
       return false;
 
    if(g_trigger_core.local_ref_ready)
@@ -15289,10 +15292,10 @@ inline bool __TRG_CanAcceptPatternTrigger(const int       type_id,
    if(g_trigger_core.active_start_seq == g_trigger_core.retired_start_seq)
       return false;
 
-   if(g_trigger_core.active_trade_count >= 4)
+   if(g_trigger_core.active_trade_count >= WB_Config_MaxTradesPerM15NewSignal())
       return false;
 
-   if(g_trigger_core.local_ref_trade_count >= 2)
+   if(g_trigger_core.local_ref_trade_count >= WB_Config_MaxTradesPerLocalRef())
       return false;
 
    string reason = "";
@@ -15461,14 +15464,14 @@ inline void __TRG_FirePatternTrigger(const int       type_id,
       if(rates[hit_idx].time > g_trigger_pending_refresh_time)
          g_trigger_pending_refresh_time = rates[hit_idx].time;
 
-      if(g_trigger_core.active_trade_count >= 4)
+      if(g_trigger_core.active_trade_count >= WB_Config_MaxTradesPerM15NewSignal())
       {
          __TRG_RetireActiveWindowAfterTradeLimit(rates[hit_idx].time);
       }
       else
-      if(g_trigger_core.local_ref_trade_count >= 2)
+      if(g_trigger_core.local_ref_trade_count >= WB_Config_MaxTradesPerLocalRef())
       {
-         __TRG_InvalidateLocalM1Reference("LOCAL_REFERENCE_TWO_TRADE_LIMIT", rates[hit_idx].time);
+         __TRG_InvalidateLocalM1Reference("LOCAL_REFERENCE_MAX_TRADE_LIMIT", rates[hit_idx].time);
       }
    }
 }
@@ -15536,7 +15539,7 @@ inline void __TRG_ProcessLoadedBar(const string    sym,
                                   g_trigger_core.active_start_time,
                                   g_trigger_core.active_start_bar_time);
 
-   if(!g_trigger_core.local_ref_ready || g_trigger_core.active_trade_count >= 4)
+   if(!g_trigger_core.local_ref_ready || g_trigger_core.active_trade_count >= WB_Config_MaxTradesPerM15NewSignal())
    {
       TriggerStatement_ScheduledOutputMaybeAt(bar_time);
       g_trigger_core.last_processed_time = bar_time;
@@ -15875,8 +15878,8 @@ inline void TriggerM15SignalGate_RecordClose(const string    sym,
 #include <WaveBot/Markers.mqh>
 #include <WaveBot/WaveBotLogger.mqh>
 
-#define TRGSL_MIN_RISK_PIPS 1.4
-#define TRGSL_MAX_RISK_PIPS 6.0
+#define TRGSL_MIN_RISK_PIPS WB_Config_MinSLPips()
+#define TRGSL_MAX_RISK_PIPS WB_Config_MaxSLPips()
 #define TRGSL_R_MULTIPLE    3.0
 #define TRGSL_FORWARD_BARS  4
 
@@ -16174,14 +16177,15 @@ inline bool __TRGSL_RecordClosedAtOrBefore(const TriggerSLTPRecord &rec,
    return false;
 }
 
-inline bool __TRGSL_HasOpenTradeBefore(const string    sym,
-                                       const MqlRates &rates[],
-                                       const int       n,
-                                       const datetime  current_time)
+inline int __TRGSL_OpenTradeCountBefore(const string    sym,
+                                         const MqlRates &rates[],
+                                         const int       n,
+                                         const datetime  current_time)
 {
    if(current_time <= 0)
-      return false;
+      return 0;
 
+   int opened = 0;
    int total = ArraySize(g_trgsl_records);
    for(int i = 0; i < total; ++i)
    {
@@ -16196,10 +16200,18 @@ inline bool __TRGSL_HasOpenTradeBefore(const string    sym,
          continue;
 
       if(!__TRGSL_RecordClosedAtOrBefore(rec, rates, n, current_time))
-         return true;
+         opened++;
    }
 
-   return false;
+   return opened;
+}
+
+inline bool __TRGSL_MaxOpenTradesReachedBefore(const string    sym,
+                                               const MqlRates &rates[],
+                                               const int       n,
+                                               const datetime  current_time)
+{
+   return (__TRGSL_OpenTradeCountBefore(sym, rates, n, current_time) >= WB_Config_MaxOpenTrades());
 }
 
 inline bool __TRGSL_BuildBull(const string    sym,
@@ -16323,7 +16335,7 @@ inline void TriggerSLTP_OnTriggerFired(const string    sym,
 
    if(hit_idx >= 0 && hit_idx < n)
    {
-      if(__TRGSL_HasOpenTradeBefore(use_sym, rates, n, rates[hit_idx].time))
+      if(__TRGSL_MaxOpenTradesReachedBefore(use_sym, rates, n, rates[hit_idx].time))
       {
          WBLOG_LogRejectedTrigger(type_id,
                                   dir,
@@ -16333,11 +16345,11 @@ inline void TriggerSLTP_OnTriggerFired(const string    sym,
                                   rates[hit_idx].high,
                                   rates[hit_idx].low,
                                   rates[hit_idx].close,
-                                  "one_open_trade_limit",
+                                  "max_open_trades_limit",
                                   0.0,
                                   0.0,
                                   0.0,
-                                  "TriggerSLTP_OnTriggerFired_one_open_gate");
+                                  "TriggerSLTP_OnTriggerFired_max_open_gate");
 
          if(InpDebugPrints)
          {
@@ -16346,7 +16358,8 @@ inline void TriggerSLTP_OnTriggerFired(const string    sym,
                   " trigger | breakout=", DoubleToString(level, __TRGSL_DigitsOf(use_sym)),
                   " | src_idx=", src_idx,
                   " | hit_idx=", hit_idx,
-                  " | reason=one_open_trade_already_active");
+                  " | reason=max_open_trades_limit_reached",
+                  " | max_open=", IntegerToString(WB_Config_MaxOpenTrades()));
          }
          return;
       }
@@ -16378,7 +16391,7 @@ inline void TriggerSLTP_OnTriggerFired(const string    sym,
                                   rates[hit_idx].high,
                                   rates[hit_idx].low,
                                   rates[hit_idx].close,
-                                  "risk_outside_1_4_to_6pip_or_bad_flip_zone_range",
+                                  "risk_outside_configured_sl_range_or_bad_flip_zone_range",
                                   approx_risk_pips,
                                   0.0,
                                   0.0,
@@ -16392,7 +16405,9 @@ inline void TriggerSLTP_OnTriggerFired(const string    sym,
                " trigger | breakout=", DoubleToString(level, __TRGSL_DigitsOf(use_sym)),
                " | src_idx=", src_idx,
                " | hit_idx=", hit_idx,
-               " | reason=risk_outside_1_4_to_6pip_or_bad_flip_zone_range");
+               " | reason=risk_outside_configured_sl_range_or_bad_flip_zone_range",
+               " | min_sl=", DoubleToString(WB_Config_MinSLPips(), 2),
+               " | max_sl=", DoubleToString(WB_Config_MaxSLPips(), 2));
       }
       return;
    }
@@ -16500,7 +16515,7 @@ inline void TriggerSLTP_OnTriggerFired(const string    sym,
 
 #define TRGSTMT_LOCK_AFTER_LOSSES       3
 #define TRGSTMT_LOCAL_LOCK_AFTER_LOSSES 2
-#define TRGSTMT_MAX_OPEN_TRADES         1
+#define TRGSTMT_MAX_OPEN_TRADES         WB_Config_MaxOpenTrades()
 #define TRGSTMT_DAILY_MAX_LOSS_PCT      3.5
 
 struct TriggerStatementTrade
@@ -19994,9 +20009,9 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
       }
 
       // All legacy execution restrictions are intentionally disabled in this
-      // version. Valid TriggerSLTP records are executed after the one-open-trade
-      // gate. The per-signal cap is enforced upstream in Trigger.mqh: max 4
-      // accepted trades per imported M15 "new" signal.
+      // version. Valid TriggerSLTP records are executed after the configured
+      // max-open-trades gate. The per-signal cap is enforced upstream in
+      // Trigger.mqh using WB_Config_MaxTradesPerM15NewSignal().
       if(first_win_seen_in_m15 && post_win_wait_active)
       {
          post_win_wait_active   = false;
@@ -20015,7 +20030,7 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
       trades[i].note = __TRGSTM_AppendNote(trades[i].note,
                                            "LEGACY_EXECUTION_LIMITS_DISABLED");
       trades[i].note = __TRGSTM_AppendNote(trades[i].note,
-                                           "MAX_4_TRADES_PER_M15_NEW_SIGNAL_ENFORCED_IN_TRIGGER");
+                                           "MAX_" + IntegerToString(WB_Config_MaxTradesPerM15NewSignal()) + "_TRADES_PER_M15_NEW_SIGNAL_ENFORCED_IN_TRIGGER");
 
       if(trades[i].rec.dir == DIR_UP)
          buy_total++;
@@ -20279,10 +20294,10 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "Scan To                : " + __TRGSTM_SafeTime(use_scan_to));
    __TRGSTM_WriteLine(handle, "Initial Capital        : " + __TRGSTM_Money(initial_capital));
    __TRGSTM_WriteLine(handle, "Fixed Risk Per Trade   : " + __TRGSTM_Pct(risk_percent) + " = " + __TRGSTM_Money(risk_money));
-   __TRGSTM_WriteLine(handle, "SL/TP Source           : TriggerSLTP.mqh valid triggers only (SL outside full Flip/MajicFlip zone | 1.4..6.0 pip)");
+   __TRGSTM_WriteLine(handle, "SL/TP Source           : TriggerSLTP.mqh valid triggers only (SL outside full Flip/MajicFlip zone | " + DoubleToString(WB_Config_MinSLPips(), 2) + ".." + DoubleToString(WB_Config_MaxSLPips(), 2) + " pip)");
    __TRGSTM_WriteLine(handle, "Trigger Source         : Type-1 = Flip.mqh | Type-2 = Majicflip.mqh");
-   __TRGSTM_WriteLine(handle, "Execution Model        : Imported M15->M1 NEW signal + first valid M1 HWX/HWBB/FSMS inside M15 NEW zone + same-direction Flip/MajicFlip distance gate | one open trade max | max 4 accepted trades per M15 NEW signal");
-   __TRGSTM_WriteLine(handle, "Protection Rule        : ONE OPEN TRADE ONLY + SL 1.4..6.0 pip | legacy loss/post-win/daily limits disabled");
+   __TRGSTM_WriteLine(handle, "Execution Model        : Imported M15->M1 NEW signal + first valid M1 HWX/HWBB/FSMS inside M15 NEW zone + same-direction Flip/MajicFlip distance gate | max open trades=" + IntegerToString(WB_Config_MaxOpenTrades()) + " | max " + IntegerToString(WB_Config_MaxTradesPerM15NewSignal()) + " accepted trades per M15 NEW signal");
+   __TRGSTM_WriteLine(handle, "Protection Rule        : Max open trades=" + IntegerToString(WB_Config_MaxOpenTrades()) + " + SL " + DoubleToString(WB_Config_MinSLPips(), 2) + ".." + DoubleToString(WB_Config_MaxSLPips(), 2) + " pip | legacy loss/post-win/daily limits disabled");
    __TRGSTM_WriteLine(handle, "Trend Filter           : DISABLED (M1 trend alignment is not used as an execution gate)");
    __TRGSTM_WriteLine(handle, "Local M1 Signal Gate   : ENABLED before every trade | first M1 HWX/HWBB/FSMS in direction must be fully inside the imported M15 NEW zone");
    __TRGSTM_WriteLine(handle, "Post-Win Re-Entry Rule : DISABLED");
@@ -20330,7 +20345,7 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "Worst Trade            : " + worst_trade_text);
    __TRGSTM_WriteLine(handle, "Max Win Streak         : " + IntegerToString(max_win_streak));
    __TRGSTM_WriteLine(handle, "Max Loss Streak        : " + IntegerToString(max_loss_streak));
-   __TRGSTM_WriteLine(handle, "Max Open Trades Limit  : 1 open trade at a time | skipped=" + IntegerToString(skipped_max_open_trades));
+   __TRGSTM_WriteLine(handle, "Max Open Trades Limit  : " + IntegerToString(WB_Config_MaxOpenTrades()) + " open trade(s) at a time | skipped=" + IntegerToString(skipped_max_open_trades));
    __TRGSTM_WriteLine(handle, "Daily Max Loss Limit   : DISABLED | skipped=" + IntegerToString(skipped_daily_loss_limit));
    __TRGSTM_WriteLine(handle, "M15 Window Lockout     : DISABLED | activations=" + IntegerToString(lockout_activations) + " | releases=" + IntegerToString(lockout_releases));
    __TRGSTM_WriteLine(handle, "Post-Win Re-Entry Wait : DISABLED | arms=" + IntegerToString(post_win_wait_arms) + " | releases=" + IntegerToString(post_win_wait_releases));
@@ -20342,7 +20357,7 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "Ambiguous Losses       : " + IntegerToString(ambiguous_losses));
    __TRGSTM_WriteLine(handle, "Trigger-Bar Ambiguous  : " + IntegerToString(trigger_bar_ambiguous));
    __TRGSTM_WriteLine(handle, "Risk Pips Min/Avg/Max  : " + DoubleToString(min_risk_pips, 1) + " / " + DoubleToString(avg_risk_pips, 1) + " / " + DoubleToString(max_risk_pips, 1));
-   __TRGSTM_WriteLine(handle, "Target Model           : 3R fixed from TriggerSLTP.mqh | SL range filter 1.4..6.0 pip");
+   __TRGSTM_WriteLine(handle, "Target Model           : 3R fixed from TriggerSLTP.mqh | SL range filter " + DoubleToString(WB_Config_MinSLPips(), 2) + ".." + DoubleToString(WB_Config_MaxSLPips(), 2) + " pip");
    __TRGSTM_WriteLine(handle, "");
 
    __TRGSTM_WriteLine(handle, "EXECUTED TRADE LIST");
@@ -20435,14 +20450,14 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "USAGE NOTES");
    __TRGSTM_WriteLine(handle, "------------------------------------------------------------");
    __TRGSTM_WriteLine(handle, "1) This statement only evaluates triggers and state that already exist up to Scan To; in synchronized live updates, Scan To is the current trigger bar reached by the normal M1 scan.");
-   __TRGSTM_WriteLine(handle, "2) Legacy 3-loss M15 lockout is disabled; valid triggers are controlled by the imported M15 NEW window, the local M1 reference gate, the one-open-trade gate, and the 4-trade cap.");
-   __TRGSTM_WriteLine(handle, "3) Only one trade may be open at a time; any later trigger is skipped until the active trade closes.");
-   __TRGSTM_WriteLine(handle, "4) Post-win re-entry waiting is disabled; a trigger can execute only when no previous trade is still open.");
+   __TRGSTM_WriteLine(handle, "2) Legacy 3-loss M15 lockout is disabled; valid triggers are controlled by the imported M15 NEW window, the local M1 reference gate, the configured max-open-trades gate, and the configured per-signal trade cap.");
+   __TRGSTM_WriteLine(handle, "3) At most " + IntegerToString(WB_Config_MaxOpenTrades()) + " trade(s) may be open at the same time; any later trigger is skipped until enough active trades close.");
+   __TRGSTM_WriteLine(handle, "4) Post-win re-entry waiting is disabled; a trigger can execute only when the configured max-open-trades gate allows it.");
    __TRGSTM_WriteLine(handle, "5) There is no M1 trend-alignment execution gate; the imported M15->M1 signal window only controls trigger creation upstream.");
    __TRGSTM_WriteLine(handle, "6) Local M1 loss lockout is disabled; the accepted local HWX/HWBB/FSMS reference and distance gate are handled upstream in Trigger.mqh.");
    __TRGSTM_WriteLine(handle, "7) If the imported M15->M1 signal-off arrives, raw trigger creation stops upstream and the next M15 signal-on starts a new execution window.");
-   __TRGSTM_WriteLine(handle, "8) A new trigger is skipped whenever one previous trade is still open at that trigger time.");
-   __TRGSTM_WriteLine(handle, "9) Daily max loss is disabled in this version; only the one-open-trade gate and SL 1.4..6.0 pip filter are active.");
+   __TRGSTM_WriteLine(handle, "8) A new trigger is skipped whenever the number of already-open trades reaches " + IntegerToString(WB_Config_MaxOpenTrades()) + " at that trigger time.");
+   __TRGSTM_WriteLine(handle, "9) Daily max loss is disabled in this version; only the configured max-open-trades gate and SL " + DoubleToString(WB_Config_MinSLPips(), 2) + ".." + DoubleToString(WB_Config_MaxSLPips(), 2) + " pip filter are active.");
    __TRGSTM_WriteLine(handle, "10) Risk per executed trade is fixed on initial capital, not compounded trade-by-trade.");
    __TRGSTM_WriteLine(handle, "11) Ambiguous same-bar outcomes are counted conservatively as SL to avoid optimistic bias; SL is placed beyond the full Flip/MajicFlip zone.");
 
@@ -24311,6 +24326,223 @@ input double            InpTriggerStatementInitialCapital  = 10000.0;
 input double            InpTriggerStatementRiskPercent     = 1.0;
 input string            InpTriggerStatementFileTag         = "WaveBot_TriggerStatement";
 
+// ===== M1 trade-limit and SL runtime settings =====
+// These inputs are saved by the M15 chart and automatically reused by the M1 chart
+// through MetaTrader terminal GlobalVariables, so the same values do not need to
+// be entered twice when running the M15 master first and the M1 slave second.
+input int               InpM1MaxTradesPerM15NewSignal = 4;
+input int               InpM1MaxOpenTrades            = 1;
+input double            InpM1MinSLPips                 = 1.4;
+input double            InpM1MaxSLPips                 = 6.0;
+input int               InpM1MaxTradesPerLocalRef     = 2;
+
+#define WB_CFG_DEFAULT_MAX_TRADES_PER_M15_NEW 4
+#define WB_CFG_DEFAULT_MAX_OPEN_TRADES        1
+#define WB_CFG_DEFAULT_MIN_SL_PIPS            1.4
+#define WB_CFG_DEFAULT_MAX_SL_PIPS            6.0
+#define WB_CFG_DEFAULT_MAX_TRADES_LOCAL_REF   2
+
+int    g_WB_M1MaxTradesPerM15NewSignal = WB_CFG_DEFAULT_MAX_TRADES_PER_M15_NEW;
+int    g_WB_M1MaxOpenTrades            = WB_CFG_DEFAULT_MAX_OPEN_TRADES;
+double g_WB_M1MinSLPips                 = WB_CFG_DEFAULT_MIN_SL_PIPS;
+double g_WB_M1MaxSLPips                 = WB_CFG_DEFAULT_MAX_SL_PIPS;
+int    g_WB_M1MaxTradesPerLocalRef     = WB_CFG_DEFAULT_MAX_TRADES_LOCAL_REF;
+bool   g_WB_M1RuntimeConfigLoadedFromTerminal = false;
+
+inline string __WB_ConfigSymbolKeyPart()
+{
+   string sym = InpSymbol;
+   if(sym == "")
+      sym = _Symbol;
+   if(sym == "")
+      sym = "DEFAULT";
+   return sym;
+}
+
+inline string __WB_ConfigGVKey(const string suffix)
+{
+   return "WaveBot.M1RuntimeConfig." + __WB_ConfigSymbolKeyPart() + "." + suffix;
+}
+
+inline int __WB_ConfigNormalizeInt(const int value, const int fallback, const int minimum)
+{
+   int v = value;
+   if(v < minimum)
+      v = fallback;
+   if(v < minimum)
+      v = minimum;
+   return v;
+}
+
+inline double __WB_ConfigNormalizeDouble(const double value, const double fallback, const double minimum)
+{
+   double v = value;
+   if(v < minimum)
+      v = fallback;
+   if(v < minimum)
+      v = minimum;
+   return v;
+}
+
+inline void __WB_ConfigNormalizeRuntime()
+{
+   g_WB_M1MaxTradesPerM15NewSignal = __WB_ConfigNormalizeInt(g_WB_M1MaxTradesPerM15NewSignal,
+                                                             WB_CFG_DEFAULT_MAX_TRADES_PER_M15_NEW,
+                                                             1);
+   g_WB_M1MaxOpenTrades            = __WB_ConfigNormalizeInt(g_WB_M1MaxOpenTrades,
+                                                             WB_CFG_DEFAULT_MAX_OPEN_TRADES,
+                                                             1);
+   g_WB_M1MaxTradesPerLocalRef     = __WB_ConfigNormalizeInt(g_WB_M1MaxTradesPerLocalRef,
+                                                             WB_CFG_DEFAULT_MAX_TRADES_LOCAL_REF,
+                                                             1);
+
+   g_WB_M1MinSLPips = __WB_ConfigNormalizeDouble(g_WB_M1MinSLPips,
+                                                 WB_CFG_DEFAULT_MIN_SL_PIPS,
+                                                 0.0);
+   g_WB_M1MaxSLPips = __WB_ConfigNormalizeDouble(g_WB_M1MaxSLPips,
+                                                 WB_CFG_DEFAULT_MAX_SL_PIPS,
+                                                 0.0);
+
+   if(g_WB_M1MaxSLPips <= 0.0)
+      g_WB_M1MaxSLPips = WB_CFG_DEFAULT_MAX_SL_PIPS;
+
+   if(g_WB_M1MinSLPips > g_WB_M1MaxSLPips)
+   {
+      double tmp = g_WB_M1MinSLPips;
+      g_WB_M1MinSLPips = g_WB_M1MaxSLPips;
+      g_WB_M1MaxSLPips = tmp;
+   }
+}
+
+inline void __WB_ConfigApplyInputs()
+{
+   g_WB_M1MaxTradesPerM15NewSignal = InpM1MaxTradesPerM15NewSignal;
+   g_WB_M1MaxOpenTrades            = InpM1MaxOpenTrades;
+   g_WB_M1MinSLPips                = InpM1MinSLPips;
+   g_WB_M1MaxSLPips                = InpM1MaxSLPips;
+   g_WB_M1MaxTradesPerLocalRef     = InpM1MaxTradesPerLocalRef;
+   g_WB_M1RuntimeConfigLoadedFromTerminal = false;
+   __WB_ConfigNormalizeRuntime();
+}
+
+inline bool __WB_ConfigLoadInt(const string suffix, int &out_value)
+{
+   string key = __WB_ConfigGVKey(suffix);
+   if(!GlobalVariableCheck(key))
+      return false;
+
+   out_value = (int)MathRound(GlobalVariableGet(key));
+   return true;
+}
+
+inline bool __WB_ConfigLoadDouble(const string suffix, double &out_value)
+{
+   string key = __WB_ConfigGVKey(suffix);
+   if(!GlobalVariableCheck(key))
+      return false;
+
+   out_value = GlobalVariableGet(key);
+   return true;
+}
+
+inline bool __WB_ConfigLoadFromTerminal()
+{
+   bool loaded = false;
+
+   int vi = 0;
+   double vd = 0.0;
+
+   if(__WB_ConfigLoadInt("MaxTradesPerM15NewSignal", vi))
+   {
+      g_WB_M1MaxTradesPerM15NewSignal = vi;
+      loaded = true;
+   }
+   if(__WB_ConfigLoadInt("MaxOpenTrades", vi))
+   {
+      g_WB_M1MaxOpenTrades = vi;
+      loaded = true;
+   }
+   if(__WB_ConfigLoadDouble("MinSLPips", vd))
+   {
+      g_WB_M1MinSLPips = vd;
+      loaded = true;
+   }
+   if(__WB_ConfigLoadDouble("MaxSLPips", vd))
+   {
+      g_WB_M1MaxSLPips = vd;
+      loaded = true;
+   }
+   if(__WB_ConfigLoadInt("MaxTradesPerLocalRef", vi))
+   {
+      g_WB_M1MaxTradesPerLocalRef = vi;
+      loaded = true;
+   }
+
+   __WB_ConfigNormalizeRuntime();
+   g_WB_M1RuntimeConfigLoadedFromTerminal = loaded;
+   return loaded;
+}
+
+inline void __WB_ConfigSaveToTerminal()
+{
+   __WB_ConfigNormalizeRuntime();
+
+   GlobalVariableSet(__WB_ConfigGVKey("MaxTradesPerM15NewSignal"), (double)g_WB_M1MaxTradesPerM15NewSignal);
+   GlobalVariableSet(__WB_ConfigGVKey("MaxOpenTrades"),            (double)g_WB_M1MaxOpenTrades);
+   GlobalVariableSet(__WB_ConfigGVKey("MinSLPips"),                g_WB_M1MinSLPips);
+   GlobalVariableSet(__WB_ConfigGVKey("MaxSLPips"),                g_WB_M1MaxSLPips);
+   GlobalVariableSet(__WB_ConfigGVKey("MaxTradesPerLocalRef"),     (double)g_WB_M1MaxTradesPerLocalRef);
+   GlobalVariableSet(__WB_ConfigGVKey("SavedAt"),                  (double)TimeCurrent());
+}
+
+inline void WB_ConfigInitialize(const bool save_inputs_to_terminal,
+                                const bool load_saved_from_terminal)
+{
+   __WB_ConfigApplyInputs();
+
+   if(load_saved_from_terminal)
+      __WB_ConfigLoadFromTerminal();
+
+   if(save_inputs_to_terminal)
+      __WB_ConfigSaveToTerminal();
+}
+
+inline int WB_Config_MaxTradesPerM15NewSignal()
+{
+   return __WB_ConfigNormalizeInt(g_WB_M1MaxTradesPerM15NewSignal,
+                                  WB_CFG_DEFAULT_MAX_TRADES_PER_M15_NEW,
+                                  1);
+}
+
+inline int WB_Config_MaxOpenTrades()
+{
+   return __WB_ConfigNormalizeInt(g_WB_M1MaxOpenTrades,
+                                  WB_CFG_DEFAULT_MAX_OPEN_TRADES,
+                                  1);
+}
+
+inline double WB_Config_MinSLPips()
+{
+   return g_WB_M1MinSLPips;
+}
+
+inline double WB_Config_MaxSLPips()
+{
+   return g_WB_M1MaxSLPips;
+}
+
+inline int WB_Config_MaxTradesPerLocalRef()
+{
+   return __WB_ConfigNormalizeInt(g_WB_M1MaxTradesPerLocalRef,
+                                  WB_CFG_DEFAULT_MAX_TRADES_LOCAL_REF,
+                                  1);
+}
+
+inline string WB_Config_SourceText()
+{
+   return (g_WB_M1RuntimeConfigLoadedFromTerminal ? "terminal-global-from-M15" : "ea-inputs");
+}
+
 // ===== Includes (??? ?? Inputs) =====
 #include <WaveBot/Utils.mqh>
 #include <WaveBot/Data.mqh>
@@ -24918,6 +25150,9 @@ int OnInit()
 {
    g_role = __WB_DetectRole();
 
+   WB_ConfigInitialize((g_role == WBROLE_MASTER_M15 || g_role == WBROLE_STANDALONE),
+                       (g_role == WBROLE_SLAVE_M1));
+
    datetime __wblog_scan_from = 0;
    datetime __wblog_scan_to   = 0;
    ResolveWindow(__wblog_scan_from, __wblog_scan_to);
@@ -24948,10 +25183,18 @@ int OnInit()
    WBLOG_LogParam("InpEnableTriggerStatement", (InpEnableTriggerStatement ? "true" : "false"), "input");
    WBLOG_LogParam("InpTriggerStatementInitialCapital", DoubleToString(InpTriggerStatementInitialCapital, 2), "input");
    WBLOG_LogParam("InpTriggerStatementRiskPercent", DoubleToString(InpTriggerStatementRiskPercent, 4), "input");
-   WBLOG_LogParam("TRGSL_MIN_RISK_PIPS", "1.4", "TriggerSLTP.mqh");
-   WBLOG_LogParam("TRGSL_MAX_RISK_PIPS", "6.0", "TriggerSLTP.mqh");
+   WBLOG_LogParam("InpM1MaxTradesPerM15NewSignal", IntegerToString(InpM1MaxTradesPerM15NewSignal), "input");
+   WBLOG_LogParam("InpM1MaxOpenTrades", IntegerToString(InpM1MaxOpenTrades), "input");
+   WBLOG_LogParam("InpM1MinSLPips", DoubleToString(InpM1MinSLPips, 2), "input");
+   WBLOG_LogParam("InpM1MaxSLPips", DoubleToString(InpM1MaxSLPips, 2), "input");
+   WBLOG_LogParam("InpM1MaxTradesPerLocalRef", IntegerToString(InpM1MaxTradesPerLocalRef), "input");
+   WBLOG_LogParam("M1RuntimeConfigSource", WB_Config_SourceText(), "WaveBot.mq5");
+   WBLOG_LogParam("M1_MAX_TRADES_PER_M15_NEW_SIGNAL", IntegerToString(WB_Config_MaxTradesPerM15NewSignal()), "runtime-config");
+   WBLOG_LogParam("M1_MAX_OPEN_TRADES", IntegerToString(WB_Config_MaxOpenTrades()), "runtime-config");
+   WBLOG_LogParam("TRGSL_MIN_RISK_PIPS", DoubleToString(WB_Config_MinSLPips(), 2), "runtime-config");
+   WBLOG_LogParam("TRGSL_MAX_RISK_PIPS", DoubleToString(WB_Config_MaxSLPips(), 2), "runtime-config");
    WBLOG_LogParam("TRGSL_R_MULTIPLE", "3.0", "TriggerSLTP.mqh");
-   WBLOG_LogParam("M1_LOCAL_REF_MAX_TRADES", "2", "Trigger.mqh");
+   WBLOG_LogParam("M1_LOCAL_REF_MAX_TRADES", IntegerToString(WB_Config_MaxTradesPerLocalRef()), "runtime-config");
    WBLOG_LogParam("M1_LOCAL_REF_MTC_INVALIDATION", "true", "RaceCoordinator.mqh");
 
    // Ensure WorldManager captures clean baselines before any scan starts
@@ -27461,3 +27704,4 @@ inline bool WorldMinor_CheckMinorOff(const MqlRates &bar, const int bar_idx)
 
 #endif // WAVEBOT_WORLDMINOR_MQH
 // END FILE 44: WorldMinor.mqh
+

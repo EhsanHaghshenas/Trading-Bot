@@ -5,8 +5,8 @@
 #include <WaveBot/Markers.mqh>
 #include <WaveBot/WaveBotLogger.mqh>
 
-#define TRGSL_MIN_RISK_PIPS 1.4
-#define TRGSL_MAX_RISK_PIPS 6.0
+#define TRGSL_MIN_RISK_PIPS WB_Config_MinSLPips()
+#define TRGSL_MAX_RISK_PIPS WB_Config_MaxSLPips()
 #define TRGSL_R_MULTIPLE    3.0
 #define TRGSL_FORWARD_BARS  4
 
@@ -304,14 +304,15 @@ inline bool __TRGSL_RecordClosedAtOrBefore(const TriggerSLTPRecord &rec,
    return false;
 }
 
-inline bool __TRGSL_HasOpenTradeBefore(const string    sym,
-                                       const MqlRates &rates[],
-                                       const int       n,
-                                       const datetime  current_time)
+inline int __TRGSL_OpenTradeCountBefore(const string    sym,
+                                         const MqlRates &rates[],
+                                         const int       n,
+                                         const datetime  current_time)
 {
    if(current_time <= 0)
-      return false;
+      return 0;
 
+   int opened = 0;
    int total = ArraySize(g_trgsl_records);
    for(int i = 0; i < total; ++i)
    {
@@ -326,10 +327,18 @@ inline bool __TRGSL_HasOpenTradeBefore(const string    sym,
          continue;
 
       if(!__TRGSL_RecordClosedAtOrBefore(rec, rates, n, current_time))
-         return true;
+         opened++;
    }
 
-   return false;
+   return opened;
+}
+
+inline bool __TRGSL_MaxOpenTradesReachedBefore(const string    sym,
+                                               const MqlRates &rates[],
+                                               const int       n,
+                                               const datetime  current_time)
+{
+   return (__TRGSL_OpenTradeCountBefore(sym, rates, n, current_time) >= WB_Config_MaxOpenTrades());
 }
 
 inline bool __TRGSL_BuildBull(const string    sym,
@@ -453,7 +462,7 @@ inline void TriggerSLTP_OnTriggerFired(const string    sym,
 
    if(hit_idx >= 0 && hit_idx < n)
    {
-      if(__TRGSL_HasOpenTradeBefore(use_sym, rates, n, rates[hit_idx].time))
+      if(__TRGSL_MaxOpenTradesReachedBefore(use_sym, rates, n, rates[hit_idx].time))
       {
          WBLOG_LogRejectedTrigger(type_id,
                                   dir,
@@ -463,11 +472,11 @@ inline void TriggerSLTP_OnTriggerFired(const string    sym,
                                   rates[hit_idx].high,
                                   rates[hit_idx].low,
                                   rates[hit_idx].close,
-                                  "one_open_trade_limit",
+                                  "max_open_trades_limit",
                                   0.0,
                                   0.0,
                                   0.0,
-                                  "TriggerSLTP_OnTriggerFired_one_open_gate");
+                                  "TriggerSLTP_OnTriggerFired_max_open_gate");
 
          if(InpDebugPrints)
          {
@@ -476,7 +485,8 @@ inline void TriggerSLTP_OnTriggerFired(const string    sym,
                   " trigger | breakout=", DoubleToString(level, __TRGSL_DigitsOf(use_sym)),
                   " | src_idx=", src_idx,
                   " | hit_idx=", hit_idx,
-                  " | reason=one_open_trade_already_active");
+                  " | reason=max_open_trades_limit_reached",
+                  " | max_open=", IntegerToString(WB_Config_MaxOpenTrades()));
          }
          return;
       }
@@ -508,7 +518,7 @@ inline void TriggerSLTP_OnTriggerFired(const string    sym,
                                   rates[hit_idx].high,
                                   rates[hit_idx].low,
                                   rates[hit_idx].close,
-                                  "risk_outside_1_4_to_6pip_or_bad_flip_zone_range",
+                                  "risk_outside_configured_sl_range_or_bad_flip_zone_range",
                                   approx_risk_pips,
                                   0.0,
                                   0.0,
@@ -522,7 +532,9 @@ inline void TriggerSLTP_OnTriggerFired(const string    sym,
                " trigger | breakout=", DoubleToString(level, __TRGSL_DigitsOf(use_sym)),
                " | src_idx=", src_idx,
                " | hit_idx=", hit_idx,
-               " | reason=risk_outside_1_4_to_6pip_or_bad_flip_zone_range");
+               " | reason=risk_outside_configured_sl_range_or_bad_flip_zone_range",
+               " | min_sl=", DoubleToString(WB_Config_MinSLPips(), 2),
+               " | max_sl=", DoubleToString(WB_Config_MaxSLPips(), 2));
       }
       return;
    }

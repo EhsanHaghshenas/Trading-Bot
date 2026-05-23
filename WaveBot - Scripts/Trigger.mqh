@@ -24,11 +24,13 @@ bool TriggerStatement_ScheduledOutputMaybeAt(const datetime current_time);
 //     and Trigger Type 2 = Majicflip.mqh can become trades.
 //   - A Flip/MajicFlip trigger must be closer to the accepted local reference
 //     candle than to the relevant first-candle barrier.
-//   - Each accepted local M1 HWX/HWBB/FSMS reference is valid for max 2
-//     accepted trades only; after that, M1 must wait for the next local reference.
+//   - Each accepted local M1 HWX/HWBB/FSMS reference is valid for a
+//     configurable max trade count (default 2); after that, M1 must wait
+//     for the next local reference.
 //   - If any MTC forms after the accepted local M1 reference, that local reference
 //     is invalidated immediately and no further Flip/MajicFlip trigger may use it.
-//   - Each imported M15 "new" signal is still retired after 4 actual trades.
+//   - Each imported M15 "new" signal is retired after a configurable
+//     actual trade count (default 4).
 //   - Legacy execution restrictions are disabled in TriggerStatement.mqh.
 // ============================================================================
 
@@ -823,8 +825,8 @@ inline bool __TRG_SetActiveWindow(const bool      new_active,
       eff_zone_low = tmpz;
    }
 
-   // A M15 "new" window is retired after 4 actual trades. Historical window
-   // recomputation must not revive the same start sequence again.
+   // A M15 "new" window is retired after the configured actual-trade cap.
+   // Historical window recomputation must not revive the same start sequence again.
    if(eff_active && eff_start_seq == g_trigger_core.retired_start_seq)
    {
       eff_active     = false;
@@ -1355,7 +1357,7 @@ inline bool Trigger_M1LocalGateRegister(const Direction dir,
    if(g_trigger_core.active_start_seq == g_trigger_core.retired_start_seq)
       return false;
 
-   if(g_trigger_core.active_trade_count >= 4)
+   if(g_trigger_core.active_trade_count >= WB_Config_MaxTradesPerM15NewSignal())
       return false;
 
    if(g_trigger_core.local_ref_ready)
@@ -1454,10 +1456,10 @@ inline bool __TRG_CanAcceptPatternTrigger(const int       type_id,
    if(g_trigger_core.active_start_seq == g_trigger_core.retired_start_seq)
       return false;
 
-   if(g_trigger_core.active_trade_count >= 4)
+   if(g_trigger_core.active_trade_count >= WB_Config_MaxTradesPerM15NewSignal())
       return false;
 
-   if(g_trigger_core.local_ref_trade_count >= 2)
+   if(g_trigger_core.local_ref_trade_count >= WB_Config_MaxTradesPerLocalRef())
       return false;
 
    string reason = "";
@@ -1626,14 +1628,14 @@ inline void __TRG_FirePatternTrigger(const int       type_id,
       if(rates[hit_idx].time > g_trigger_pending_refresh_time)
          g_trigger_pending_refresh_time = rates[hit_idx].time;
 
-      if(g_trigger_core.active_trade_count >= 4)
+      if(g_trigger_core.active_trade_count >= WB_Config_MaxTradesPerM15NewSignal())
       {
          __TRG_RetireActiveWindowAfterTradeLimit(rates[hit_idx].time);
       }
       else
-      if(g_trigger_core.local_ref_trade_count >= 2)
+      if(g_trigger_core.local_ref_trade_count >= WB_Config_MaxTradesPerLocalRef())
       {
-         __TRG_InvalidateLocalM1Reference("LOCAL_REFERENCE_TWO_TRADE_LIMIT", rates[hit_idx].time);
+         __TRG_InvalidateLocalM1Reference("LOCAL_REFERENCE_MAX_TRADE_LIMIT", rates[hit_idx].time);
       }
    }
 }
@@ -1701,7 +1703,7 @@ inline void __TRG_ProcessLoadedBar(const string    sym,
                                   g_trigger_core.active_start_time,
                                   g_trigger_core.active_start_bar_time);
 
-   if(!g_trigger_core.local_ref_ready || g_trigger_core.active_trade_count >= 4)
+   if(!g_trigger_core.local_ref_ready || g_trigger_core.active_trade_count >= WB_Config_MaxTradesPerM15NewSignal())
    {
       TriggerStatement_ScheduledOutputMaybeAt(bar_time);
       g_trigger_core.last_processed_time = bar_time;

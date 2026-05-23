@@ -1,0 +1,90 @@
+WaveBot Configurable M1 Limits - Apply Guide
+============================================
+
+Base version:
+- WaveBot_FSMSLifecycle_BOM_HeaderCleanup_Update
+
+Purpose:
+- Make M1 restriction items 7, 8, 9, 10 and 12 configurable from EA inputs.
+- Keep the exact current default behavior unless the user changes the new inputs.
+- Save the values entered on the M15 chart and automatically reuse them on the M1 chart.
+
+Files changed:
+
+1) WaveBot.mq5
+   Location: after the existing Trigger Statement inputs and before the include block.
+   Added new EA inputs:
+   - InpM1MaxTradesPerM15NewSignal = 4
+   - InpM1MaxOpenTrades = 1
+   - InpM1MinSLPips = 1.4
+   - InpM1MaxSLPips = 6.0
+   - InpM1MaxTradesPerLocalRef = 2
+
+   Added runtime config helpers:
+   - WB_ConfigInitialize(...)
+   - WB_Config_MaxTradesPerM15NewSignal()
+   - WB_Config_MaxOpenTrades()
+   - WB_Config_MinSLPips()
+   - WB_Config_MaxSLPips()
+   - WB_Config_MaxTradesPerLocalRef()
+
+   Location: OnInit(), immediately after:
+      g_role = __WB_DetectRole();
+   Added:
+      WB_ConfigInitialize((g_role == WBROLE_MASTER_M15 || g_role == WBROLE_STANDALONE),
+                          (g_role == WBROLE_SLAVE_M1));
+
+   Behavior:
+   - M15 Master saves the configured values into terminal GlobalVariables.
+   - M1 Slave loads those saved values automatically.
+   - If no saved M15 values exist, M1 uses its own EA input/default values.
+
+2) Trigger.mqh
+   Replaced hardcoded trade caps:
+   - active_trade_count >= 4
+     with:
+     active_trade_count >= WB_Config_MaxTradesPerM15NewSignal()
+
+   - local_ref_trade_count >= 2
+     with:
+     local_ref_trade_count >= WB_Config_MaxTradesPerLocalRef()
+
+   This keeps the current defaults but makes both limits configurable.
+
+3) TriggerSLTP.mqh
+   Replaced hardcoded SL limits:
+   - TRGSL_MIN_RISK_PIPS 1.4
+   - TRGSL_MAX_RISK_PIPS 6.0
+   with runtime values from:
+   - WB_Config_MinSLPips()
+   - WB_Config_MaxSLPips()
+
+   Updated the open-trade gate:
+   - Previously: any open trade blocked new trades.
+   - Now: new trades are blocked only when open trades >= WB_Config_MaxOpenTrades().
+   - Default remains 1, so current behavior is unchanged unless the input is changed.
+
+4) TriggerStatement.mqh
+   Replaced hardcoded max-open-trade value:
+   - TRGSTMT_MAX_OPEN_TRADES 1
+   with:
+   - WB_Config_MaxOpenTrades()
+
+   Updated Statement text so it reports the effective configured values instead of fixed text.
+
+Unchanged:
+- M15/M1 bridge logic
+- M1 local HWX/HWBB/FSMS reference gate
+- Flip/MajicFlip trigger logic
+- MTC invalidation logic
+- SL placement outside the full Flip/MajicFlip zone
+- NoCSV/NoLogFolder behavior
+- TXT Statement output
+- Marker display logic
+
+Usage:
+1) Attach WaveBot to the M15 chart first.
+2) Change the new M1 limit inputs there if needed.
+3) Start the M15 EA.
+4) Attach WaveBot to the M1 chart.
+5) The M1 EA will automatically load the values saved by the M15 EA for the same InpSymbol.
