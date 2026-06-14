@@ -315,6 +315,42 @@ inline bool WB15_MasterDoneInfo(const string sym, datetime &scan_end_time, int &
    return true;
 }
 
+inline int WB15_BridgeEventCount(const string sym)
+{
+   const string kSeq = __WB15_Key(sym, "SEQ");
+   if(!GlobalVariableCheck(kSeq))
+      return 0;
+   int seq = (int)GlobalVariableGet(kSeq);
+   if(seq < 0) seq = 0;
+   return seq;
+}
+
+inline int WB15_BridgeStartEventCount(const string sym)
+{
+   int count = 0;
+   const int seq = WB15_BridgeEventCount(sym);
+
+   for(int i=1; i<=seq; ++i)
+   {
+      const string kc = __WB15_KeyC(sym, i);
+      if(!GlobalVariableCheck(kc))
+         continue;
+
+      const int code = (int)GlobalVariableGet(kc);
+      const int kind = code / 100;
+
+      if(kind == WB15_KIND_START_HWX ||
+         kind == WB15_KIND_START_HWBB ||
+         kind == WB15_KIND_START_FSMS ||
+         kind == WB15_KIND_START_GOOZBAGHALI)
+      {
+         count++;
+      }
+   }
+
+   return count;
+}
+
 inline void WB15_MasterPushEvent(const string sym,
                                 const int kind,
                                 const int ns,
@@ -332,11 +368,13 @@ inline void WB15_MasterPushEvent(const string sym,
    if(!__WB15_IsMaster()) return;
    if(t <= 0) return;
 
-   // MIN world is executed by WorldManager in preview mode.
-   // We still must publish bridge events there, otherwise M1 never sees
-   // MIN-origin M15 signal on/off windows in real time.
-   if(Markers_IsPreviewMode() && ns != WB15_NS_MIN)
-      return;
+   // Preview mode must suppress chart objects only.
+   // It must NOT suppress bridge publication.
+   // In Central Multi-Symbol mode the non-primary symbols are scanned in
+   // preview mode to keep the EURUSD chart clean, but their M15 START/STOP
+   // events still have to be written to terminal GlobalVariables so the M1
+   // slave can import and evaluate their own signal windows.
+   // MIN-world preview events are also allowed for the same reason.
 
    const string kDed = __WB15_Key(sym, "DED_"
                                        + IntegerToString(kind) + "_"

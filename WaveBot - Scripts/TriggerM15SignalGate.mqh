@@ -92,6 +92,26 @@ inline bool TriggerM15SignalGate_EventGet(const int index,
    return true;
 }
 
+
+inline int TriggerM15SignalGate_EventsExport(TriggerM15SignalGateEvent &out[], int &seq_out)
+{
+   int n = ArraySize(g_trgm15_events);
+   ArrayResize(out, n);
+   for(int i=0; i<n; ++i)
+      out[i] = g_trgm15_events[i];
+   seq_out = g_trgm15_seq;
+   return n;
+}
+
+inline void TriggerM15SignalGate_EventsImport(const TriggerM15SignalGateEvent &in_events[], const int seq_in)
+{
+   int n = ArraySize(in_events);
+   ArrayResize(g_trgm15_events, n);
+   for(int i=0; i<n; ++i)
+      g_trgm15_events[i] = in_events[i];
+   g_trgm15_seq = seq_in;
+}
+
 inline datetime __TRGM15_M15CloseActivationTime(const datetime bar_open_time)
 {
    if(bar_open_time <= 0)

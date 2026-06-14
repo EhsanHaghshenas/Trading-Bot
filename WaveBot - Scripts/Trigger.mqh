@@ -108,6 +108,17 @@ static string            g_trigger_symbol = "";
 static datetime          g_trigger_pending_refresh_time = 0;
 static int               g_trigger_apply_next_event = 0;
 static datetime          g_trigger_apply_last_time  = 0;
+static bool              g_trigger_central_actual_cap_mode = false;
+
+inline void Trigger_SetCentralActualCapMode(const bool enabled)
+{
+   g_trigger_central_actual_cap_mode = enabled;
+}
+
+inline bool Trigger_CentralActualCapMode()
+{
+   return g_trigger_central_actual_cap_mode;
+}
 
 // Hard terminal boundary for the historical M1 scan.
 // When WaveBot.mq5 finishes the one-shot M1 pass, live timer processing must not
@@ -640,6 +651,7 @@ inline void Trigger_ResetGlobals()
    g_trigger_pending_refresh_time = 0;
    g_trigger_apply_next_event = 0;
    g_trigger_apply_last_time  = 0;
+   g_trigger_central_actual_cap_mode = false;
    g_trigger_m1_hard_stop_enabled     = false;
    g_trigger_m1_hard_stop_time        = 0;
    g_trigger_m1_terminal_stop_mode    = false;
@@ -1357,7 +1369,7 @@ inline bool Trigger_M1LocalGateRegister(const Direction dir,
    if(g_trigger_core.active_start_seq == g_trigger_core.retired_start_seq)
       return false;
 
-   if(g_trigger_core.active_trade_count >= WB_Config_MaxTradesPerM15NewSignal())
+   if(!g_trigger_central_actual_cap_mode && g_trigger_core.active_trade_count >= WB_Config_MaxTradesPerM15NewSignal())
       return false;
 
    if(g_trigger_core.local_ref_ready)
@@ -1456,10 +1468,10 @@ inline bool __TRG_CanAcceptPatternTrigger(const int       type_id,
    if(g_trigger_core.active_start_seq == g_trigger_core.retired_start_seq)
       return false;
 
-   if(g_trigger_core.active_trade_count >= WB_Config_MaxTradesPerM15NewSignal())
+   if(!g_trigger_central_actual_cap_mode && g_trigger_core.active_trade_count >= WB_Config_MaxTradesPerM15NewSignal())
       return false;
 
-   if(g_trigger_core.local_ref_trade_count >= WB_Config_MaxTradesPerLocalRef())
+   if(!g_trigger_central_actual_cap_mode && g_trigger_core.local_ref_trade_count >= WB_Config_MaxTradesPerLocalRef())
       return false;
 
    string reason = "";
@@ -1622,20 +1634,23 @@ inline void __TRG_FirePatternTrigger(const int       type_id,
 
    if(__trgsl_record_added)
    {
-      g_trigger_core.active_trade_count++;
-      g_trigger_core.local_ref_trade_count++;
-
       if(rates[hit_idx].time > g_trigger_pending_refresh_time)
          g_trigger_pending_refresh_time = rates[hit_idx].time;
 
-      if(g_trigger_core.active_trade_count >= WB_Config_MaxTradesPerM15NewSignal())
+      if(!g_trigger_central_actual_cap_mode)
       {
-         __TRG_RetireActiveWindowAfterTradeLimit(rates[hit_idx].time);
-      }
-      else
-      if(g_trigger_core.local_ref_trade_count >= WB_Config_MaxTradesPerLocalRef())
-      {
-         __TRG_InvalidateLocalM1Reference("LOCAL_REFERENCE_MAX_TRADE_LIMIT", rates[hit_idx].time);
+         g_trigger_core.active_trade_count++;
+         g_trigger_core.local_ref_trade_count++;
+
+         if(g_trigger_core.active_trade_count >= WB_Config_MaxTradesPerM15NewSignal())
+         {
+            __TRG_RetireActiveWindowAfterTradeLimit(rates[hit_idx].time);
+         }
+         else
+         if(g_trigger_core.local_ref_trade_count >= WB_Config_MaxTradesPerLocalRef())
+         {
+            __TRG_InvalidateLocalM1Reference("LOCAL_REFERENCE_MAX_TRADE_LIMIT", rates[hit_idx].time);
+         }
       }
    }
 }
@@ -1703,7 +1718,8 @@ inline void __TRG_ProcessLoadedBar(const string    sym,
                                   g_trigger_core.active_start_time,
                                   g_trigger_core.active_start_bar_time);
 
-   if(!g_trigger_core.local_ref_ready || g_trigger_core.active_trade_count >= WB_Config_MaxTradesPerM15NewSignal())
+   if(!g_trigger_core.local_ref_ready ||
+      (!g_trigger_central_actual_cap_mode && g_trigger_core.active_trade_count >= WB_Config_MaxTradesPerM15NewSignal()))
    {
       TriggerStatement_ScheduledOutputMaybeAt(bar_time);
       g_trigger_core.last_processed_time = bar_time;

@@ -9,10 +9,10 @@ extern int g_scan_id;  // defined in WaveBot.mq5
 // Empty => legacy behavior (no extra namespace).
 static string g_markers_ns = "";
 
-// Preview mode is used by WorldManager while a MIN session is still open.
-// In preview mode, chart objects stay silent.
-// Bridge publication is still allowed for MIN-origin H4 signal on/off events,
-// so the live M15 trigger engine can react immediately.
+// Preview mode is used by WorldManager and by Central Multi-Symbol non-primary
+// passes. In preview mode, chart objects stay silent only. Signal/bridge
+// publication must remain active so non-visual symbols still generate valid
+// M15->M1 windows and can be traded/reported independently.
 static bool   g_markers_preview_mode = false;
 
 // set/get world namespace (used later by WorldManager)
@@ -25,6 +25,7 @@ inline bool Markers_ShouldRender()
 {
    if(!InpDrawMarkers) return false;
    if(g_markers_preview_mode) return false;
+   if(!WB_RuntimeAllowMarkerRender()) return false;
    return true;
 }
 

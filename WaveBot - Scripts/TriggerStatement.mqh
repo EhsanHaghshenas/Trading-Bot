@@ -28,6 +28,16 @@
 #define TRGSTMT_SKIP_LOCAL_LOCKOUT     6
 #define TRGSTMT_SKIP_MAX_OPEN_TRADES   7
 #define TRGSTMT_SKIP_DAILY_LOSS_LIMIT  8
+#define TRGSTMT_SKIP_CENTRAL_MAX_OPEN      9
+#define TRGSTMT_SKIP_CENTRAL_M15_CAP       10
+#define TRGSTMT_SKIP_CENTRAL_LOCAL_REF_CAP 11
+#define TRGSTMT_SKIP_CENTRAL_MISSING       12
+
+#define TRGSTMT_CENTRAL_ALLOW               0
+#define TRGSTMT_CENTRAL_BLOCK_MAX_OPEN      1
+#define TRGSTMT_CENTRAL_BLOCK_M15_CAP       2
+#define TRGSTMT_CENTRAL_BLOCK_LOCAL_REF_CAP 3
+#define TRGSTMT_CENTRAL_DECISION_MISSING    4
 
 #define TRGSTMT_NS_MAJ                 0
 #define TRGSTMT_NS_MIN                 1
@@ -129,6 +139,166 @@ static datetime        g_trgstmt_scheduled_output_at      = 0;
 static bool            g_trgstmt_scheduled_output_done    = false;
 static bool            g_trgstmt_scheduled_output_busy    = false;
 
+struct TriggerStatementSummary
+{
+   bool   valid;
+   string symbol;
+   int    raw_valid_triggers;
+   int    executed_trades;
+   int    ignored_valid_triggers;
+   int    closed_trades;
+   int    open_trades;
+   int    wins;
+   int    losses;
+   double win_rate;
+   double gross_profit;
+   double gross_loss;
+   double net_profit;
+   double profit_factor;
+   double max_drawdown_money;
+   double max_drawdown_pct;
+};
+
+static TriggerStatementSummary g_trgstmt_last_summary;
+
+// Central multi-symbol execution gate.
+// In Central Multi-Symbol mode, raw valid triggers are still detected inside
+// each symbol's own isolated scan, but execution permission is decided once,
+// after all symbols have finished scanning, by merging every symbol's raw
+// triggers in chronological order.  This preserves each symbol's candle logic
+// while enforcing the account-wide one-open-trade rule correctly.
+static bool   g_trgstmt_central_gate_enabled = false;
+static string g_trgstmt_central_gate_keys[];
+static bool   g_trgstmt_central_gate_allowed[];
+static int    g_trgstmt_central_gate_reason[];
+
+inline string __TRGSTM_CentralReasonName(const int reason)
+{
+   if(reason == TRGSTMT_CENTRAL_ALLOW)               return "CENTRAL_MULTI_SYMBOL_GATE_OK";
+   if(reason == TRGSTMT_CENTRAL_BLOCK_MAX_OPEN)      return "CENTRAL_MULTI_SYMBOL_ONE_OPEN_BLOCK";
+   if(reason == TRGSTMT_CENTRAL_BLOCK_M15_CAP)       return "CENTRAL_MULTI_SYMBOL_M15_NEW_CAP_BLOCK";
+   if(reason == TRGSTMT_CENTRAL_BLOCK_LOCAL_REF_CAP) return "CENTRAL_MULTI_SYMBOL_LOCAL_REF_CAP_BLOCK";
+   if(reason == TRGSTMT_CENTRAL_DECISION_MISSING)    return "CENTRAL_MULTI_SYMBOL_DECISION_MISSING";
+   return "CENTRAL_MULTI_SYMBOL_UNKNOWN_BLOCK";
+}
+
+inline string __TRGSTM_CentralGateKey(const TriggerSLTPRecord &rec)
+{
+   return rec.symbol
+        + "|" + IntegerToString((long)rec.hit_time)
+        + "|" + IntegerToString((long)rec.src_time)
+        + "|" + IntegerToString(rec.type_id)
+        + "|" + IntegerToString(rec.serial)
+        + "|" + IntegerToString(rec.log_context_id)
+        + "|" + IntegerToString(rec.log_zone_id)
+        + "|" + IntegerToString(rec.log_m1_window_id);
+}
+
+inline void TriggerStatement_CentralGateReset()
+{
+   g_trgstmt_central_gate_enabled = false;
+   ArrayResize(g_trgstmt_central_gate_keys, 0);
+   ArrayResize(g_trgstmt_central_gate_allowed, 0);
+   ArrayResize(g_trgstmt_central_gate_reason, 0);
+}
+
+inline void TriggerStatement_CentralGateSetEnabled(const bool enabled)
+{
+   g_trgstmt_central_gate_enabled = enabled;
+}
+
+inline void TriggerStatement_CentralGateAddDecisionEx(const TriggerSLTPRecord &rec,
+                                                      const bool allow_execution,
+                                                      const int reason)
+{
+   string key = __TRGSTM_CentralGateKey(rec);
+   int n = ArraySize(g_trgstmt_central_gate_keys);
+   for(int i=0; i<n; ++i)
+   {
+      if(g_trgstmt_central_gate_keys[i] == key)
+      {
+         g_trgstmt_central_gate_allowed[i] = allow_execution;
+         g_trgstmt_central_gate_reason[i]  = reason;
+         return;
+      }
+   }
+
+   ArrayResize(g_trgstmt_central_gate_keys, n + 1);
+   ArrayResize(g_trgstmt_central_gate_allowed, n + 1);
+   ArrayResize(g_trgstmt_central_gate_reason, n + 1);
+   g_trgstmt_central_gate_keys[n]    = key;
+   g_trgstmt_central_gate_allowed[n] = allow_execution;
+   g_trgstmt_central_gate_reason[n]  = reason;
+}
+
+inline void TriggerStatement_CentralGateAddDecision(const TriggerSLTPRecord &rec,
+                                                    const bool allow_execution)
+{
+   TriggerStatement_CentralGateAddDecisionEx(rec,
+                                             allow_execution,
+                                             (allow_execution ? TRGSTMT_CENTRAL_ALLOW : TRGSTMT_CENTRAL_BLOCK_MAX_OPEN));
+}
+
+inline bool __TRGSTM_CentralGateDecisionEx(const TriggerSLTPRecord &rec,
+                                           bool &allow_execution,
+                                           int &reason)
+{
+   allow_execution = true;
+   reason          = TRGSTMT_CENTRAL_ALLOW;
+   if(!g_trgstmt_central_gate_enabled)
+      return false;
+
+   string key = __TRGSTM_CentralGateKey(rec);
+   int n = ArraySize(g_trgstmt_central_gate_keys);
+   for(int i=0; i<n; ++i)
+   {
+      if(g_trgstmt_central_gate_keys[i] == key)
+      {
+         allow_execution = g_trgstmt_central_gate_allowed[i];
+         reason          = g_trgstmt_central_gate_reason[i];
+         return true;
+      }
+   }
+
+   allow_execution = false;
+   reason          = TRGSTMT_CENTRAL_DECISION_MISSING;
+   return false;
+}
+
+inline bool __TRGSTM_CentralGateDecision(const TriggerSLTPRecord &rec,
+                                         bool &allow_execution)
+{
+   int reason = TRGSTMT_CENTRAL_ALLOW;
+   return __TRGSTM_CentralGateDecisionEx(rec, allow_execution, reason);
+}
+
+inline void TriggerStatementSummary_Clear(TriggerStatementSummary &s)
+{
+   s.valid = false;
+   s.symbol = "";
+   s.raw_valid_triggers = 0;
+   s.executed_trades = 0;
+   s.ignored_valid_triggers = 0;
+   s.closed_trades = 0;
+   s.open_trades = 0;
+   s.wins = 0;
+   s.losses = 0;
+   s.win_rate = 0.0;
+   s.gross_profit = 0.0;
+   s.gross_loss = 0.0;
+   s.net_profit = 0.0;
+   s.profit_factor = 0.0;
+   s.max_drawdown_money = 0.0;
+   s.max_drawdown_pct = 0.0;
+}
+
+inline bool TriggerStatement_LastSummary(TriggerStatementSummary &out)
+{
+   if(!g_trgstmt_last_summary.valid) return false;
+   out = g_trgstmt_last_summary;
+   return true;
+}
+
 inline void __TRGSTM_ClearTrade(TriggerStatementTrade &stmt_trade)
 {
    stmt_trade.valid                  = false;
@@ -182,6 +352,8 @@ inline void TriggerStatement_ResetGlobals()
    g_trgstmt_scheduled_output_done    = false;
    g_trgstmt_scheduled_output_busy    = false;
 
+   TriggerStatementSummary_Clear(g_trgstmt_last_summary);
+   TriggerStatement_CentralGateReset();
    TriggerM15SignalGate_ResetGlobals();
 }
 
@@ -546,7 +718,36 @@ inline string __TRGSTM_SkipReasonName(const int skip_reason)
       return "ONE_OPEN_TRADE_ALREADY_OPEN";
    if(skip_reason == TRGSTMT_SKIP_DAILY_LOSS_LIMIT)
       return "DAILY_3_5_PERCENT_LOSS_LIMIT";
+   if(skip_reason == TRGSTMT_SKIP_CENTRAL_MAX_OPEN)
+      return "CENTRAL_MULTI_SYMBOL_ONE_OPEN_BLOCK";
+   if(skip_reason == TRGSTMT_SKIP_CENTRAL_M15_CAP)
+      return "CENTRAL_MULTI_SYMBOL_M15_NEW_CAP_BLOCK";
+   if(skip_reason == TRGSTMT_SKIP_CENTRAL_LOCAL_REF_CAP)
+      return "CENTRAL_MULTI_SYMBOL_LOCAL_REF_CAP_BLOCK";
+   if(skip_reason == TRGSTMT_SKIP_CENTRAL_MISSING)
+      return "CENTRAL_MULTI_SYMBOL_DECISION_MISSING";
    return "-";
+}
+
+inline int __TRGSTM_SkipReasonFromCentralReason(const int central_reason)
+{
+   if(central_reason == TRGSTMT_CENTRAL_BLOCK_MAX_OPEN)
+      return TRGSTMT_SKIP_CENTRAL_MAX_OPEN;
+   if(central_reason == TRGSTMT_CENTRAL_BLOCK_M15_CAP)
+      return TRGSTMT_SKIP_CENTRAL_M15_CAP;
+   if(central_reason == TRGSTMT_CENTRAL_BLOCK_LOCAL_REF_CAP)
+      return TRGSTMT_SKIP_CENTRAL_LOCAL_REF_CAP;
+   if(central_reason == TRGSTMT_CENTRAL_DECISION_MISSING)
+      return TRGSTMT_SKIP_CENTRAL_MISSING;
+   return TRGSTMT_SKIP_CENTRAL_MISSING;
+}
+
+inline bool __TRGSTM_IsCentralSkipReason(const int skip_reason)
+{
+   return (skip_reason == TRGSTMT_SKIP_CENTRAL_MAX_OPEN
+        || skip_reason == TRGSTMT_SKIP_CENTRAL_M15_CAP
+        || skip_reason == TRGSTMT_SKIP_CENTRAL_LOCAL_REF_CAP
+        || skip_reason == TRGSTMT_SKIP_CENTRAL_MISSING);
 }
 
 inline string __TRGSTM_AppendNote(const string left_text,
@@ -3343,6 +3544,10 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    int skipped_local_lockout   = 0;
    int skipped_max_open_trades = 0;
    int skipped_daily_loss_limit= 0;
+   int skipped_central_open    = 0;
+   int skipped_central_m15_cap = 0;
+   int skipped_central_ref_cap = 0;
+   int skipped_central_missing = 0;
    int skipped_hypo_wins       = 0;
    int skipped_hypo_losses     = 0;
    int skipped_hypo_open       = 0;
@@ -3508,6 +3713,49 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
       int  skip_reason = TRGSTMT_SKIP_NONE;
       string skip_note = "";
 
+      bool central_gate_allow = true;
+      int  central_gate_reason = TRGSTMT_CENTRAL_ALLOW;
+      bool central_gate_found = __TRGSTM_CentralGateDecisionEx(trades[i].rec, central_gate_allow, central_gate_reason);
+      if(g_trgstmt_central_gate_enabled && (!central_gate_found || !central_gate_allow))
+      {
+         ignored_valid_triggers++;
+         int effective_reason = (central_gate_found ? central_gate_reason : TRGSTMT_CENTRAL_DECISION_MISSING);
+         int effective_skip_reason = __TRGSTM_SkipReasonFromCentralReason(effective_reason);
+
+         if(effective_reason == TRGSTMT_CENTRAL_BLOCK_MAX_OPEN)
+         {
+            skipped_max_open_trades++;
+            skipped_central_open++;
+         }
+         else if(effective_reason == TRGSTMT_CENTRAL_BLOCK_M15_CAP)
+         {
+            skipped_central_m15_cap++;
+         }
+         else if(effective_reason == TRGSTMT_CENTRAL_BLOCK_LOCAL_REF_CAP)
+         {
+            skipped_central_ref_cap++;
+         }
+         else
+         {
+            skipped_central_missing++;
+         }
+
+         __TRGSTM_SetSkip(trades[i],
+                          effective_skip_reason,
+                          equity,
+                          __TRGSTM_CentralReasonName(effective_reason));
+         trades[i].note = __TRGSTM_AppendNote(trades[i].note,
+                                              "CENTRAL_MULTI_SYMBOL_ACCOUNT_WIDE_GATE");
+         trades[i].note = __TRGSTM_AppendNote(trades[i].note,
+                                              __TRGSTM_CentralReasonName(effective_reason));
+
+         __TRGSTM_BumpHypotheticalCounters(trades[i],
+                                           skipped_hypo_wins,
+                                           skipped_hypo_losses,
+                                           skipped_hypo_open);
+         continue;
+      }
+
       int open_count_at_trigger = __TRGSTM_OpenTradesAtTime(trades, i, trigger_time);
       if(open_count_at_trigger >= TRGSTMT_MAX_OPEN_TRADES)
       {
@@ -3546,6 +3794,9 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
 
       trades[i].note = __TRGSTM_AppendNote(trades[i].note,
                                            "EXECUTED_AFTER_NEW_M1_GATE_AND_ONE_OPEN_CHECK");
+      if(g_trgstmt_central_gate_enabled)
+         trades[i].note = __TRGSTM_AppendNote(trades[i].note,
+                                              "CENTRAL_MULTI_SYMBOL_GATE_OK");
       trades[i].note = __TRGSTM_AppendNote(trades[i].note,
                                            "LEGACY_EXECUTION_LIMITS_DISABLED");
       trades[i].note = __TRGSTM_AppendNote(trades[i].note,
@@ -3729,6 +3980,24 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    if(initial_capital > 0.0)
       return_pct = (net_profit / initial_capital) * 100.0;
 
+   TriggerStatementSummary_Clear(g_trgstmt_last_summary);
+   g_trgstmt_last_summary.valid                  = true;
+   g_trgstmt_last_summary.symbol                 = use_sym;
+   g_trgstmt_last_summary.raw_valid_triggers     = raw_valid_triggers;
+   g_trgstmt_last_summary.executed_trades        = executed_trades;
+   g_trgstmt_last_summary.ignored_valid_triggers = ignored_valid_triggers;
+   g_trgstmt_last_summary.closed_trades          = closed_trades;
+   g_trgstmt_last_summary.open_trades            = open_trades;
+   g_trgstmt_last_summary.wins                   = wins;
+   g_trgstmt_last_summary.losses                 = losses;
+   g_trgstmt_last_summary.win_rate               = win_rate;
+   g_trgstmt_last_summary.gross_profit           = gross_profit;
+   g_trgstmt_last_summary.gross_loss             = gross_loss;
+   g_trgstmt_last_summary.net_profit             = net_profit;
+   g_trgstmt_last_summary.profit_factor          = profit_factor;
+   g_trgstmt_last_summary.max_drawdown_money     = max_drawdown_money;
+   g_trgstmt_last_summary.max_drawdown_pct       = max_drawdown_pct;
+
    // PERFORMANCE FIX #4:
    // Full diagnostic CSV snapshot files are intentionally not rewritten during
    // live/dirty timer refreshes. They are exported by the final/end-of-scan
@@ -3865,6 +4134,11 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "Max Win Streak         : " + IntegerToString(max_win_streak));
    __TRGSTM_WriteLine(handle, "Max Loss Streak        : " + IntegerToString(max_loss_streak));
    __TRGSTM_WriteLine(handle, "Max Open Trades Limit  : " + IntegerToString(WB_Config_MaxOpenTrades()) + " open trade(s) at a time | skipped=" + IntegerToString(skipped_max_open_trades));
+   if(g_trgstmt_central_gate_enabled)
+      __TRGSTM_WriteLine(handle, "Central Gate Skips     : Open=" + IntegerToString(skipped_central_open)
+                                          + " | M15Cap=" + IntegerToString(skipped_central_m15_cap)
+                                          + " | RefCap=" + IntegerToString(skipped_central_ref_cap)
+                                          + " | Missing=" + IntegerToString(skipped_central_missing));
    __TRGSTM_WriteLine(handle, "Daily Max Loss Limit   : DISABLED | skipped=" + IntegerToString(skipped_daily_loss_limit));
    __TRGSTM_WriteLine(handle, "M15 Window Lockout     : DISABLED | activations=" + IntegerToString(lockout_activations) + " | releases=" + IntegerToString(lockout_releases));
    __TRGSTM_WriteLine(handle, "Post-Win Re-Entry Wait : DISABLED | arms=" + IntegerToString(post_win_wait_arms) + " | releases=" + IntegerToString(post_win_wait_releases));
@@ -3954,8 +4228,12 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
                      + " | Type=" + IntegerToString(trades[i].rec.type_id)
                      + " | EntryTime=" + __TRGSTM_SafeTime(trades[i].rec.hit_time)
                      + " | Entry=" + DoubleToString(trades[i].rec.breakout_level, digits)
-                     + " | SkipReason=" + __TRGSTM_SkipReasonName(trades[i].skip_reason)
-                     + " | WouldHave=" + hypo_result
+                     + " | SkipReason=" + __TRGSTM_SkipReasonName(trades[i].skip_reason);
+
+         if(__TRGSTM_IsCentralSkipReason(trades[i].skip_reason))
+            line += " | CentralReason=" + __TRGSTM_SkipReasonName(trades[i].skip_reason);
+
+         line += " | WouldHave=" + hypo_result
                      + " | WouldHaveR=" + hypo_r
                      + " | WouldHaveP/L=" + hypo_money
                      + " | Exit/Mark=" + DoubleToString(trades[i].exit_price, digits)
@@ -3975,7 +4253,10 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "5) There is no M1 trend-alignment execution gate; the imported M15->M1 signal window only controls trigger creation upstream.");
    __TRGSTM_WriteLine(handle, "6) Local M1 loss lockout is disabled; the accepted local HWX/HWBB/FSMS reference and distance gate are handled upstream in Trigger.mqh.");
    __TRGSTM_WriteLine(handle, "7) If the imported M15->M1 signal-off arrives, raw trigger creation stops upstream and the next M15 signal-on starts a new execution window.");
-   __TRGSTM_WriteLine(handle, "8) A new trigger is skipped whenever the number of already-open trades reaches " + IntegerToString(WB_Config_MaxOpenTrades()) + " at that trigger time.");
+   if(g_trgstmt_central_gate_enabled)
+      __TRGSTM_WriteLine(handle, "8) In central multi-symbol mode, ignored triggers use the actual central gate reason: one-open-trade, M15 NEW cap, local reference cap, or missing central decision.");
+   else
+      __TRGSTM_WriteLine(handle, "8) A new trigger is skipped whenever the number of already-open trades reaches " + IntegerToString(WB_Config_MaxOpenTrades()) + " at that trigger time.");
    __TRGSTM_WriteLine(handle, "9) Daily max loss is disabled in this version; only the configured max-open-trades gate and SL " + DoubleToString(WB_Config_MinSLPips(), 2) + ".." + DoubleToString(WB_Config_MaxSLPips(), 2) + " pip filter are active.");
    __TRGSTM_WriteLine(handle, "10) Risk per executed trade is fixed on initial capital, not compounded trade-by-trade.");
    __TRGSTM_WriteLine(handle, "11) Ambiguous same-bar outcomes are counted conservatively as SL to avoid optimistic bias; SL is placed beyond the full Flip/MajicFlip zone.");

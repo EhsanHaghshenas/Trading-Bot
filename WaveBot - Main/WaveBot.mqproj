@@ -311,6 +311,11 @@
       "path":"MQL5\\Include\\WaveBot\\WaveBotScanControl.mqh",
       "compile":false,
       "relative_to_project":false
+    },
+    {
+      "path":"MQL5\\Include\\WaveBot\\WaveBotRiskManager.mqh",
+      "compile":false,
+      "relative_to_project":false
     }
   ]
 }

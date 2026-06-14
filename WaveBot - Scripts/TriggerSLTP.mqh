@@ -41,6 +41,12 @@ struct TriggerSLTPRecord
 static TriggerSLTPRecord g_trgsl_records[];
 static int g_trgsl_up_serial = 0;
 static int g_trgsl_dn_serial = 0;
+static bool g_trgsl_pre_max_open_gate_enabled = true;
+
+inline void TriggerSLTP_SetPreMaxOpenGateEnabled(const bool enabled)
+{
+   g_trgsl_pre_max_open_gate_enabled = enabled;
+}
 
 inline void __TRGSL_ClearRecord(TriggerSLTPRecord &rec)
 {
@@ -70,6 +76,7 @@ inline void TriggerSLTP_ResetGlobals()
    ArrayResize(g_trgsl_records, 0);
    g_trgsl_up_serial = 0;
    g_trgsl_dn_serial = 0;
+   g_trgsl_pre_max_open_gate_enabled = true;
 }
 
 inline int TriggerSLTP_RecordCount()
@@ -128,6 +135,41 @@ inline bool TriggerSLTP_RecordGet(const int index, TriggerSLTPRecord &out)
 
    out = g_trgsl_records[index];
    return true;
+}
+
+
+inline int TriggerSLTP_RecordsExport(TriggerSLTPRecord &out[])
+{
+   int n = ArraySize(g_trgsl_records);
+   ArrayResize(out, n);
+   for(int i=0; i<n; ++i)
+      out[i] = g_trgsl_records[i];
+   return n;
+}
+
+inline void TriggerSLTP_RecordsImport(const TriggerSLTPRecord &in_records[])
+{
+   int n = ArraySize(in_records);
+   ArrayResize(g_trgsl_records, n);
+   g_trgsl_up_serial = 0;
+   g_trgsl_dn_serial = 0;
+
+   for(int i=0; i<n; ++i)
+   {
+      g_trgsl_records[i] = in_records[i];
+      if(!in_records[i].valid)
+         continue;
+      if(in_records[i].dir == DIR_UP)
+      {
+         if(in_records[i].serial > g_trgsl_up_serial)
+            g_trgsl_up_serial = in_records[i].serial;
+      }
+      else
+      {
+         if(in_records[i].serial > g_trgsl_dn_serial)
+            g_trgsl_dn_serial = in_records[i].serial;
+      }
+   }
 }
 
 inline double __TRGSL_PointOf(const string sym)
@@ -460,7 +502,7 @@ inline void TriggerSLTP_OnTriggerFired(const string    sym,
    if(use_sym == "")
       use_sym = _Symbol;
 
-   if(hit_idx >= 0 && hit_idx < n)
+   if(g_trgsl_pre_max_open_gate_enabled && hit_idx >= 0 && hit_idx < n)
    {
       if(__TRGSL_MaxOpenTradesReachedBefore(use_sym, rates, n, rates[hit_idx].time))
       {
