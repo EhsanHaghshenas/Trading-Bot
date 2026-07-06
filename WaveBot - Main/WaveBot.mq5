@@ -1,6 +1,3 @@
-// UPDATE APPLIED: Central MULTI embedded detail SkipReason normalization
-// - Combined/MULTI writer now normalizes embedded detail lines so central RefCap/M15Cap skips never display the legacy ONE_OPEN_TRADE_ALREADY_OPEN reason.
-// - Output-only statement/reporting fix; no candle scan, trigger, SL/TP, bridge, or execution logic changed.
 #property strict
 #property description "WaveBot – W2/W3 + Hunter + ExtLQ + SW (Bootstrap Direction Race)"
 
@@ -11,7 +8,7 @@ CTrade trade;
 // ===== Inputs =====
 input string            InpSymbol              = "EURUSD";
 input bool              InpEnableCentralMultiSymbol = true;
-input string            InpMultiSymbolList     = "EURUSD,GBPUSD,AUDUSD";
+input string            InpMultiSymbolList     = "EURUSD,NZDUSD,USDCAD";
 input bool              InpDrawOnlyChartSymbol = true;
 input ENUM_TIMEFRAMES   InpTF                  = PERIOD_M15;
 input int               InpLookbackBars        = 20000;
@@ -23,10 +20,10 @@ input bool              InpDebugPrints         = true;
 input Direction         InpDirection           = DIR_DOWN;
 
 // scan window
-input bool              InpMostRecentOnly      = false;
-input bool              InpUseMonthsAgo        = false;
-input int               InpMonthsAgo           = 40;
-input datetime          InpScanFromDate        = D'2026.01.00 00:00';
+// Historical backtest window: records start at InpScanFromDate and both M15/M1
+// hard-stop at InpStatementCloseDate. Keep only these two date inputs in WaveBot.mq5.
+input datetime          InpScanFromDate        = D'2020.12.21 10:00:00';
+input datetime          InpStatementCloseDate  = D'2021.12.20 10:00:00';
 
 // --- ???? ????????? ????? ????? (???? ?????) ---
 input bool              InpRequireCloseBreakAboveW2H1 = true;
@@ -48,14 +45,14 @@ input string            InpTriggerStatementFileTag         = "WaveBot_TriggerSta
 // be entered twice when running the M15 master first and the M1 slave second.
 input int               InpM1MaxTradesPerM15NewSignal = 4;
 input int               InpM1MaxOpenTrades            = 1;
-input double            InpM1MinSLPips                 = 1.4;
-input double            InpM1MaxSLPips                 = 6.0;
+input double            InpM1MinSLPips                 = 2.6;
+input double            InpM1MaxSLPips                 = 2.9;
 input int               InpM1MaxTradesPerLocalRef     = 2;
 
 #define WB_CFG_DEFAULT_MAX_TRADES_PER_M15_NEW 4
 #define WB_CFG_DEFAULT_MAX_OPEN_TRADES        1
-#define WB_CFG_DEFAULT_MIN_SL_PIPS            1.4
-#define WB_CFG_DEFAULT_MAX_SL_PIPS            6.0
+#define WB_CFG_DEFAULT_MIN_SL_PIPS            2.6
+#define WB_CFG_DEFAULT_MAX_SL_PIPS            2.9
 #define WB_CFG_DEFAULT_MAX_TRADES_LOCAL_REF   2
 
 int    g_WB_M1MaxTradesPerM15NewSignal = WB_CFG_DEFAULT_MAX_TRADES_PER_M15_NEW;
@@ -509,11 +506,18 @@ inline datetime __WB_ResolveM1HardStopBoundary(const datetime requested_stop)
    if(use_stop <= 0)
       use_stop = TimeCurrent();
 
-   // Freeze M1 to the last CLOSED candle. The current forming M1 candle can keep
-   // changing near the live edge and can cause the final-days rescan loop.
-   datetime last_closed_m1 = iTime(InpSymbol, PERIOD_M1, 1);
-   if(last_closed_m1 > 0 && last_closed_m1 < use_stop)
-      use_stop = last_closed_m1;
+   // For the new historical Statement Close Date mode, the boundary must remain
+   // exactly the configured close date.  Do not clamp it to the tester/chart
+   // currently visible last-closed candle, otherwise an early visual/tester
+   // moment could stop the scan before the requested historical window ends.
+   if(InpStatementCloseDate <= 0)
+   {
+      // Legacy/live fallback only: freeze M1 to the last CLOSED candle near the
+      // live edge to avoid final-days rescan loops.
+      datetime last_closed_m1 = iTime(InpSymbol, PERIOD_M1, 1);
+      if(last_closed_m1 > 0 && last_closed_m1 < use_stop)
+         use_stop = last_closed_m1;
+   }
 
    if(use_stop <= 0)
       use_stop = TimeCurrent();
@@ -644,12 +648,17 @@ inline datetime __WB_ResolveM15HardStopBoundary(const datetime requested_stop)
    if(use_stop <= 0)
       use_stop = TimeCurrent();
 
-   // Freeze M15 to the last CLOSED candle. This prevents the live edge of the
-   // M15 chart from opening the final-days replay loop after the historical pass
-   // reaches today's market boundary.
-   datetime last_closed_m15 = iTime(InpSymbol, PERIOD_M15, 1);
-   if(last_closed_m15 > 0 && last_closed_m15 < use_stop)
-      use_stop = last_closed_m15;
+   // For the new historical Statement Close Date mode, the M15 bridge builder
+   // must stop exactly at the configured close date.  Do not clamp it to the
+   // currently visible last-closed candle in tester/visual mode.
+   if(InpStatementCloseDate <= 0)
+   {
+      // Legacy/live fallback only: freeze M15 to the last CLOSED candle near the
+      // live edge to avoid final-days replay loops.
+      datetime last_closed_m15 = iTime(InpSymbol, PERIOD_M15, 1);
+      if(last_closed_m15 > 0 && last_closed_m15 < use_stop)
+         use_stop = last_closed_m15;
+   }
 
    if(use_stop <= 0)
       use_stop = TimeCurrent();
@@ -897,12 +906,25 @@ inline void __WB_RunOneMinorSession(const FSMS_SW_MinorSession &s)
                                              true, s.ext_init_price, s.ext_init_time, "_minor");
 }
 
-// --- ???? ???? ---
+// --- Scan window resolver ---
 void ResolveWindow(datetime &start, datetime &stop)
 {
-   if(InpMostRecentOnly){ start=0; stop=TimeCurrent(); return; }
-   start = ResolveScanStart(InpUseMonthsAgo, InpMonthsAgo, InpScanFromDate);
-   stop  = TimeCurrent();
+   // The historical backtest window is controlled by exactly two date inputs:
+   //   1) InpScanFromDate       = first timestamp to scan/report
+   //   2) InpStatementCloseDate = final timestamp to scan/report and hard-stop
+   // This function intentionally does not use TimeCurrent() as the normal end
+   // boundary when InpStatementCloseDate is set, so historical range tests do
+   // not continue scanning to today's market date.
+   start = InpScanFromDate;
+   if(start <= 0)
+      start = TimeCurrent();
+
+   stop = InpStatementCloseDate;
+   if(stop <= 0)
+      stop = TimeCurrent();
+
+   if(stop < start)
+      stop = start;
 }
 
 // ============================================================================
@@ -1746,11 +1768,19 @@ inline datetime __WBMS_ResolveSymbolHardStop(const string sym,
                                              const datetime requested_stop)
 {
    datetime use_stop = requested_stop;
-   if(use_stop <= 0) use_stop = TimeCurrent();
+   if(use_stop <= 0)
+      use_stop = TimeCurrent();
 
-   datetime last_closed = iTime(sym, tf, 1);
-   if(last_closed > 0 && last_closed < use_stop)
-      use_stop = last_closed;
+   // In historical Statement Close Date mode every symbol must share the exact
+   // same requested stop boundary. This keeps M15 bridge output, M1 raw trigger
+   // generation, central execution gate, and final statements inside one
+   // comparable historical window.
+   if(InpStatementCloseDate <= 0)
+   {
+      datetime last_closed = iTime(sym, tf, 1);
+      if(last_closed > 0 && last_closed < use_stop)
+         use_stop = last_closed;
+   }
 
    return use_stop;
 }
@@ -1901,6 +1931,7 @@ inline void __WBMS_WriteCombinedStatement(const datetime scan_from,
    __TRGSTM_WriteLine(handle, "Primary Visual Symbol  : " + WB_PrimaryInputSymbol());
    __TRGSTM_WriteLine(handle, "Scan From              : " + __TRGSTM_SafeTime(scan_from));
    __TRGSTM_WriteLine(handle, "Scan To                : " + __TRGSTM_SafeTime(scan_to));
+   __TRGSTM_WriteLine(handle, "Statement Close Date   : " + __TRGSTM_SafeTime(InpStatementCloseDate));
    __TRGSTM_WriteLine(handle, "Central Risk Manager   : WaveBotRiskManager.mqh | max open total=" + IntegerToString(WB_Config_MaxOpenTrades()) + " | one open WaveBot trade account-wide by default");
    __TRGSTM_WriteLine(handle, "Interleaved Engine     : ENABLED | central M1 trigger/execution timeline is merged chronologically across all configured symbols");
    __TRGSTM_WriteLine(handle, "Statement Write Policy : deferred until every configured symbol has completed its M1 scan");
@@ -2226,10 +2257,9 @@ int OnInit()
    WBLOG_LogParam("InpLookbackBars", IntegerToString(InpLookbackBars), "input");
    WBLOG_LogParam("InpMaxBarsInWave", IntegerToString(InpMaxBarsInWave), "input");
    WBLOG_LogParam("InpDirection", (InpDirection == DIR_UP ? "DIR_UP" : "DIR_DOWN"), "input");
-   WBLOG_LogParam("InpMostRecentOnly", (InpMostRecentOnly ? "true" : "false"), "input");
-   WBLOG_LogParam("InpUseMonthsAgo", (InpUseMonthsAgo ? "true" : "false"), "input");
-   WBLOG_LogParam("InpMonthsAgo", IntegerToString(InpMonthsAgo), "input");
    WBLOG_LogParam("InpScanFromDate", WBLOG_Time(InpScanFromDate), "input");
+   WBLOG_LogParam("InpStatementCloseDate", WBLOG_Time(InpStatementCloseDate), "input");
+   WBLOG_LogParam("HistoricalStatementCloseDateHardStop", "true", "WaveBot.mq5");
    WBLOG_LogParam("InpEnableTriggerStatement", (InpEnableTriggerStatement ? "true" : "false"), "input");
    WBLOG_LogParam("InpTriggerStatementInitialCapital", DoubleToString(InpTriggerStatementInitialCapital, 2), "input");
    WBLOG_LogParam("InpTriggerStatementRiskPercent", DoubleToString(InpTriggerStatementRiskPercent, 4), "input");
