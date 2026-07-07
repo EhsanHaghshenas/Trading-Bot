@@ -32,12 +32,14 @@
 #define TRGSTMT_SKIP_CENTRAL_M15_CAP       10
 #define TRGSTMT_SKIP_CENTRAL_LOCAL_REF_CAP 11
 #define TRGSTMT_SKIP_CENTRAL_MISSING       12
+#define TRGSTMT_SKIP_FRIDAY_GUARD          13
 
 #define TRGSTMT_CENTRAL_ALLOW               0
 #define TRGSTMT_CENTRAL_BLOCK_MAX_OPEN      1
 #define TRGSTMT_CENTRAL_BLOCK_M15_CAP       2
 #define TRGSTMT_CENTRAL_BLOCK_LOCAL_REF_CAP 3
 #define TRGSTMT_CENTRAL_DECISION_MISSING    4
+#define TRGSTMT_CENTRAL_BLOCK_FRIDAY_GUARD  5
 
 #define TRGSTMT_NS_MAJ                 0
 #define TRGSTMT_NS_MIN                 1
@@ -179,6 +181,7 @@ inline string __TRGSTM_CentralReasonName(const int reason)
    if(reason == TRGSTMT_CENTRAL_BLOCK_M15_CAP)       return "CENTRAL_MULTI_SYMBOL_M15_NEW_CAP_BLOCK";
    if(reason == TRGSTMT_CENTRAL_BLOCK_LOCAL_REF_CAP) return "CENTRAL_MULTI_SYMBOL_LOCAL_REF_CAP_BLOCK";
    if(reason == TRGSTMT_CENTRAL_DECISION_MISSING)    return "CENTRAL_MULTI_SYMBOL_DECISION_MISSING";
+   if(reason == TRGSTMT_CENTRAL_BLOCK_FRIDAY_GUARD)  return "FRIDAY_WEEKEND_GUARD_BLOCK";
    return "CENTRAL_MULTI_SYMBOL_UNKNOWN_BLOCK";
 }
 
@@ -726,6 +729,8 @@ inline string __TRGSTM_SkipReasonName(const int skip_reason)
       return "CENTRAL_MULTI_SYMBOL_LOCAL_REF_CAP_BLOCK";
    if(skip_reason == TRGSTMT_SKIP_CENTRAL_MISSING)
       return "CENTRAL_MULTI_SYMBOL_DECISION_MISSING";
+   if(skip_reason == TRGSTMT_SKIP_FRIDAY_GUARD)
+      return "FRIDAY_WEEKEND_GUARD_BLOCK";
    return "-";
 }
 
@@ -739,6 +744,8 @@ inline int __TRGSTM_SkipReasonFromCentralReason(const int central_reason)
       return TRGSTMT_SKIP_CENTRAL_LOCAL_REF_CAP;
    if(central_reason == TRGSTMT_CENTRAL_DECISION_MISSING)
       return TRGSTMT_SKIP_CENTRAL_MISSING;
+   if(central_reason == TRGSTMT_CENTRAL_BLOCK_FRIDAY_GUARD)
+      return TRGSTMT_SKIP_FRIDAY_GUARD;
    return TRGSTMT_SKIP_CENTRAL_MISSING;
 }
 
@@ -747,7 +754,8 @@ inline bool __TRGSTM_IsCentralSkipReason(const int skip_reason)
    return (skip_reason == TRGSTMT_SKIP_CENTRAL_MAX_OPEN
         || skip_reason == TRGSTMT_SKIP_CENTRAL_M15_CAP
         || skip_reason == TRGSTMT_SKIP_CENTRAL_LOCAL_REF_CAP
-        || skip_reason == TRGSTMT_SKIP_CENTRAL_MISSING);
+        || skip_reason == TRGSTMT_SKIP_CENTRAL_MISSING
+        || skip_reason == TRGSTMT_SKIP_FRIDAY_GUARD);
 }
 
 inline string __TRGSTM_AppendNote(const string left_text,
@@ -2625,6 +2633,18 @@ inline bool __TRGSTM_LoadRates(const string          sym,
    return true;
 }
 
+inline double __TRGSTM_ResultRAtPrice(const TriggerSLTPRecord &rec,
+                                      const double            mark_price)
+{
+   if(rec.risk_price <= 0.0)
+      return 0.0;
+
+   if(rec.dir == DIR_UP)
+      return ((mark_price - rec.breakout_level) / rec.risk_price);
+
+   return ((rec.breakout_level - mark_price) / rec.risk_price);
+}
+
 inline bool __TRGSTM_EvaluateTrade(const TriggerSLTPRecord &rec,
                                    const MqlRates          &rates[],
                                    const int                n,
@@ -2651,6 +2671,8 @@ inline bool __TRGSTM_EvaluateTrade(const TriggerSLTPRecord &rec,
       return false;
    }
 
+   datetime friday_force_close_time = WB_FridayGuard_ForceCloseTimeForEntry(rec.hit_time);
+
    int    last_mark_idx = -1;
    double last_mark_px  = 0.0;
 
@@ -2658,6 +2680,18 @@ inline bool __TRGSTM_EvaluateTrade(const TriggerSLTPRecord &rec,
    {
       if(scan_to > 0 && rates[i].time > scan_to)
          break;
+
+      if(friday_force_close_time > 0 && rates[i].time >= friday_force_close_time)
+      {
+         double close_r = __TRGSTM_ResultRAtPrice(rec, rates[i].close);
+         out.result_status = (close_r >= 0.0 ? TRGSTMT_RESULT_WIN : TRGSTMT_RESULT_LOSS);
+         out.exit_time     = rates[i].time;
+         out.exit_price    = rates[i].close;
+         out.result_r      = close_r;
+         out.bars_held     = (i - start_idx + 1);
+         out.note          = "FRIDAY_FORCED_CLOSE_BEFORE_WEEKEND";
+         return true;
+      }
 
       last_mark_idx = i;
       last_mark_px  = rates[i].close;
@@ -3548,6 +3582,7 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    int skipped_central_m15_cap = 0;
    int skipped_central_ref_cap = 0;
    int skipped_central_missing = 0;
+   int skipped_friday_guard    = 0;
    int skipped_hypo_wins       = 0;
    int skipped_hypo_losses     = 0;
    int skipped_hypo_open       = 0;
@@ -3735,6 +3770,10 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
          {
             skipped_central_ref_cap++;
          }
+         else if(effective_reason == TRGSTMT_CENTRAL_BLOCK_FRIDAY_GUARD)
+         {
+            skipped_friday_guard++;
+         }
          else
          {
             skipped_central_missing++;
@@ -3748,6 +3787,24 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
                                               "CENTRAL_MULTI_SYMBOL_ACCOUNT_WIDE_GATE");
          trades[i].note = __TRGSTM_AppendNote(trades[i].note,
                                               __TRGSTM_CentralReasonName(effective_reason));
+
+         __TRGSTM_BumpHypotheticalCounters(trades[i],
+                                           skipped_hypo_wins,
+                                           skipped_hypo_losses,
+                                           skipped_hypo_open);
+         continue;
+      }
+
+      if(WB_FridayGuard_BlockNewTradeAt(trigger_time))
+      {
+         skipped_friday_guard++;
+         ignored_valid_triggers++;
+         __TRGSTM_SetSkip(trades[i],
+                          TRGSTMT_SKIP_FRIDAY_GUARD,
+                          equity,
+                          "FRIDAY_WEEKEND_GUARD_BLOCK");
+         trades[i].note = __TRGSTM_AppendNote(trades[i].note,
+                                              "FRIDAY_NO_NEW_TRADE_WINDOW");
 
          __TRGSTM_BumpHypotheticalCounters(trades[i],
                                            skipped_hypo_wins,
@@ -4086,6 +4143,7 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "Trigger Source         : Type-1 = Flip.mqh | Type-2 = Majicflip.mqh");
    __TRGSTM_WriteLine(handle, "Execution Model        : Imported M15->M1 NEW signal + first valid M1 HWX/HWBB/FSMS inside M15 NEW zone + same-direction Flip/MajicFlip distance gate | max open trades=" + IntegerToString(WB_Config_MaxOpenTrades()) + " | max " + IntegerToString(WB_Config_MaxTradesPerM15NewSignal()) + " accepted trades per M15 NEW signal");
    __TRGSTM_WriteLine(handle, "Protection Rule        : Max open trades=" + IntegerToString(WB_Config_MaxOpenTrades()) + " + SL " + DoubleToString(WB_Config_MinSLPips(), 2) + ".." + DoubleToString(WB_Config_MaxSLPips(), 2) + " pip | legacy loss/post-win/daily limits disabled");
+   __TRGSTM_WriteLine(handle, "Friday Close Guard     : " + WB_FridayGuard_SettingsText());
    __TRGSTM_WriteLine(handle, "Trend Filter           : DISABLED (M1 trend alignment is not used as an execution gate)");
    __TRGSTM_WriteLine(handle, "Local M1 Signal Gate   : ENABLED before every trade | first M1 HWX/HWBB/FSMS in direction must be fully inside the imported M15 NEW zone");
    __TRGSTM_WriteLine(handle, "Post-Win Re-Entry Rule : DISABLED");
@@ -4111,7 +4169,8 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "Skipped Local Lockout : " + IntegerToString(skipped_local_lockout));
    __TRGSTM_WriteLine(handle, "Skipped Max Open      : " + IntegerToString(skipped_max_open_trades));
    __TRGSTM_WriteLine(handle, "Skipped Daily Loss    : " + IntegerToString(skipped_daily_loss_limit));
-   __TRGSTM_WriteLine(handle, "Extra Execution Gates  : ONE_OPEN_TRADE_ONLY | legacy lockout/post-win/daily-loss filters disabled");
+   __TRGSTM_WriteLine(handle, "Skipped Friday Guard  : " + IntegerToString(skipped_friday_guard));
+   __TRGSTM_WriteLine(handle, "Extra Execution Gates  : ONE_OPEN_TRADE_ONLY | FRIDAY_CLOSE_GUARD | legacy lockout/post-win/daily-loss filters disabled");
    __TRGSTM_WriteLine(handle, "Direction Source       : imported M15->M1 signal window direction only");
    __TRGSTM_WriteLine(handle, "Closed Trades          : " + IntegerToString(closed_trades));
    __TRGSTM_WriteLine(handle, "Open Trades            : " + IntegerToString(open_trades));
@@ -4138,8 +4197,10 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
       __TRGSTM_WriteLine(handle, "Central Gate Skips     : Open=" + IntegerToString(skipped_central_open)
                                           + " | M15Cap=" + IntegerToString(skipped_central_m15_cap)
                                           + " | RefCap=" + IntegerToString(skipped_central_ref_cap)
+                                          + " | Friday=" + IntegerToString(skipped_friday_guard)
                                           + " | Missing=" + IntegerToString(skipped_central_missing));
    __TRGSTM_WriteLine(handle, "Daily Max Loss Limit   : DISABLED | skipped=" + IntegerToString(skipped_daily_loss_limit));
+   __TRGSTM_WriteLine(handle, "Friday Close Guard     : " + WB_FridayGuard_SettingsText() + " | skipped=" + IntegerToString(skipped_friday_guard));
    __TRGSTM_WriteLine(handle, "M15 Window Lockout     : DISABLED | activations=" + IntegerToString(lockout_activations) + " | releases=" + IntegerToString(lockout_releases));
    __TRGSTM_WriteLine(handle, "Post-Win Re-Entry Wait : DISABLED | arms=" + IntegerToString(post_win_wait_arms) + " | releases=" + IntegerToString(post_win_wait_releases));
    __TRGSTM_WriteLine(handle, "Local M1 Lockout       : DISABLED | activations=" + IntegerToString(local_lockout_activations) + " | releases=" + IntegerToString(local_lockout_releases));
@@ -4254,12 +4315,13 @@ inline bool TriggerStatement_WriteTextReport(const string          sym,
    __TRGSTM_WriteLine(handle, "6) Local M1 loss lockout is disabled; the accepted local HWX/HWBB/FSMS reference and distance gate are handled upstream in Trigger.mqh.");
    __TRGSTM_WriteLine(handle, "7) If the imported M15->M1 signal-off arrives, raw trigger creation stops upstream and the next M15 signal-on starts a new execution window.");
    if(g_trgstmt_central_gate_enabled)
-      __TRGSTM_WriteLine(handle, "8) In central multi-symbol mode, ignored triggers use the actual central gate reason: one-open-trade, M15 NEW cap, local reference cap, or missing central decision.");
+      __TRGSTM_WriteLine(handle, "8) In central multi-symbol mode, ignored triggers use the actual central gate reason: one-open-trade, M15 NEW cap, local reference cap, Friday weekend guard, or missing central decision.");
    else
       __TRGSTM_WriteLine(handle, "8) A new trigger is skipped whenever the number of already-open trades reaches " + IntegerToString(WB_Config_MaxOpenTrades()) + " at that trigger time.");
    __TRGSTM_WriteLine(handle, "9) Daily max loss is disabled in this version; only the configured max-open-trades gate and SL " + DoubleToString(WB_Config_MinSLPips(), 2) + ".." + DoubleToString(WB_Config_MaxSLPips(), 2) + " pip filter are active.");
    __TRGSTM_WriteLine(handle, "10) Risk per executed trade is fixed on initial capital, not compounded trade-by-trade.");
    __TRGSTM_WriteLine(handle, "11) Ambiguous same-bar outcomes are counted conservatively as SL to avoid optimistic bias; SL is placed beyond the full Flip/MajicFlip zone.");
+   __TRGSTM_WriteLine(handle, "12) When Friday Close Guard is enabled, raw triggers are still recorded but M1 execution is blocked after the Friday no-new-trade time, and accepted simulated trades are force-closed at the configured Friday close time.");
 
    FileFlush(handle);
    FileClose(handle);

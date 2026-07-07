@@ -8,7 +8,7 @@ CTrade trade;
 // ===== Inputs =====
 input string            InpSymbol              = "EURUSD";
 input bool              InpEnableCentralMultiSymbol = true;
-input string            InpMultiSymbolList     = "EURUSD,NZDUSD,USDCAD";
+input string            InpMultiSymbolList     = "EURUSD,USDCAD,AUDUSD";
 input bool              InpDrawOnlyChartSymbol = true;
 input ENUM_TIMEFRAMES   InpTF                  = PERIOD_M15;
 input int               InpLookbackBars        = 20000;
@@ -22,8 +22,8 @@ input Direction         InpDirection           = DIR_DOWN;
 // scan window
 // Historical backtest window: records start at InpScanFromDate and both M15/M1
 // hard-stop at InpStatementCloseDate. Keep only these two date inputs in WaveBot.mq5.
-input datetime          InpScanFromDate        = D'2020.12.21 10:00:00';
-input datetime          InpStatementCloseDate  = D'2021.12.20 10:00:00';
+input datetime          InpScanFromDate        = D'2020.01.01 00:00:00';
+input datetime          InpStatementCloseDate  = D'2020.12.21 10:00:00';
 
 // --- ???? ????????? ????? ????? (???? ?????) ---
 input bool              InpRequireCloseBreakAboveW2H1 = true;
@@ -35,7 +35,7 @@ input bool InpRunShadowBreakerOnce = false;  // ??? true ????? ?????? SB_RunOneS
 
 // ===== Trigger statement (text report) =====
 input bool              InpEnableTriggerStatement          = true;
-input double            InpTriggerStatementInitialCapital  = 10000.0;
+input double            InpTriggerStatementInitialCapital  = 100000.0;
 input double            InpTriggerStatementRiskPercent     = 1.0;
 input string            InpTriggerStatementFileTag         = "WaveBot_TriggerStatement";
 
@@ -49,17 +49,38 @@ input double            InpM1MinSLPips                 = 2.6;
 input double            InpM1MaxSLPips                 = 2.9;
 input int               InpM1MaxTradesPerLocalRef     = 2;
 
+// ===== Friday Close Guard / Weekend Risk Guard =====
+// Server-time based: raw triggers are still created, but M1 execution is blocked
+// after the Friday no-new-trade time. Accepted/open simulated trades are force-
+// evaluated at the configured Friday close time so they are not carried over
+// the weekend in statements.
+input bool              InpUseFridayCloseGuard         = true;
+input int               InpFridayNoNewTradeHour        = 20;
+input int               InpFridayNoNewTradeMinute      = 0;
+input int               InpFridayCloseTradesHour       = 21;
+input int               InpFridayCloseTradesMinute     = 45;
+
 #define WB_CFG_DEFAULT_MAX_TRADES_PER_M15_NEW 4
 #define WB_CFG_DEFAULT_MAX_OPEN_TRADES        1
 #define WB_CFG_DEFAULT_MIN_SL_PIPS            2.6
 #define WB_CFG_DEFAULT_MAX_SL_PIPS            2.9
 #define WB_CFG_DEFAULT_MAX_TRADES_LOCAL_REF   2
+#define WB_CFG_DEFAULT_FRIDAY_GUARD_ENABLED   true
+#define WB_CFG_DEFAULT_FRIDAY_NO_NEW_HOUR     20
+#define WB_CFG_DEFAULT_FRIDAY_NO_NEW_MINUTE   0
+#define WB_CFG_DEFAULT_FRIDAY_CLOSE_HOUR      21
+#define WB_CFG_DEFAULT_FRIDAY_CLOSE_MINUTE    45
 
 int    g_WB_M1MaxTradesPerM15NewSignal = WB_CFG_DEFAULT_MAX_TRADES_PER_M15_NEW;
 int    g_WB_M1MaxOpenTrades            = WB_CFG_DEFAULT_MAX_OPEN_TRADES;
 double g_WB_M1MinSLPips                 = WB_CFG_DEFAULT_MIN_SL_PIPS;
 double g_WB_M1MaxSLPips                 = WB_CFG_DEFAULT_MAX_SL_PIPS;
 int    g_WB_M1MaxTradesPerLocalRef     = WB_CFG_DEFAULT_MAX_TRADES_LOCAL_REF;
+bool   g_WB_UseFridayCloseGuard        = WB_CFG_DEFAULT_FRIDAY_GUARD_ENABLED;
+int    g_WB_FridayNoNewTradeHour       = WB_CFG_DEFAULT_FRIDAY_NO_NEW_HOUR;
+int    g_WB_FridayNoNewTradeMinute     = WB_CFG_DEFAULT_FRIDAY_NO_NEW_MINUTE;
+int    g_WB_FridayCloseTradesHour      = WB_CFG_DEFAULT_FRIDAY_CLOSE_HOUR;
+int    g_WB_FridayCloseTradesMinute    = WB_CFG_DEFAULT_FRIDAY_CLOSE_MINUTE;
 bool   g_WB_M1RuntimeConfigLoadedFromTerminal = false;
 
 inline string __WB_ConfigSymbolKeyPart()
@@ -97,6 +118,14 @@ inline double __WB_ConfigNormalizeDouble(const double value, const double fallba
    return v;
 }
 
+inline int __WB_ConfigClampInt(const int value, const int minimum, const int maximum)
+{
+   int v = value;
+   if(v < minimum) v = minimum;
+   if(v > maximum) v = maximum;
+   return v;
+}
+
 inline void __WB_ConfigNormalizeRuntime()
 {
    g_WB_M1MaxTradesPerM15NewSignal = __WB_ConfigNormalizeInt(g_WB_M1MaxTradesPerM15NewSignal,
@@ -125,6 +154,19 @@ inline void __WB_ConfigNormalizeRuntime()
       g_WB_M1MinSLPips = g_WB_M1MaxSLPips;
       g_WB_M1MaxSLPips = tmp;
    }
+
+   g_WB_FridayNoNewTradeHour    = __WB_ConfigClampInt(g_WB_FridayNoNewTradeHour,    0, 23);
+   g_WB_FridayNoNewTradeMinute  = __WB_ConfigClampInt(g_WB_FridayNoNewTradeMinute,  0, 59);
+   g_WB_FridayCloseTradesHour   = __WB_ConfigClampInt(g_WB_FridayCloseTradesHour,   0, 23);
+   g_WB_FridayCloseTradesMinute = __WB_ConfigClampInt(g_WB_FridayCloseTradesMinute, 0, 59);
+
+   int no_new_min = g_WB_FridayNoNewTradeHour * 60 + g_WB_FridayNoNewTradeMinute;
+   int close_min  = g_WB_FridayCloseTradesHour * 60 + g_WB_FridayCloseTradesMinute;
+   if(no_new_min > close_min)
+   {
+      g_WB_FridayNoNewTradeHour   = g_WB_FridayCloseTradesHour;
+      g_WB_FridayNoNewTradeMinute = g_WB_FridayCloseTradesMinute;
+   }
 }
 
 inline void __WB_ConfigApplyInputs()
@@ -134,6 +176,11 @@ inline void __WB_ConfigApplyInputs()
    g_WB_M1MinSLPips                = InpM1MinSLPips;
    g_WB_M1MaxSLPips                = InpM1MaxSLPips;
    g_WB_M1MaxTradesPerLocalRef     = InpM1MaxTradesPerLocalRef;
+   g_WB_UseFridayCloseGuard        = InpUseFridayCloseGuard;
+   g_WB_FridayNoNewTradeHour       = InpFridayNoNewTradeHour;
+   g_WB_FridayNoNewTradeMinute     = InpFridayNoNewTradeMinute;
+   g_WB_FridayCloseTradesHour      = InpFridayCloseTradesHour;
+   g_WB_FridayCloseTradesMinute    = InpFridayCloseTradesMinute;
    g_WB_M1RuntimeConfigLoadedFromTerminal = false;
    __WB_ConfigNormalizeRuntime();
 }
@@ -155,6 +202,16 @@ inline bool __WB_ConfigLoadDouble(const string suffix, double &out_value)
       return false;
 
    out_value = GlobalVariableGet(key);
+   return true;
+}
+
+inline bool __WB_ConfigLoadBool(const string suffix, bool &out_value)
+{
+   string key = __WB_ConfigGVKey(suffix);
+   if(!GlobalVariableCheck(key))
+      return false;
+
+   out_value = (GlobalVariableGet(key) != 0.0);
    return true;
 }
 
@@ -191,6 +248,33 @@ inline bool __WB_ConfigLoadFromTerminal()
       loaded = true;
    }
 
+   bool vb = false;
+   if(__WB_ConfigLoadBool("UseFridayCloseGuard", vb))
+   {
+      g_WB_UseFridayCloseGuard = vb;
+      loaded = true;
+   }
+   if(__WB_ConfigLoadInt("FridayNoNewTradeHour", vi))
+   {
+      g_WB_FridayNoNewTradeHour = vi;
+      loaded = true;
+   }
+   if(__WB_ConfigLoadInt("FridayNoNewTradeMinute", vi))
+   {
+      g_WB_FridayNoNewTradeMinute = vi;
+      loaded = true;
+   }
+   if(__WB_ConfigLoadInt("FridayCloseTradesHour", vi))
+   {
+      g_WB_FridayCloseTradesHour = vi;
+      loaded = true;
+   }
+   if(__WB_ConfigLoadInt("FridayCloseTradesMinute", vi))
+   {
+      g_WB_FridayCloseTradesMinute = vi;
+      loaded = true;
+   }
+
    __WB_ConfigNormalizeRuntime();
    g_WB_M1RuntimeConfigLoadedFromTerminal = loaded;
    return loaded;
@@ -205,6 +289,11 @@ inline void __WB_ConfigSaveToTerminal()
    GlobalVariableSet(__WB_ConfigGVKey("MinSLPips"),                g_WB_M1MinSLPips);
    GlobalVariableSet(__WB_ConfigGVKey("MaxSLPips"),                g_WB_M1MaxSLPips);
    GlobalVariableSet(__WB_ConfigGVKey("MaxTradesPerLocalRef"),     (double)g_WB_M1MaxTradesPerLocalRef);
+   GlobalVariableSet(__WB_ConfigGVKey("UseFridayCloseGuard"),      (g_WB_UseFridayCloseGuard ? 1.0 : 0.0));
+   GlobalVariableSet(__WB_ConfigGVKey("FridayNoNewTradeHour"),     (double)g_WB_FridayNoNewTradeHour);
+   GlobalVariableSet(__WB_ConfigGVKey("FridayNoNewTradeMinute"),   (double)g_WB_FridayNoNewTradeMinute);
+   GlobalVariableSet(__WB_ConfigGVKey("FridayCloseTradesHour"),    (double)g_WB_FridayCloseTradesHour);
+   GlobalVariableSet(__WB_ConfigGVKey("FridayCloseTradesMinute"),  (double)g_WB_FridayCloseTradesMinute);
    GlobalVariableSet(__WB_ConfigGVKey("SavedAt"),                  (double)TimeCurrent());
 }
 
@@ -254,6 +343,119 @@ inline int WB_Config_MaxTradesPerLocalRef()
 inline string WB_Config_SourceText()
 {
    return (g_WB_M1RuntimeConfigLoadedFromTerminal ? "terminal-global-from-M15" : "ea-inputs");
+}
+
+inline bool WB_Config_UseFridayCloseGuard()
+{
+   return g_WB_UseFridayCloseGuard;
+}
+
+inline int WB_Config_FridayNoNewTradeHour()
+{
+   return __WB_ConfigClampInt(g_WB_FridayNoNewTradeHour, 0, 23);
+}
+
+inline int WB_Config_FridayNoNewTradeMinute()
+{
+   return __WB_ConfigClampInt(g_WB_FridayNoNewTradeMinute, 0, 59);
+}
+
+inline int WB_Config_FridayCloseTradesHour()
+{
+   return __WB_ConfigClampInt(g_WB_FridayCloseTradesHour, 0, 23);
+}
+
+inline int WB_Config_FridayCloseTradesMinute()
+{
+   return __WB_ConfigClampInt(g_WB_FridayCloseTradesMinute, 0, 59);
+}
+
+inline int WB_Config_FridayNoNewTradeMinuteOfDay()
+{
+   return WB_Config_FridayNoNewTradeHour() * 60 + WB_Config_FridayNoNewTradeMinute();
+}
+
+inline int WB_Config_FridayCloseTradesMinuteOfDay()
+{
+   return WB_Config_FridayCloseTradesHour() * 60 + WB_Config_FridayCloseTradesMinute();
+}
+
+inline string WB_FridayGuard_TwoDigits(const int value)
+{
+   if(value < 10)
+      return "0" + IntegerToString(value);
+   return IntegerToString(value);
+}
+
+inline string WB_FridayGuard_TimeText(const int hour, const int minute)
+{
+   return WB_FridayGuard_TwoDigits(hour) + ":" + WB_FridayGuard_TwoDigits(minute);
+}
+
+inline string WB_FridayGuard_SettingsText()
+{
+   if(!WB_Config_UseFridayCloseGuard())
+      return "DISABLED";
+
+   string text = "ENABLED | no-new-trades Friday ";
+   text += WB_FridayGuard_TimeText(WB_Config_FridayNoNewTradeHour(), WB_Config_FridayNoNewTradeMinute());
+   text += " | force-close Friday ";
+   text += WB_FridayGuard_TimeText(WB_Config_FridayCloseTradesHour(), WB_Config_FridayCloseTradesMinute());
+   text += " | server time";
+   return text;
+}
+
+inline bool WB_FridayGuard_IsFriday(const datetime t)
+{
+   if(t <= 0)
+      return false;
+   MqlDateTime dt;
+   TimeToStruct(t, dt);
+   return (dt.day_of_week == 5);
+}
+
+inline int WB_FridayGuard_MinuteOfDay(const datetime t)
+{
+   if(t <= 0)
+      return 0;
+   MqlDateTime dt;
+   TimeToStruct(t, dt);
+   return dt.hour * 60 + dt.min;
+}
+
+inline bool WB_FridayGuard_BlockNewTradeAt(const datetime trigger_time)
+{
+   if(!WB_Config_UseFridayCloseGuard())
+      return false;
+   if(!WB_FridayGuard_IsFriday(trigger_time))
+      return false;
+   return (WB_FridayGuard_MinuteOfDay(trigger_time) >= WB_Config_FridayNoNewTradeMinuteOfDay());
+}
+
+inline datetime WB_FridayGuard_ForceCloseTimeForEntry(const datetime entry_time)
+{
+   if(!WB_Config_UseFridayCloseGuard())
+      return 0;
+   if(entry_time <= 0)
+      return 0;
+
+   MqlDateTime dt;
+   TimeToStruct(entry_time, dt);
+   int days_to_friday = 5 - dt.day_of_week;
+   if(days_to_friday < 0)
+      days_to_friday += 7;
+
+   dt.hour = 0;
+   dt.min  = 0;
+   dt.sec  = 0;
+   datetime close_time = StructToTime(dt);
+   close_time += (datetime)(days_to_friday * 86400);
+   close_time += (datetime)(WB_Config_FridayCloseTradesMinuteOfDay() * 60);
+
+   if(close_time <= entry_time)
+      close_time += (datetime)(7 * 86400);
+
+   return close_time;
 }
 
 // ===== Central Multi-Symbol runtime symbol routing =====
@@ -1233,6 +1435,7 @@ int    g_wbms_central_accepted          = 0;
 int    g_wbms_central_skipped_open      = 0;
 int    g_wbms_central_skipped_m15_cap   = 0;
 int    g_wbms_central_skipped_local_cap = 0;
+int    g_wbms_central_skipped_friday    = 0;
 int    g_wbms_interleaved_steps         = 0;
 datetime g_wbms_interleaved_first_time  = 0;
 datetime g_wbms_interleaved_last_time   = 0;
@@ -1251,6 +1454,7 @@ inline void WBMS_ResetRawBuckets()
    g_wbms_central_skipped_open      = 0;
    g_wbms_central_skipped_m15_cap   = 0;
    g_wbms_central_skipped_local_cap = 0;
+   g_wbms_central_skipped_friday    = 0;
    g_wbms_interleaved_steps         = 0;
    g_wbms_interleaved_first_time    = 0;
    g_wbms_interleaved_last_time     = 0;
@@ -1570,6 +1774,7 @@ inline void WBMS_BuildCentralExecutionGate(const datetime scan_from,
    g_wbms_central_skipped_open      = 0;
    g_wbms_central_skipped_m15_cap   = 0;
    g_wbms_central_skipped_local_cap = 0;
+   g_wbms_central_skipped_friday    = 0;
    g_wbms_interleaved_steps         = 0;
    g_wbms_interleaved_first_time    = (ArraySize(candidates) > 0 ? candidates[0].rec.hit_time : 0);
    g_wbms_interleaved_last_time     = (ArraySize(candidates) > 0 ? candidates[ArraySize(candidates)-1].rec.hit_time : 0);
@@ -1624,7 +1829,13 @@ inline void WBMS_BuildCentralExecutionGate(const datetime scan_from,
       bool accept = true;
       int reason  = TRGSTMT_CENTRAL_ALLOW;
 
-      if(open_count >= max_open)
+      if(WB_FridayGuard_BlockNewTradeAt(t))
+      {
+         accept = false;
+         reason = TRGSTMT_CENTRAL_BLOCK_FRIDAY_GUARD;
+         g_wbms_central_skipped_friday++;
+      }
+      else if(open_count >= max_open)
       {
          accept = false;
          reason = TRGSTMT_CENTRAL_BLOCK_MAX_OPEN;
@@ -1680,6 +1891,7 @@ inline void WBMS_BuildCentralExecutionGate(const datetime scan_from,
             " | skipped_open=", g_wbms_central_skipped_open,
             " | skipped_m15_cap=", g_wbms_central_skipped_m15_cap,
             " | skipped_local_cap=", g_wbms_central_skipped_local_cap,
+            " | skipped_friday=", g_wbms_central_skipped_friday,
             " | timeline_steps=", g_wbms_interleaved_steps);
 }
 
@@ -1860,6 +2072,8 @@ inline string __WBMS_NormalizeEmbeddedDetailLine(const string in_line)
       reason = "CENTRAL_MULTI_SYMBOL_ONE_OPEN_BLOCK";
    else if(StringFind(out, "CENTRAL_MULTI_SYMBOL_DECISION_MISSING") >= 0)
       reason = "CENTRAL_MULTI_SYMBOL_DECISION_MISSING";
+   else if(StringFind(out, "FRIDAY_WEEKEND_GUARD_BLOCK") >= 0)
+      reason = "FRIDAY_WEEKEND_GUARD_BLOCK";
 
    if(reason == "")
       return out;
@@ -1871,6 +2085,7 @@ inline string __WBMS_NormalizeEmbeddedDetailLine(const string in_line)
       StringReplace(out, "SkipReason=CENTRAL_MULTI_SYMBOL_M15_NEW_CAP_BLOCK", "SkipReason=" + reason);
       StringReplace(out, "SkipReason=CENTRAL_MULTI_SYMBOL_LOCAL_REF_CAP_BLOCK", "SkipReason=" + reason);
       StringReplace(out, "SkipReason=CENTRAL_MULTI_SYMBOL_DECISION_MISSING", "SkipReason=" + reason);
+      StringReplace(out, "SkipReason=FRIDAY_WEEKEND_GUARD_BLOCK", "SkipReason=" + reason);
       out = __WBMS_EnsureCentralReasonToken(out, reason);
    }
 
@@ -1933,6 +2148,7 @@ inline void __WBMS_WriteCombinedStatement(const datetime scan_from,
    __TRGSTM_WriteLine(handle, "Scan To                : " + __TRGSTM_SafeTime(scan_to));
    __TRGSTM_WriteLine(handle, "Statement Close Date   : " + __TRGSTM_SafeTime(InpStatementCloseDate));
    __TRGSTM_WriteLine(handle, "Central Risk Manager   : WaveBotRiskManager.mqh | max open total=" + IntegerToString(WB_Config_MaxOpenTrades()) + " | one open WaveBot trade account-wide by default");
+   __TRGSTM_WriteLine(handle, "Friday Close Guard     : " + WB_FridayGuard_SettingsText());
    __TRGSTM_WriteLine(handle, "Interleaved Engine     : ENABLED | central M1 trigger/execution timeline is merged chronologically across all configured symbols");
    __TRGSTM_WriteLine(handle, "Statement Write Policy : deferred until every configured symbol has completed its M1 scan");
    __TRGSTM_WriteLine(handle, "Cap Accounting Policy  : max " + IntegerToString(WB_Config_MaxTradesPerM15NewSignal()) + " per M15 NEW and max " + IntegerToString(WB_Config_MaxTradesPerLocalRef()) + " per local M1 reference are counted only after central-gate acceptance");
@@ -1961,6 +2177,7 @@ inline void __WBMS_WriteCombinedStatement(const datetime scan_from,
    __TRGSTM_WriteLine(handle, "Central Skipped Open   : " + IntegerToString(g_wbms_central_skipped_open));
    __TRGSTM_WriteLine(handle, "Central Skipped M15Cap : " + IntegerToString(g_wbms_central_skipped_m15_cap));
    __TRGSTM_WriteLine(handle, "Central Skipped RefCap : " + IntegerToString(g_wbms_central_skipped_local_cap));
+   __TRGSTM_WriteLine(handle, "Central Skipped Friday : " + IntegerToString(g_wbms_central_skipped_friday));
    __TRGSTM_WriteLine(handle, "Interleaved Steps      : " + IntegerToString(g_wbms_interleaved_steps)
                                       + " | First=" + __TRGSTM_SafeTime(g_wbms_interleaved_first_time)
                                       + " | Last=" + __TRGSTM_SafeTime(g_wbms_interleaved_last_time));
@@ -2268,6 +2485,11 @@ int OnInit()
    WBLOG_LogParam("InpM1MinSLPips", DoubleToString(InpM1MinSLPips, 2), "input");
    WBLOG_LogParam("InpM1MaxSLPips", DoubleToString(InpM1MaxSLPips, 2), "input");
    WBLOG_LogParam("InpM1MaxTradesPerLocalRef", IntegerToString(InpM1MaxTradesPerLocalRef), "input");
+   WBLOG_LogParam("InpUseFridayCloseGuard", (InpUseFridayCloseGuard ? "true" : "false"), "input");
+   WBLOG_LogParam("InpFridayNoNewTradeHour", IntegerToString(InpFridayNoNewTradeHour), "input");
+   WBLOG_LogParam("InpFridayNoNewTradeMinute", IntegerToString(InpFridayNoNewTradeMinute), "input");
+   WBLOG_LogParam("InpFridayCloseTradesHour", IntegerToString(InpFridayCloseTradesHour), "input");
+   WBLOG_LogParam("InpFridayCloseTradesMinute", IntegerToString(InpFridayCloseTradesMinute), "input");
    WBLOG_LogParam("M1RuntimeConfigSource", WB_Config_SourceText(), "WaveBot.mq5");
    WBLOG_LogParam("M1_MAX_TRADES_PER_M15_NEW_SIGNAL", IntegerToString(WB_Config_MaxTradesPerM15NewSignal()), "runtime-config");
    WBLOG_LogParam("M1_MAX_OPEN_TRADES", IntegerToString(WB_Config_MaxOpenTrades()), "runtime-config");
@@ -2275,6 +2497,7 @@ int OnInit()
    WBLOG_LogParam("TRGSL_MAX_RISK_PIPS", DoubleToString(WB_Config_MaxSLPips(), 2), "runtime-config");
    WBLOG_LogParam("TRGSL_R_MULTIPLE", "3.0", "TriggerSLTP.mqh");
    WBLOG_LogParam("M1_LOCAL_REF_MAX_TRADES", IntegerToString(WB_Config_MaxTradesPerLocalRef()), "runtime-config");
+   WBLOG_LogParam("FRIDAY_CLOSE_GUARD", WB_FridayGuard_SettingsText(), "runtime-config");
    WBLOG_LogParam("M1_LOCAL_REF_MTC_INVALIDATION", "true", "RaceCoordinator.mqh");
 
    // Ensure WorldManager captures clean baselines before any scan starts
