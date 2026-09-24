@@ -8,7 +8,8 @@
 #include <WaveBot/SWGate.mqh>
 #include <WaveBot/Hunter.mqh>        // SW_UP_* و سطح High(C1-HW)
 #include <WaveBot/Hunter_Down.mqh>   // SW_DOWN_* و سطح Low(C1-HW)
-#include <WaveBot/SR_Mitigator.mqh>  // NEW: مدیریت first SR mitigator
+#include <WaveBot/SR_Mitigator.mqh>  // مدیریت first SR mitigator
+#include <WaveBot/TrendConfirmation.mqh> // marker on next bar after first post-MTC SR
 
 // شمارنده‌ها و جلوگیری از رسم تکراری در هر Seed
 static int      g_sr_up_counter = 0;
@@ -107,6 +108,9 @@ inline void SR_OnBar_UP(const MqlRates &rates[], const int n, const int j, const
                           rates[j].time,    p_bottom);
             g_sr_sw_up_drawn_seed = seed_t;
 
+            // Analysis-only: confirm an UP MTC on its FIRST later UP SR.
+            TC_OnNewStrongRange(DIR_UP, rates, n, j);
+
             // NEW: ثبت وضعیت SR برای first SR mitigator
             const bool created_by_body = (rates[j].close > level_top);
             SRMIT_OnNewSR_UP(g_sr_up_counter,
@@ -143,6 +147,9 @@ inline void SR_OnBar_DOWN(const MqlRates &rates[], const int n, const int j, con
                           rates[t_idx].time, p_top,
                           rates[j].time,    p_bottom);
             g_sr_sw_dn_drawn_seed = seed_t;
+
+            // Analysis-only: confirm a DOWN MTC on its FIRST later DOWN SR.
+            TC_OnNewStrongRange(DIR_DOWN, rates, n, j);
 
             // NEW: ثبت وضعیت SR برای first SR mitigator
             const bool created_by_body = (rates[j].close < level_bottom);

@@ -121,6 +121,7 @@ inline void WB_ResetMarketWorld()
 
    SR_ResetGlobals();
    SRMIT_ResetGlobals();
+   TC_ResetGlobals();
 
    SR_AllowBoth();
 }
@@ -242,6 +243,7 @@ int OnInit()
 
    WB_ResetMarketWorld();
    Markers_DeleteObsoleteObjects();
+   TC_DeletePreviousMarkers();
    WB_ApplyHiddenVisualPolicies();
 
    EventSetTimer(2);
@@ -265,6 +267,8 @@ void OnTimer()
       g_sb_ran=true;
       // Original one-shot mode is analysis-only and does not bypass the normal scan.
       WB_ResetMarketWorld();
+      // The diagnostic pass is not the actual market scan: remove its TC labels.
+      TC_DeletePreviousMarkers();
    }
    WB_RunAllMarketScans();
 }

@@ -15,7 +15,8 @@
 #include <WaveBot/ExtLQ.mqh>
 #include <WaveBot/ExtLQ_Down.mqh>
 #include <WaveBot/ShadowBreaker.mqh>
-#include <WaveBot/SR_Gate.mqh>     // NEW: SR direction gating after MTC
+#include <WaveBot/SR_Gate.mqh>     // SR direction gating after MTC
+#include <WaveBot/TrendConfirmation.mqh> // TC after first matching post-MTC Strong Range
 #include <WaveBot/Hunter.mqh>      // for SW_UP_ClearSeed()
 #include <WaveBot/Hunter_Down.mqh> // for SW_DOWN_ClearSeed()
 
@@ -95,6 +96,10 @@ inline void Race_RecordMTCEvent(const Direction dir, const MqlRates &rates[], co
    g_race_last_mtc_dir   = dir;
    g_race_last_mtc_time  = rates[bodyIdx].time;
    g_race_last_mtc_index = bodyIdx;
+
+   // Every real MTC (normal Path-B or BB special) starts a fresh TC epoch.
+   // The duplicate-event guard resides in TC_OnMTC().
+   TC_OnMTC(dir, rates[bodyIdx].time);
 }
 
 inline bool __Race_IndexMatchesTime(const MqlRates &rates[], const int n,

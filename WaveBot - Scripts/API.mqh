@@ -202,6 +202,8 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
                g_scan_id = __maj_scan_id;
             }
 
+            TC_OnProcessedBar(rates, n, i);
+
             if(Race_CheckActiveRefBreak_Global(rates, n, i))
             {
                Race_LeaveAPIScan(__api_token);
@@ -289,6 +291,8 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
                   Markers_SetNamespace("MAJ");
                g_scan_id = __maj_scan_id;
             }
+
+            TC_OnProcessedBar(rates, n, j);
 
             if(Race_CheckActiveRefBreak_Global(rates, n, j))
             {
