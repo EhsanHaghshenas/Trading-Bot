@@ -5,7 +5,6 @@
 #include <WaveBot/ExtLQ.mqh>
 #include <WaveBot/Utils.mqh>
 #include <WaveBot/RaceCoordinator.mqh>
-#include <WaveBot/FSMS_Lifecycle.mqh>
 #include <WaveBot/SWGate.mqh>
 
 // ---------------- Hunter (UP) state ----------------
@@ -19,7 +18,6 @@ static int      g_sw_seed_u_c1     = -1;     // اندیس C1 هانتر
 static datetime g_sw_seed_u_xtime  = 0;      // زمان شکست ext lq
 static double   g_sw_seed_u_level  = 0.0;    // High(C1 هانتر)
 static int      g_sw_counter_u     = 0;      // شمارندهٔ مارکرهای SW
-// ---------------- Hunter-UP Context (for major/minor worlds) ----------------
 struct HunterUpContext
 {
    int      hw_counter;      // همان g_hw_counter_u
@@ -180,15 +178,8 @@ inline void Hunter_TryMarkIfValid(const MqlRates &rates[], const int n,
       MarkV("HW_"+tag+"_C1", rates[c1_index].time, clrViolet);
       MarkV("HW_"+tag+"_X",  rates[cross_idx].time, clrMagenta);
    }
-   bool __m15new_hwx_up_ok = M15NewMarker_OnTarget(DIR_UP, WB_M15NEW_TARGET_HWX, rates, n, cross_idx);
-   Trigger_M1LocalGateRegister(DIR_UP, WB15_KIND_START_HWX, rates, n, cross_idx, c1_index);
    g_marked_for_lq_u = true;
 
-   FSMSLC_RequestTerminal(FSMSLC_TERM_HWX, rates[cross_idx].time);
-
-   // M15->M1 Stage-1 is now exclusive to FSMS/HWX/HWBB candles tagged "new".
-   if(__m15new_hwx_up_ok)
-      WB15_PublishStartHWX(InpSymbol, DIR_UP, rates[cross_idx].time, ExtLQ_Get());
 
    // --- بذر SW را فعال کن (Highِ C1 هانتر)
    SW_UP_ActivateSeed(rates, n, c1_index, cross_idx);

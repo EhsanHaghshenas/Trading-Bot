@@ -15,14 +15,10 @@
 #include <WaveBot/C1PreLock.mqh>   // NEW: early C1 pre-lock for SEARCH_W2
 #include <WaveBot/W2W3_ChainInvalidation.mqh>
 #include <WaveBot/ShadowBreaker.mqh>
-#include <WaveBot/FSMS.mqh>   // NEW: early FSMS detector (pre-HWBB)
-#include <WaveBot/FSMS.mqh>   // NEW: early FSMS detector (pre-HWBB)
 #include <WaveBot/StrongRange.mqh>  // NEW: Strong range painter
 #include <WaveBot/SR_Gate.mqh>   // NEW: gating/cleanup for Strong Range
 #include <WaveBot/SR_Mitigator.mqh>   // NEW
-#include <WaveBot/SR_GoozBaghali.mqh>  // NEW: ???? gooz baghali ???? unmitigated SR (DOWN)
 #include <WaveBot/ExtLQ.mqh>   // ???? ???? ???? ??? ????? ????? init-extLQ
-#include <WaveBot/WorldManager.mqh>
 
 // helper: leftmost max-high in [from..to] excluding inside bars
 inline int IndexOfLeftmostMaxHigh_ExInside(const MqlRates &rates[], const bool &insideHL[],
@@ -121,48 +117,6 @@ inline void __API_DrawConfirmedPair_DN(const string tag,
 }
 
 
-inline int __API_Down_TriggerPickLatestIndex(const int current_best, const int candidate)
-{
-   if(candidate < 0) return current_best;
-   if(current_best < 0) return candidate;
-   if(candidate > current_best) return candidate;
-   return current_best;
-}
-
-inline int __API_Down_TriggerActiveCandidate_ANY_DN(const int fallback_idx)
-{
-   int best = fallback_idx;
-
-   if(C1Pre_DN_IsActive())
-      best = __API_Down_TriggerPickLatestIndex(best, C1Pre_DN_CurrentIndex());
-   if(C1W2_DN_IsActive())
-      best = __API_Down_TriggerPickLatestIndex(best, C1W2_DN_CurrentIndex());
-   if(C1W2_PB_DN_IsActive())
-      best = __API_Down_TriggerPickLatestIndex(best, C1W2_PB_DN_CurrentIndex());
-
-   if(SW_UP_SeedActive())
-      best = __API_Down_TriggerPickLatestIndex(best, SW_UP_C1Index());
-   if(SW_DOWN_SeedActive())
-      best = __API_Down_TriggerPickLatestIndex(best, SW_DOWN_C1Index());
-
-   if(FSMS_SW_UP_SeedActive())
-      best = __API_Down_TriggerPickLatestIndex(best, FSMS_SW_UP_C1Index());
-   if(FSMS_SW_DN_SeedActive())
-      best = __API_Down_TriggerPickLatestIndex(best, FSMS_SW_DN_C1Index());
-
-   return best;
-}
-
-inline int __API_Down_TriggerCandidate_WAIT_DN(const int fallback_idx, const int w3_c1, const int w3_cand)
-{
-   int best = __API_Down_TriggerActiveCandidate_ANY_DN(fallback_idx);
-   if(w3_c1 >= 0)
-      best = __API_Down_TriggerPickLatestIndex(best, w3_c1);
-   if(w3_cand >= 0)
-      best = __API_Down_TriggerPickLatestIndex(best, w3_cand);
-   return best;
-}
-
 // full scan (DOWN)
 int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf,
                                            const datetime from_time, const datetime to_time,
@@ -190,21 +144,8 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
    const int HISTORY_SKIP_BARS = 0;
    datetime effective_start = from_time + (HISTORY_SKIP_BARS * tfsec);
    datetime from_adj = from_time - tfsec*10;
-
+   // Analysis scan is bounded solely by the requested historical window.
    datetime __api_stop_time = to_time;
-   if(tf == PERIOD_M1 && Trigger_M1HardStopEnabled())
-   {
-      datetime __hs = Trigger_M1HardStopTime();
-      if(__hs > 0 && (__api_stop_time <= 0 || __api_stop_time > __hs))
-         __api_stop_time = __hs;
-   }
-   else
-   if(tf == PERIOD_M15 && bump_scan_id && Trigger_M15HardStopEnabled())
-   {
-      datetime __hs15 = Trigger_M15HardStopTime();
-      if(__hs15 > 0 && (__api_stop_time <= 0 || __api_stop_time > __hs15))
-         __api_stop_time = __hs15;
-   }
 
    MqlRates rates[]; int n = LoadRatesRange(sym, tf, from_adj, __api_stop_time, rates);
    if(n<=0)
@@ -261,34 +202,11 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
                g_scan_id = __maj_scan_id;
             }
 
-            if(tf == PERIOD_M1)
-            {
-               if(Trigger_M1HardStopShouldStopBeforeBar(rates[i].time))
-               {
-                  Race_LeaveAPIScan(__api_token);
-                  return pairs;
-               }
-               Trigger_M1HardStopMarkFinalBarIfNeeded(rates[i].time);
-            }
-            else
-            if(tf == PERIOD_M15 && bump_scan_id)
-            {
-               if(Trigger_M15HardStopShouldStopBeforeBar(rates[i].time))
-               {
-                  Race_LeaveAPIScan(__api_token);
-                  return pairs;
-               }
-               Trigger_M15HardStopMarkFinalBarIfNeeded(rates[i].time);
-            }
-
             if(Race_CheckActiveRefBreak_Global(rates, n, i))
             {
                Race_LeaveAPIScan(__api_token);
                return pairs;
             }
-
-            Trigger_OnBarCandidate(InpSymbol, rates, insideHL, n, i, __API_Down_TriggerActiveCandidate_ANY_DN(i));
-            M15NewZone_OnBar(rates, n, i);
 
             ExtLQ_Down_OnBar(rates[i]);
             HW_BB_DOWN_OnBar(rates[i], rates, n, i);
@@ -305,38 +223,22 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
                return pairs;
             }
             SR_Mitigator_OnBar_DOWN(rates, n, i);   // NEW
-            SR_GoozBaghali_OnBar_DOWN(rates, n, i);
-            FSMS_SW_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);   // NEW: parallel guard for FSMS–SW^
-            if(WBWM_MinorWorldEnabledOnThisChart())
-               WBWM_ProcessMinorStarterEvents(rates, n, i, __api_stop_time);
-            if(Race_ShouldAllowFSMS())
-            {
-               FSMS_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, i);
-            }
-            WB15_MasterOnM15Bar(sym, rates, n, i);
+
             if(insideHL[i]) continue;
             
             bool __reanched = false;
             if(!C1W2_DN_ShouldAllowAt(rates, i, __reanched))
             {
                // Side-effect modules for this bar were already updated above.
-               // Avoid running FSMS/FSMS-SW/WB15 twice on the same candle.
                continue;
             }
-            // C1W2 ??? ??? ??? ?? ??? ???? ???? FSMS ?? ?? C1Pre ??? ???????.
             
-            // --- NEW: Early C1 Loyalty Gate (pre-lock) + FSMS sync -----------------
             bool __pre_re = false;
             if(!C1Pre_DN_ShouldAllowAt(rates, i, __pre_re))
             {
                continue;  // ??????? ?? C1 ????
             }
-            if(__pre_re)
-            {
-               FSMS_OnSameDirC1_Reanchor_DOWN(rates, n, i);
-            }
 
-            Trigger_OnBarCandidate(InpSymbol, rates, insideHL, n, i, __API_Down_TriggerActiveCandidate_ANY_DN(i));
 
             int i2=-1,i3=-1,i4=-1;
             if(!CheckWave2_FromIndex_LocalOnly_Down(rates,insideHL,bodyLowEff,bodyHighEff,n,i,i2,i3,i4))
@@ -386,34 +288,11 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
                g_scan_id = __maj_scan_id;
             }
 
-            if(tf == PERIOD_M1)
-            {
-               if(Trigger_M1HardStopShouldStopBeforeBar(rates[j].time))
-               {
-                  Race_LeaveAPIScan(__api_token);
-                  return pairs;
-               }
-               Trigger_M1HardStopMarkFinalBarIfNeeded(rates[j].time);
-            }
-            else
-            if(tf == PERIOD_M15 && bump_scan_id)
-            {
-               if(Trigger_M15HardStopShouldStopBeforeBar(rates[j].time))
-               {
-                  Race_LeaveAPIScan(__api_token);
-                  return pairs;
-               }
-               Trigger_M15HardStopMarkFinalBarIfNeeded(rates[j].time);
-            }
-
             if(Race_CheckActiveRefBreak_Global(rates, n, j))
             {
                Race_LeaveAPIScan(__api_token);
                return pairs;
             }
-
-            Trigger_OnBarCandidate(InpSymbol, rates, insideHL, n, j, __API_Down_TriggerCandidate_WAIT_DN(c1, w3_c1, w3_cand));
-            M15NewZone_OnBar(rates, n, j);
 
             ExtLQ_Down_OnBar(rates[j]);
             if(Hunter_Down_IsExtLQCross(rates[j]))
@@ -433,15 +312,7 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
             SR_Mitigator_OnBar_DOWN(rates, n, j);   // NEW
 
             SB_DN_OnBarCtx(rates, insideHL, n, cend, j);   // ShadowBreaker + temp-c1-sw
-            SR_GoozBaghali_OnBar_DOWN(rates, n, j);
-            FSMS_SW_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, j);   // NEW: parallel guard for FSMS–SW
-            if(WBWM_MinorWorldEnabledOnThisChart())
-               WBWM_ProcessMinorStarterEvents(rates, n, j, __api_stop_time);
-            if(Race_ShouldAllowFSMS())
-            {
-               FSMS_OnBarCtx(rates, insideHL, bodyLowEff, bodyHighEff, n, j);
-            }
-            WB15_MasterOnM15Bar(sym, rates, n, j);
+
             // --- NEW: Chain invalidation after ShadowBreaker (DOWN) --------------
             if(SB_DN_InvalidatorReady())
             {
@@ -460,8 +331,7 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
                   ExtLQ_Down_ClearAll(false);
                   Hunter_Down_OnExtLQUpdated();
                }
-            
-               FSMS_OnSameDirW2Invalidated_DOWN();   // NEW
+
 
                // [C]
                datetime sbt = SB_DN_SBTime();
@@ -478,8 +348,7 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
                break;
             }
 
-            // NEW: ????? ????? ?? ????? unmitigated SR ??? ?? ?? MTC/invalidator (DOWN)
-            SR_GoozBaghali_OnBar_DOWN(rates, n, j);
+
 
             if(insideHL[j]) continue;
 
@@ -502,8 +371,8 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
                      if(firstWickIdx < 0)
                      {
                         firstWickIdx = j;
-                        FSMS_OnSameDirW2Invalidated_DOWN(); // NEW: ?????????? C1 ?????? ? ???? ???? ?????? FSMS
-                        FSMS_OnSameDirC1_First_DOWN(rates, n, j); // NEW: re-arm FSMS from this wick-broken same-dir C1
+
+
 
                         wickBreakIdx = j;
                         wickActive   = true;
@@ -513,7 +382,6 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
                         have_w3=false; w3_c1 = anchorC1;
 
                         w3_cand=-1; w3_cand_high=-DBL_MAX;
-                        Trigger_OnBarCandidate(InpSymbol, rates, insideHL, n, j, __API_Down_TriggerCandidate_WAIT_DN(c1, w3_c1, w3_cand));
                      }
                   }
                }
@@ -530,7 +398,7 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
                   if(InpDebugPrints)
                      Print("[ChainInv-DOWN] W2 & W3 INVALID (pre-body, wick-window via C1_W3 break).",
                            " Rewind to wick @ ", T(rates[__rew].time));
-                  FSMS_OnSameDirW2Invalidated_DOWN();   // NEW         
+
                   idx = __rew; state = SEARCH_W2;
                   C1Pre_DN_Reset();   // NEW
                   progressed = true; break;
@@ -549,7 +417,6 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
                   w3_c1 = -1;
                   w3_cand      = j;
                   w3_cand_high = rates[j].high;
-                  Trigger_OnBarCandidate(InpSymbol, rates, insideHL, n, j, __API_Down_TriggerCandidate_WAIT_DN(c1, w3_c1, w3_cand));
                   continue;
                }
             }
@@ -572,7 +439,7 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
                   if(InpDebugPrints)
                      Print("#",tag," W2(DOWN) INVALIDATED (C1_W3 changed after body-break). Restart @ ",
                            T(rates[bodyBreakIdx>=0?bodyBreakIdx:j].time));
-                  FSMS_OnSameDirW2Invalidated_DOWN();
+
                   idx       = (bodyBreakIdx>=0 ? bodyBreakIdx : j);
                   state     = SEARCH_W2;
                   C1Pre_DN_Reset();   // NEW
@@ -590,7 +457,7 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
                {
                   if(InpDebugPrints)
                      Print("#",tag," W2(DOWN) INVALIDATED after body-break: H > H(C1_W3). Restart @ ",T(rates[bodyBreakIdx>=0?bodyBreakIdx:j].time));
-                  FSMS_OnSameDirW2Invalidated_DOWN();   // NEW
+
    
                   idx = (bodyBreakIdx>=0 ? bodyBreakIdx : j);
                   state = SEARCH_W2;
@@ -609,7 +476,6 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
                   w3_cand      = j;            // may be j == cend (overlap)
                   w3_cand_high = rates[j].high;
                   have_w3      = false;
-                  Trigger_OnBarCandidate(InpSymbol, rates, insideHL, n, j, __API_Down_TriggerCandidate_WAIT_DN(c1, w3_c1, w3_cand));
                }
             }
 
@@ -633,7 +499,6 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
                   have_w3=true;
                   if(w3_c1 < 0) w3_c1 = startIdx;
                   k2=a2; k3=a3; k4=a4; w3_end=w3e;
-                  Trigger_OnBarCandidate(InpSymbol, rates, insideHL, n, j, __API_Down_TriggerCandidate_WAIT_DN(c1, w3_c1, w3_cand));
                }
             }
 
@@ -647,12 +512,10 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
                Hunter_Down_OnExtLQUpdated();
             
                SW_DOWN_TryMarkOnConfirmedW3(rates, n, w3_c1, bodyBreakIdx);
-               FSMS_SW_DN_TryMarkOnConfirmedW3(rates, n, w3_c1, bodyBreakIdx);   // NEW: finalize FSMS–SW if armed
 
-               FSMS_OnW3Confirmed_DOWN(rates, n, w3_c1);
+
 
                C1W2_DN_Start(rates, (bodyBreakIdx>=0 ? bodyBreakIdx : idx)); // ??? W2 ?????? ???? ??? ????
-               // ???? ??????? FSMS ?? ????? C1 ???? ?????? ???? ?? ???? C1Pre_DN ?? SEARCH_W2 ????? ??????.
 
                SWGate_DN_OnPairFinalized();
                SB_DN_BringToFront();  // PRIORITY: redraw SB/temp/invalidator on top for this bar
@@ -661,7 +524,6 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
                   Print("#",tag," Pair(DOWN) OK | W3 C1=",T(rates[w3_c1].time),
                         " | body-break @ ",T(rates[bodyBreakIdx>=0?bodyBreakIdx:idx].time));
             
-               M15NewMarker_OnNewWavePair(DIR_DOWN, rates[(bodyBreakIdx>=0 ? bodyBreakIdx : j)].time);
 
                idx=j; state=SEARCH_W2;
                C1Pre_DN_Reset();   // NEW
@@ -683,8 +545,7 @@ int API_Down_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAM
    Print("STRICT(DOWN): pairs=",pairs,
          (ExtLQ_Down_Has()? StringFormat(" | ext lq=%.5f",ExtLQ_Down_Get()) : " | ext lq:n/a"));
 
-   // NEW: ?? ?????? ????? ???? ???? ???? w2_minor ?? ?? ??? ??
-   FSMS_SW_MinorLog_Dump();
+
 
    Race_LeaveAPIScan(__api_token);
    return pairs;

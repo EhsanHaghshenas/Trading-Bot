@@ -18,7 +18,6 @@
 #include <WaveBot/SR_Gate.mqh>     // NEW: SR direction gating after MTC
 #include <WaveBot/Hunter.mqh>      // for SW_UP_ClearSeed()
 #include <WaveBot/Hunter_Down.mqh> // for SW_DOWN_ClearSeed()
-#include <WaveBot/FSMS_SW.mqh>   // for FSMS_SW_DisarmAll()
 
 inline ENUM_TIMEFRAMES __Race_RuntimeTF()
 {
@@ -571,8 +570,6 @@ inline void Race_ContextImport(const RaceContext &ctx)
 inline bool Race_IsLocked() { return g_race_locked; }
 inline bool     Race_WorldHWBBSeen()  { return (g_world_hwbb_time > 0); }
 inline datetime Race_WorldHWBBTime()  { return g_world_hwbb_time; }
-// FSMS is an early (pre-HWBB) detector; in MIN world we stop it after the first HWBB is seen
-inline bool Race_ShouldAllowFSMS(){ return !g_race_locked; }
 // --------------------[ API execution / abort handoff ]--------------------
 // این state فقط runtime است و جزو snapshot world نیست.
 // هدف: وقتی MTC در میانه‌ی یک API scan رخ می‌دهد و همان‌جا nested-scan جدید
@@ -688,41 +685,11 @@ inline bool __Race_IsMajorWorld()
    return (ns == "" || ns == "MAJ");
 }
 
-inline bool __Race_HistoricalStopBlocksNestedScan()
-{
-   if(Trigger_M1HardStopFinalizeRequested())
-      return true;
-
-   // M15 hard stop must block only MAJ-world nested rescans. If a MIN archive
-   // scan exists on other timeframes, it remains bounded by its own range.
-   if(__Race_IsMajorWorld() && Trigger_M15HardStopFinalizeRequested())
-      return true;
-
-   return false;
-}
-
 inline datetime __Race_ScanToTime(const MqlRates &rates[], const int n)
 {
    datetime to_time = TimeCurrent();
    if(n > 0)
       to_time = rates[n-1].time;
-
-   const ENUM_TIMEFRAMES runtime_tf = __Race_RuntimeTF();
-
-   if(runtime_tf == PERIOD_M1 && Trigger_M1HardStopEnabled())
-   {
-      datetime hs1 = Trigger_M1HardStopTime();
-      if(hs1 > 0 && (to_time <= 0 || to_time > hs1))
-         to_time = hs1;
-   }
-   else
-   if(runtime_tf == PERIOD_M15 && Trigger_M15HardStopEnabled())
-   {
-      datetime hs15 = Trigger_M15HardStopTime();
-      if(hs15 > 0 && (to_time <= 0 || to_time > hs15))
-         to_time = hs15;
-   }
-
    return to_time;
 }
 
@@ -764,7 +731,7 @@ inline void __Race_ClearRegimeArtifacts()
    SW_UP_ClearSeed();
    SW_DOWN_ClearSeed();
    SWGate_ResetGlobals();
-   FSMS_SW_DisarmAll();
+
 }
 
 inline void __Race_PrepareMTCRegimeHandoff(const Direction new_dir)
@@ -1075,7 +1042,7 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
                   // Fail-safe cleanup (in case ref was missing) and clean W2/W3 handoff
                   __Race_PrepareMTCRegimeHandoff(DIR_DOWN);
 
-                  if(__prev_mode==DIR_UP && !__Race_HistoricalStopBlocksNestedScan())
+                  if(__prev_mode==DIR_UP)
                      API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, runtime_tf, __from, __to,
                                                            false, 0.0, 0, "", __bump);
                }
@@ -1299,7 +1266,7 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
 
                   __Race_PrepareMTCRegimeHandoff(DIR_UP);
 
-                  if(__prev_mode==DIR_DOWN && !__Race_HistoricalStopBlocksNestedScan())
+                  if(__prev_mode==DIR_DOWN)
                      API_RunScanSequential_W2W3_Hunter(InpSymbol, runtime_tf, __from, __to,
                                                       false, 0.0, 0, "", __bump);
                }
@@ -1345,13 +1312,6 @@ inline void Race_DrawW2W3_MTC_Down(const MqlRates &rates[], const int n, const R
    if(S.bodyBreakIdx >= 0 && S.bodyBreakIdx < n && InpDrawMarkers)
       MarkV("MTC_DN_BB_"+tag, rates[S.bodyBreakIdx].time, clrRed);
 
-   // NEW (M15->M1 bridge): MTC is a STOP trigger (use body-break candle time)
-   if(S.bodyBreakIdx >= 0 && S.bodyBreakIdx < n)
-   {
-      WB15_PublishStopMTC(InpSymbol, DIR_DOWN, rates[S.bodyBreakIdx].time);
-      Trigger_M1LocalGateOnMTC(DIR_DOWN, rates[S.bodyBreakIdx].time);
-   }
-
    // --- Reference for this MTC_DOWN
    if(g_race_ref_mtc_down > 0.0)
    {
@@ -1379,8 +1339,6 @@ inline void Race_DrawW2W3_MTC_Down(const MqlRates &rates[], const int n, const R
 
    // Remember this MTC candle so the next back-to-back special can rebuild its reference.
    Race_RecordMTCEvent(DIR_DOWN, rates, n, S.bodyBreakIdx);
-   if(S.bodyBreakIdx >= 0 && S.bodyBreakIdx < n)
-      M15NewMarker_OnMTC(DIR_DOWN, rates[S.bodyBreakIdx].time, S.bodyBreakIdx, true);
 
    // --- IMPORTANT cleanup after MTC
    SR_AllowOnly(DIR_DOWN);
@@ -1410,13 +1368,6 @@ inline void Race_DrawW2W3_MTC_Up(const MqlRates &rates[], const int n, const Rac
    if(S.bodyBreakIdx >= 0 && S.bodyBreakIdx < n && InpDrawMarkers)
       MarkV("MTC_UP_BB_"+tag, rates[S.bodyBreakIdx].time, clrBlue);
 
-   // NEW (M15->M1 bridge): MTC is a STOP trigger (use body-break candle time)
-   if(S.bodyBreakIdx >= 0 && S.bodyBreakIdx < n)
-   {
-      WB15_PublishStopMTC(InpSymbol, DIR_UP, rates[S.bodyBreakIdx].time);
-      Trigger_M1LocalGateOnMTC(DIR_UP, rates[S.bodyBreakIdx].time);
-   }
-
    // --- Reference for this MTC_UP
    if(g_race_ref_mtc_up > 0.0)
    {
@@ -1444,8 +1395,6 @@ inline void Race_DrawW2W3_MTC_Up(const MqlRates &rates[], const int n, const Rac
 
    // Remember this MTC candle so the next back-to-back special can rebuild its reference.
    Race_RecordMTCEvent(DIR_UP, rates, n, S.bodyBreakIdx);
-   if(S.bodyBreakIdx >= 0 && S.bodyBreakIdx < n)
-      M15NewMarker_OnMTC(DIR_UP, rates[S.bodyBreakIdx].time, S.bodyBreakIdx, true);
 
    SR_AllowOnly(DIR_UP);
    __Race_ClearRegimeArtifacts();
@@ -1462,9 +1411,6 @@ inline void __Race_LaunchSpecialDirectionScan(const Direction dir,
    const datetime __to   = __Race_ScanToTime(rates, n);
    const bool     __bump = __Race_IsMajorWorld();
    const ENUM_TIMEFRAMES runtime_tf = __Race_RuntimeTF();
-
-   if(__Race_HistoricalStopBlocksNestedScan())
-      return;
 
    if(dir == DIR_UP)
       API_RunScanSequential_W2W3_Hunter(InpSymbol, runtime_tf, __from, __to,
@@ -1483,13 +1429,6 @@ inline void Race_DrawMTCOnly_Down_ByRef(const MqlRates &rates[],
 
    if(bodyIdx >= 0 && bodyIdx < n && InpDrawMarkers)
       MarkV("MTC_DN_BB_"+tag, rates[bodyIdx].time, clrRed);
-
-   // NEW (M15->M1 bridge): MTC is a STOP trigger (special-case)
-   if(bodyIdx >= 0 && bodyIdx < n)
-   {
-      WB15_PublishStopMTC(InpSymbol, DIR_DOWN, rates[bodyIdx].time);
-      Trigger_M1LocalGateOnMTC(DIR_DOWN, rates[bodyIdx].time);
-   }
 
    if(ref_price > 0.0)
    {
@@ -1520,8 +1459,6 @@ inline void Race_DrawMTCOnly_Down_ByRef(const MqlRates &rates[],
    }
 
    Race_RecordMTCEvent(DIR_DOWN, rates, n, bodyIdx);
-   if(bodyIdx >= 0 && bodyIdx < n)
-      M15NewMarker_OnMTC(DIR_DOWN, rates[bodyIdx].time, bodyIdx, false);
 
    SR_AllowOnly(DIR_DOWN);
    __Race_ClearRegimeArtifacts();
@@ -1542,13 +1479,6 @@ inline void Race_DrawMTCOnly_Up_ByRef(const MqlRates &rates[],
 
    if(bodyIdx >= 0 && bodyIdx < n && InpDrawMarkers)
       MarkV("MTC_UP_BB_"+tag, rates[bodyIdx].time, clrBlue);
-
-   // NEW (M15->M1 bridge): MTC is a STOP trigger (special-case)
-   if(bodyIdx >= 0 && bodyIdx < n)
-   {
-      WB15_PublishStopMTC(InpSymbol, DIR_UP, rates[bodyIdx].time);
-      Trigger_M1LocalGateOnMTC(DIR_UP, rates[bodyIdx].time);
-   }
 
    if(ref_price > 0.0)
    {
@@ -1579,8 +1509,6 @@ inline void Race_DrawMTCOnly_Up_ByRef(const MqlRates &rates[],
    }
 
    Race_RecordMTCEvent(DIR_UP, rates, n, bodyIdx);
-   if(bodyIdx >= 0 && bodyIdx < n)
-      M15NewMarker_OnMTC(DIR_UP, rates[bodyIdx].time, bodyIdx, false);
 
    SR_AllowOnly(DIR_UP);
    __Race_ClearRegimeArtifacts();

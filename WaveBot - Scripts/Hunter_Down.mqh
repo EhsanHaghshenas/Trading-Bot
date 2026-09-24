@@ -5,7 +5,6 @@
 #include <WaveBot/ExtLQ_Down.mqh>
 #include <WaveBot/Utils.mqh>
 #include <WaveBot/RaceCoordinator.mqh>
-#include <WaveBot/FSMS_Lifecycle.mqh>
 #include <WaveBot/SWGate.mqh>
 
 // ---------------- Hunter (DOWN) state ----------------
@@ -19,7 +18,6 @@ static int      g_sw_seed_d_c1     = -1;     // اندیس C1 هانتر
 static datetime g_sw_seed_d_xtime  = 0;      // زمان کراس ext lq
 static double   g_sw_seed_d_level  = 0.0;    // Low(C1 هانتر)
 static int      g_sw_counter_d     = 0;
-// ---------------- Hunter-DOWN Context (for major/minor worlds) ----------------
 struct HunterDownContext
 {
    int      hw_counter;      // همان g_hw_counter_d
@@ -178,15 +176,8 @@ inline void Hunter_Down_TryMarkIfValid(const MqlRates &rates[], const int n,
       MarkV("HW_"+tag+"_C1", rates[c1_index].time, clrViolet);
       MarkV("HW_"+tag+"_X",  rates[cross_idx].time, clrMagenta);
    }
-   bool __m15new_hwx_dn_ok = M15NewMarker_OnTarget(DIR_DOWN, WB_M15NEW_TARGET_HWX, rates, n, cross_idx);
-   Trigger_M1LocalGateRegister(DIR_DOWN, WB15_KIND_START_HWX, rates, n, cross_idx, c1_index);
    g_marked_for_lq_d = true;
 
-   FSMSLC_RequestTerminal(FSMSLC_TERM_HWX, rates[cross_idx].time);
-
-   // M15->M1 Stage-1 is now exclusive to FSMS/HWX/HWBB candles tagged "new".
-   if(__m15new_hwx_dn_ok)
-      WB15_PublishStartHWX(InpSymbol, DIR_DOWN, rates[cross_idx].time, ExtLQ_Down_Get());
 
    // بذر SW نزولی را فعال کن (Lowِ C1 هانتر)
    SW_DOWN_ActivateSeed(rates, n, c1_index, cross_idx);

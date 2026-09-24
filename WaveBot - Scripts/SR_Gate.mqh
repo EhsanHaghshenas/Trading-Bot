@@ -87,6 +87,6 @@ inline void SR_DeleteAllObjects()
    // NEW: همگام با پاک کردن آبجکت‌های SR، وضعیت Mitigator را هم صفر کن
    SRMIT_Reset_UP();
    SRMIT_Reset_DN();
-   SR_GoozBaghali_ResetAll();
+
 }
 #endif // WAVEBOT_SR_GATE_MQH
