@@ -199,7 +199,7 @@ inline void HW_BB_UP_OnBar(const MqlRates &r, const MqlRates &rates[], const int
 
 
       // set ref for POSSIBLE MTC_DOWN (High of Hunter-UP C1) + draw ref history now
-      Race_SetRefLevelForMTC_Down(SW_UP_Level());
+      Race_SetRefLevelForMTC_Down(SW_UP_Level(),SW_UP_C1Time(rates,n));
       //Race_DrawRefHistory_Down(SW_UP_Level(), r.time);
 
       // start race from this bar (Mode=UP)
@@ -280,7 +280,7 @@ inline void HW_BB_DOWN_OnBar(const MqlRates &r, const MqlRates &rates[], const i
 
 
       // set ref for POSSIBLE MTC_UP (Low of Hunter-DOWN C1) + draw ref history now
-      Race_SetRefLevelForMTC_Up(SW_DOWN_Level());
+      Race_SetRefLevelForMTC_Up(SW_DOWN_Level(),SW_DOWN_C1Time(rates,n));
       //Race_DrawRefHistory_Up(SW_DOWN_Level(), r.time);
 
       // start race from this bar (Mode=DOWN)

@@ -283,7 +283,17 @@
       "relative_to_project":false
     },
     {
-      "path":"MQL5\\Include\\WaveBot\\WaveBotLogger.mqh",
+      "path":"MQL5\\Include\\WaveBot\\Trigger_Type1.mqh",
+      "compile":false,
+      "relative_to_project":false
+    },
+    {
+      "path":"MQL5\\Include\\WaveBot\\Trigger_Type2.mqh",
+      "compile":false,
+      "relative_to_project":false
+    },
+    {
+      "path":"MQL5\\Include\\WaveBot\\WB4_TrendBridge.mqh",
       "compile":false,
       "relative_to_project":false
     },
@@ -298,12 +308,12 @@
       "relative_to_project":false
     },
     {
-      "path":"MQL5\\Include\\WaveBot\\Trigger_Type1.mqh",
+      "path":"MQL5\\Include\\WaveBot\\MajicalFVG.mqh",
       "compile":false,
       "relative_to_project":false
     },
     {
-      "path":"MQL5\\Include\\WaveBot\\Trigger_Type2.mqh",
+      "path":"MQL5\\Include\\WaveBot\\AnalysisLogger.mqh",
       "compile":false,
       "relative_to_project":false
     },
@@ -313,7 +323,37 @@
       "relative_to_project":false
     },
     {
+      "path":"MQL5\\Include\\WaveBot\\WaveBotLogger.mqh",
+      "compile":false,
+      "relative_to_project":false
+    },
+    {
+      "path":"MQL5\\Include\\WaveBot\\WaveBotSegment.mqh",
+      "compile":false,
+      "relative_to_project":false
+    },
+    {
+      "path":"MQL5\\Include\\WaveBot\\PostMTCNewTag.mqh",
+      "compile":false,
+      "relative_to_project":false
+    },
+    {
+      "path":"MQL5\\Include\\WaveBot\\M1_BuyOnlyPattern.mqh",
+      "compile":false,
+      "relative_to_project":false
+    },
+    {
       "path":"MQL5\\Include\\WaveBot\\WaveBotRiskManager.mqh",
+      "compile":false,
+      "relative_to_project":false
+    },
+    {
+      "path":"MQL5\\Include\\WaveBot\\TrendConfirmation.mqh",
+      "compile":false,
+      "relative_to_project":false
+    },
+    {
+      "path":"MQL5\\Include\\WaveBot\\Imbalance.mqh",
       "compile":false,
       "relative_to_project":false
     }

@@ -4,6 +4,7 @@
 
 #include <WaveBot/Types.mqh>
 #include <WaveBot/Markers.mqh>
+#include <WaveBot/Imbalance.mqh> // chronological MTC/TC history for IMB analysis
 
 // Analysis-only confirmation: one TC for the first standard Strong Range
 // in the direction of each actual MTC. No signal/trade side effects.
@@ -12,6 +13,7 @@ static bool      g_tc_waiting_for_next_bar = false;
 static bool      g_tc_confirmed = false;
 static Direction g_tc_mtc_direction = DIR_UP;
 static datetime  g_tc_mtc_time = 0;
+static datetime  g_tc_reference_start = 0;
 static datetime  g_tc_first_sr_time = 0;
 static datetime  g_tc_confirmation_time = 0;
 
@@ -22,24 +24,31 @@ inline void TC_ResetGlobals()
    g_tc_confirmed = false;
    g_tc_mtc_direction = DIR_UP;
    g_tc_mtc_time = 0;
+   g_tc_reference_start = 0;
    g_tc_first_sr_time = 0;
    g_tc_confirmation_time = 0;
 }
 
 // Do not erase a pending/confirmed TC on duplicate replays of the same MTC.
 // Reject older MTC events encountered in rewound/nested analysis scans.
-inline void TC_OnMTC(const Direction dir, const datetime mtc_time)
+inline void TC_OnMTC(const Direction dir, const datetime mtc_time,
+                     const datetime reference_start=0)
 {
    if(mtc_time <= 0 || mtc_time < g_tc_mtc_time) return;
    if(mtc_time == g_tc_mtc_time && dir == g_tc_mtc_direction) return;
 
    g_tc_mtc_direction = dir;
    g_tc_mtc_time = mtc_time;
+   g_tc_reference_start = (reference_start>0 && reference_start<=mtc_time ?
+                           reference_start : mtc_time);
    g_tc_first_sr_time = 0;
    g_tc_confirmation_time = 0;
    g_tc_waiting_for_sr = true;
    g_tc_waiting_for_next_bar = false;
    g_tc_confirmed = false;
+
+   // Record the accepted actual MTC for the later chronological IMB pass.
+   IMB_RecordMTC(dir,mtc_time,g_tc_reference_start);
 }
 
 // The label is anchored to the NEXT REAL bar, not to a calculated time:
@@ -52,6 +61,7 @@ inline void __TC_DrawOnCandle(const MqlRates &bar)
    g_tc_confirmation_time = bar.time;
    g_tc_waiting_for_next_bar = false;
    g_tc_confirmed = true;
+   IMB_RecordTC(g_tc_mtc_direction,g_tc_mtc_time,bar.time,g_tc_reference_start);
 
    const double candle_range = bar.high - bar.low;
    const double margin = MathMax(3.0 * _Point, candle_range * 0.20);

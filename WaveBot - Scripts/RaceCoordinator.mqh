@@ -44,6 +44,9 @@ static int       g_race_counter      = 0;        // ???? ????????? ???????
 // ????? ???? ???? ????? ??? ?? MTC
 static double   g_race_ref_mtc_up   = 0.0;  // mtc_up ? Low? C1? Hunter(DOWN)
 static double   g_race_ref_mtc_down = 0.0;  // mtc_down ? High? C1? Hunter(UP)
+// Real C1 candle that originally anchored each prospective MTC reference.
+static datetime g_race_ref_mtc_up_anchor_time = 0;
+static datetime g_race_ref_mtc_down_anchor_time = 0;
 
 // -----[ Reference History (draw immediately when created) ]-----
 static int g_ref_hist_up_counter   = 0;
@@ -54,21 +57,27 @@ static double   g_active_ref_up        = 0.0;
 static datetime g_active_ref_up_time   = 0;
 static double   g_active_ref_down      = 0.0;
 static datetime g_active_ref_down_time = 0;
+static datetime g_active_ref_up_anchor_time = 0;
+static datetime g_active_ref_down_anchor_time = 0;
 
 inline datetime Race_ActiveRef_Up_Time()   { return g_active_ref_up_time; }
 inline datetime Race_ActiveRef_Down_Time() { return g_active_ref_down_time; }
 // setters: called when an MTC_* is finalized (ref becomes the new active one)
-inline void Race_ActivateRef_Up(const double price, const datetime t)
+inline void Race_ActivateRef_Up(const double price, const datetime t,
+                                const datetime anchor_time=0)
 {
    if(price <= 0.0) return;
    g_active_ref_up      = price;
    g_active_ref_up_time = t;
+   g_active_ref_up_anchor_time = (anchor_time>0 && anchor_time<=t ? anchor_time : t);
 }
-inline void Race_ActivateRef_Down(const double price, const datetime t)
+inline void Race_ActivateRef_Down(const double price, const datetime t,
+                                  const datetime anchor_time=0)
 {
    if(price <= 0.0) return;
    g_active_ref_down      = price;
    g_active_ref_down_time = t;
+   g_active_ref_down_anchor_time = (anchor_time>0 && anchor_time<=t ? anchor_time : t);
 }
 
 // which ref is currently active? (latest timestamp wins)
@@ -99,7 +108,15 @@ inline void Race_RecordMTCEvent(const Direction dir, const MqlRates &rates[], co
 
    // Every real MTC (normal Path-B or BB special) starts a fresh TC epoch.
    // The duplicate-event guard resides in TC_OnMTC().
-   TC_OnMTC(dir, rates[bodyIdx].time);
+   const datetime mtc_time=rates[bodyIdx].time;
+   datetime ref_anchor=mtc_time; // safe fallback if this MTC has no usable ref
+   if(dir==DIR_UP && g_active_ref_up>0.0 && g_active_ref_up_time==mtc_time &&
+      g_active_ref_up_anchor_time>0)
+      ref_anchor=g_active_ref_up_anchor_time;
+   else if(dir==DIR_DOWN && g_active_ref_down>0.0 &&
+           g_active_ref_down_time==mtc_time && g_active_ref_down_anchor_time>0)
+      ref_anchor=g_active_ref_down_anchor_time;
+   TC_OnMTC(dir,mtc_time,ref_anchor);
 }
 
 inline bool __Race_IndexMatchesTime(const MqlRates &rates[], const int n,
@@ -369,8 +386,16 @@ inline void Race_DrawRefHistory_Down(const double price, const datetime t)
 }
 
 // ??????????? (?? Hunter_BodyBreak ???????? ???????)
-inline void Race_SetRefLevelForMTC_Up(const double price)   { g_race_ref_mtc_up   = price; }
-inline void Race_SetRefLevelForMTC_Down(const double price) { g_race_ref_mtc_down = price; }
+inline void Race_SetRefLevelForMTC_Up(const double price, const datetime anchor_time=0)
+{
+   g_race_ref_mtc_up=price;
+   g_race_ref_mtc_up_anchor_time=anchor_time;
+}
+inline void Race_SetRefLevelForMTC_Down(const double price, const datetime anchor_time=0)
+{
+   g_race_ref_mtc_down=price;
+   g_race_ref_mtc_down_anchor_time=anchor_time;
+}
 
 enum RState { R_IDLE=0, R_SEARCH_W2=1, R_WAIT_CONFIRM=2 };
 
@@ -429,12 +454,16 @@ struct RaceContext
    // ?????? ???? ???? MTC (LOW/HIGH C1 Hunter ?? ?? ???)
    double    ref_mtc_up;         // ????? g_race_ref_mtc_up
    double    ref_mtc_down;       // ????? g_race_ref_mtc_down
+   datetime ref_mtc_up_anchor_time;
+   datetime ref_mtc_down_anchor_time;
 
    // Active ref (????? ???? MTC ?? ???? ???)
    double    active_ref_up;         // ????? g_active_ref_up
    datetime  active_ref_up_time;    // ????? g_active_ref_up_time
    double    active_ref_down;       // ????? g_active_ref_down
-   datetime  active_ref_down_time;  // ????? g_active_ref_down_time
+   datetime  active_ref_down_time; // ????? g_active_ref_down_time
+   datetime  active_ref_up_anchor_time;
+   datetime  active_ref_down_anchor_time;
 
    bool      last_mtc_valid;
    Direction last_mtc_dir;
@@ -473,6 +502,8 @@ inline void Race_InternalClearAll()
    Race_ResetPathB(g_pb_down);
    g_race_ref_mtc_up   = 0.0;
    g_race_ref_mtc_down = 0.0;
+   g_race_ref_mtc_up_anchor_time=0;
+   g_race_ref_mtc_down_anchor_time=0;
 }
 // ---------------------- Helper??? ??????? ?????? ----------------------
 
@@ -493,11 +524,15 @@ inline void Race_ContextReset(RaceContext &ctx)
 
    ctx.ref_mtc_up   = 0.0;
    ctx.ref_mtc_down = 0.0;
+   ctx.ref_mtc_up_anchor_time=0;
+   ctx.ref_mtc_down_anchor_time=0;
 
    ctx.active_ref_up        = 0.0;
    ctx.active_ref_up_time   = 0;
    ctx.active_ref_down      = 0.0;
    ctx.active_ref_down_time = 0;
+   ctx.active_ref_up_anchor_time=0;
+   ctx.active_ref_down_anchor_time=0;
 
    ctx.last_mtc_valid = false;
    ctx.last_mtc_dir   = DIR_UP;
@@ -525,11 +560,15 @@ inline void Race_ContextExport(RaceContext &ctx)
 
    ctx.ref_mtc_up   = g_race_ref_mtc_up;
    ctx.ref_mtc_down = g_race_ref_mtc_down;
+   ctx.ref_mtc_up_anchor_time=g_race_ref_mtc_up_anchor_time;
+   ctx.ref_mtc_down_anchor_time=g_race_ref_mtc_down_anchor_time;
 
    ctx.active_ref_up        = g_active_ref_up;
    ctx.active_ref_up_time   = g_active_ref_up_time;
    ctx.active_ref_down      = g_active_ref_down;
    ctx.active_ref_down_time = g_active_ref_down_time;
+   ctx.active_ref_up_anchor_time=g_active_ref_up_anchor_time;
+   ctx.active_ref_down_anchor_time=g_active_ref_down_anchor_time;
 
    ctx.last_mtc_valid = g_race_last_mtc_valid;
    ctx.last_mtc_dir   = g_race_last_mtc_dir;
@@ -557,11 +596,15 @@ inline void Race_ContextImport(const RaceContext &ctx)
 
    g_race_ref_mtc_up   = ctx.ref_mtc_up;
    g_race_ref_mtc_down = ctx.ref_mtc_down;
+   g_race_ref_mtc_up_anchor_time=ctx.ref_mtc_up_anchor_time;
+   g_race_ref_mtc_down_anchor_time=ctx.ref_mtc_down_anchor_time;
 
    g_active_ref_up        = ctx.active_ref_up;
    g_active_ref_up_time   = ctx.active_ref_up_time;
    g_active_ref_down      = ctx.active_ref_down;
    g_active_ref_down_time = ctx.active_ref_down_time;
+   g_active_ref_up_anchor_time=ctx.active_ref_up_anchor_time;
+   g_active_ref_down_anchor_time=ctx.active_ref_down_anchor_time;
 
    g_race_last_mtc_valid = ctx.last_mtc_valid;
    g_race_last_mtc_dir   = ctx.last_mtc_dir;
@@ -1294,6 +1337,42 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
 }
 
 
+// Recover the candle at the actual price of the newly created special MTC
+// reference. Do NOT use the MTC break candle as the reference origin when a
+// genuine earlier extreme or original Hunter C1 is available.
+inline datetime __Race_SpecialRefAnchor(const Direction dir,
+                                         const MqlRates &rates[], const int n,
+                                         const int bodyIdx, const double ref_price)
+{
+   if(bodyIdx<0 || bodyIdx>=n) return 0;
+   const double tolerance=MathMax(SymbolInfoDouble(InpSymbol,SYMBOL_POINT)*0.1,1e-9);
+   if(g_race_last_mtc_valid && g_race_last_mtc_time>0 &&
+      g_race_last_mtc_dir!=(dir))
+   {
+      int from_i=-1,to_i=-1;
+      if(__Race_BuildBoundedIndexRange(rates,n,g_race_last_mtc_time,
+           rates[bodyIdx].time,g_race_last_mtc_index,bodyIdx,from_i,to_i))
+      {
+         for(int i=from_i;i<=to_i;i++)
+         {
+            const double extreme=(dir==DIR_UP ? rates[i].low : rates[i].high);
+            if(MathAbs(extreme-ref_price)<=tolerance) return rates[i].time;
+         }
+      }
+   }
+   const double known=(dir==DIR_UP ? g_race_ref_mtc_up : g_race_ref_mtc_down);
+   const datetime known_time=(dir==DIR_UP ? g_race_ref_mtc_up_anchor_time :
+                                             g_race_ref_mtc_down_anchor_time);
+   if(known_time>0 && known_time<=rates[bodyIdx].time &&
+      MathAbs(known-ref_price)<=tolerance) return known_time;
+   const double active=(dir==DIR_UP ? g_active_ref_up : g_active_ref_down);
+   const datetime active_time=(dir==DIR_UP ? g_active_ref_up_anchor_time :
+                                              g_active_ref_down_anchor_time);
+   if(active_time>0 && active_time<=rates[bodyIdx].time &&
+      MathAbs(active-ref_price)<=tolerance) return active_time;
+   return rates[bodyIdx].time;
+}
+
 // =====================[ MTC Drawing Helpers ]=====================
 inline void Race_DrawW2W3_MTC_Down(const MqlRates &rates[], const int n, const RacePathBState &S)
 {
@@ -1336,7 +1415,7 @@ inline void Race_DrawW2W3_MTC_Down(const MqlRates &rates[], const int n, const R
       }
 
       datetime tbb = (S.bodyBreakIdx>=0 && S.bodyBreakIdx<n ? rates[S.bodyBreakIdx].time : TimeCurrent());
-      Race_ActivateRef_Down(g_race_ref_mtc_down, tbb);
+      Race_ActivateRef_Down(g_race_ref_mtc_down,tbb,g_race_ref_mtc_down_anchor_time);
 
       SB_UP_BringToFront();
       SB_DN_BringToFront();
@@ -1392,7 +1471,7 @@ inline void Race_DrawW2W3_MTC_Up(const MqlRates &rates[], const int n, const Rac
       }
 
       datetime tbb = (S.bodyBreakIdx>=0 && S.bodyBreakIdx<n ? rates[S.bodyBreakIdx].time : TimeCurrent());
-      Race_ActivateRef_Up(g_race_ref_mtc_up, tbb);
+      Race_ActivateRef_Up(g_race_ref_mtc_up,tbb,g_race_ref_mtc_up_anchor_time);
 
       SB_UP_BringToFront();
       SB_DN_BringToFront();
@@ -1452,7 +1531,8 @@ inline void Race_DrawMTCOnly_Down_ByRef(const MqlRates &rates[],
          ObjectSetInteger(0, rname, OBJPROP_STYLE, STYLE_SOLID);
       }
 
-      Race_ActivateRef_Down(ref_price, (bodyIdx>=0 && bodyIdx<n ? rates[bodyIdx].time : TimeCurrent()));
+      Race_ActivateRef_Down(ref_price,(bodyIdx>=0 && bodyIdx<n ? rates[bodyIdx].time : TimeCurrent()),
+                            __Race_SpecialRefAnchor(DIR_DOWN,rates,n,bodyIdx,ref_price));
       SB_UP_BringToFront();
       SB_DN_BringToFront();
    }
@@ -1461,6 +1541,7 @@ inline void Race_DrawMTCOnly_Down_ByRef(const MqlRates &rates[],
       Race_DeleteRefVisuals_AllScans();
       g_active_ref_down      = 0.0;
       g_active_ref_down_time = (bodyIdx>=0 && bodyIdx<n ? rates[bodyIdx].time : TimeCurrent());
+      g_active_ref_down_anchor_time=0;
    }
 
    Race_RecordMTCEvent(DIR_DOWN, rates, n, bodyIdx);
@@ -1502,7 +1583,8 @@ inline void Race_DrawMTCOnly_Up_ByRef(const MqlRates &rates[],
          ObjectSetInteger(0, rname, OBJPROP_STYLE, STYLE_SOLID);
       }
 
-      Race_ActivateRef_Up(ref_price, (bodyIdx>=0 && bodyIdx<n ? rates[bodyIdx].time : TimeCurrent()));
+      Race_ActivateRef_Up(ref_price,(bodyIdx>=0 && bodyIdx<n ? rates[bodyIdx].time : TimeCurrent()),
+                          __Race_SpecialRefAnchor(DIR_UP,rates,n,bodyIdx,ref_price));
       SB_UP_BringToFront();
       SB_DN_BringToFront();
    }
@@ -1511,6 +1593,7 @@ inline void Race_DrawMTCOnly_Up_ByRef(const MqlRates &rates[],
       Race_DeleteRefVisuals_AllScans();
       g_active_ref_up      = 0.0;
       g_active_ref_up_time = (bodyIdx>=0 && bodyIdx<n ? rates[bodyIdx].time : TimeCurrent());
+      g_active_ref_up_anchor_time=0;
    }
 
    Race_RecordMTCEvent(DIR_UP, rates, n, bodyIdx);
