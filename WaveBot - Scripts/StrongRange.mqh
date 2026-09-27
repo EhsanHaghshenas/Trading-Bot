@@ -88,6 +88,7 @@ inline void SR_OnBar_UP(const MqlRates &rates[], const int n, const int j, const
    if(j<0 || j>=n) return;
    if(w3_start_idx < 0 || w3_start_idx >= n) return;
 
+   bool standard_created=false;
    // Standard Hunter/SW strong range only (Hunter) — فقط وقتی Seed پس از قفل W2 است
    if(SWGate_UP_IsOpen() && SW_UP_SeedActive() && SW_UP_SeedTime() >= SWGate_UP_W2Time())
    {
@@ -107,6 +108,11 @@ inline void SR_OnBar_UP(const MqlRates &rates[], const int n, const int j, const
                           rates[t_idx].time, p_top,
                           rates[j].time,    p_bottom);
             g_sr_sw_up_drawn_seed = seed_t;
+            standard_created=true;
+            // A normal Hunter path can already have fulfilled the pending
+            // PB continuation; never draw the same SR twice on this candle.
+            if(Race_ContinuationSREligible(DIR_UP,rates[j].time))
+               Race_ContinuationMarkSR(DIR_UP);
 
             // Analysis-only: confirm an UP MTC on its FIRST later UP SR.
             TC_OnNewStrongRange(DIR_UP, rates, n, j);
@@ -121,6 +127,36 @@ inline void SR_OnBar_UP(const MqlRates &rates[], const int n, const int j, const
          }
       }
    }
+   // Original-trend ref won after the first opposite pair. A new main W2
+   // can have locked AFTER the Hunter which created the HWBB; retain that
+   // original Hunter's ref for exactly one legitimate original-direction SR.
+   // This does NOT bypass an open main W2 cycle or standard SR geometry.
+   if(!standard_created && SWGate_UP_IsOpen() &&
+      Race_ContinuationSREligible(DIR_UP,rates[j].time))
+   {
+      const double level=Race_ContinuationSRLevel(DIR_UP);
+      if(level>0.0 && rates[j].high>level)
+      {
+         const double top=level;
+         const double bottom=rates[w3_start_idx].low;
+         if(top>bottom)
+         {
+            const datetime c1t=Race_ContinuationSRC1Time(DIR_UP);
+            const datetime anchor_time=(c1t>0 && c1t<=rates[j].time ?
+                                        c1t : rates[w3_start_idx].time);
+            ++g_sr_up_counter;
+            __SR_DrawRect("SR_U_"+IntegerToString(g_sr_up_counter),
+                          anchor_time,top,rates[j].time,bottom);
+            Race_ContinuationMarkSR(DIR_UP);
+            TC_OnNewStrongRange(DIR_UP,rates,n,j);
+            SRMIT_OnNewSR_UP(g_sr_up_counter,top,bottom,rates[j].time,
+                             rates[j].close>top);
+            if(InpDebugPrints)
+               Print("[SR-UP] Original-trend PB continuation @ ",
+                     T(rates[j].time));
+         }
+      }
+   }
 }
 
 inline void SR_OnBar_DOWN(const MqlRates &rates[], const int n, const int j, const int w3_start_idx)
@@ -128,6 +164,7 @@ inline void SR_OnBar_DOWN(const MqlRates &rates[], const int n, const int j, con
    if(j<0 || j>=n) return;
    if(w3_start_idx < 0 || w3_start_idx >= n) return;
 
+   bool standard_created=false;
    // Standard Hunter/SW strong range only (DOWN)
    if(SWGate_DN_IsOpen() && SW_DOWN_SeedActive() && SW_DOWN_SeedTime() >= SWGate_DN_W2Time())
    {
@@ -147,6 +184,9 @@ inline void SR_OnBar_DOWN(const MqlRates &rates[], const int n, const int j, con
                           rates[t_idx].time, p_top,
                           rates[j].time,    p_bottom);
             g_sr_sw_dn_drawn_seed = seed_t;
+            standard_created=true;
+            if(Race_ContinuationSREligible(DIR_DOWN,rates[j].time))
+               Race_ContinuationMarkSR(DIR_DOWN);
 
             // Analysis-only: confirm a DOWN MTC on its FIRST later DOWN SR.
             TC_OnNewStrongRange(DIR_DOWN, rates, n, j);
@@ -158,6 +198,32 @@ inline void SR_OnBar_DOWN(const MqlRates &rates[], const int n, const int j, con
                              p_bottom,
                              rates[j].time,            // زمان کندل سازنده SR
                              created_by_body);
+         }
+      }
+   }
+   if(!standard_created && SWGate_DN_IsOpen() &&
+      Race_ContinuationSREligible(DIR_DOWN,rates[j].time))
+   {
+      const double level=Race_ContinuationSRLevel(DIR_DOWN);
+      if(level>0.0 && rates[j].low<level)
+      {
+         const double top=rates[w3_start_idx].high;
+         const double bottom=level;
+         if(top>bottom)
+         {
+            const datetime c1t=Race_ContinuationSRC1Time(DIR_DOWN);
+            const datetime anchor_time=(c1t>0 && c1t<=rates[j].time ?
+                                        c1t : rates[w3_start_idx].time);
+            ++g_sr_dn_counter;
+            __SR_DrawRect("SR_D_"+IntegerToString(g_sr_dn_counter),
+                          anchor_time,top,rates[j].time,bottom);
+            Race_ContinuationMarkSR(DIR_DOWN);
+            TC_OnNewStrongRange(DIR_DOWN,rates,n,j);
+            SRMIT_OnNewSR_DN(g_sr_dn_counter,top,bottom,rates[j].time,
+                             rates[j].close<bottom);
+            if(InpDebugPrints)
+               Print("[SR-DOWN] Original-trend PB continuation @ ",
+                     T(rates[j].time));
          }
       }
    }

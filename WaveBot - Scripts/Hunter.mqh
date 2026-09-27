@@ -154,6 +154,8 @@ inline void     SW_UP_ClearSeed()
    g_sw_seed_u_c1     = -1;
    g_sw_seed_u_xtime  = 0;
    g_sw_seed_u_level  = 0.0;
+   // A true regime cleanup or invalidator discards stale PB continuation.
+   Race_ContinuationReset(DIR_UP);
 }
 
 // تلاش برای نمایش Hunter فقط هنگام وقوع «کراس» و در صورت اعتبار
@@ -196,38 +198,46 @@ inline void SW_UP_TryMarkOnConfirmedW3(const MqlRates &rates[], const int n,
                                        const int w3_c1, const int bodyBreakIdx)
 {
    Race_OnSWConfirmed_UP(rates, n, w3_c1, bodyBreakIdx);
-   
-   // --- HARD GATE: SW فقط زمانی مجاز است که چرخهٔ W2 قفل شده باشد
-   // و زمان Hunter (seed) بعد از زمان قفل W2 همین چرخه باشد.
+
+   // No artificial SW: the real major W2 cycle must be locked and the W3
+   // actually confirmed. A resolved PB can inherit the HWBB's original Hunter
+   // reference even if that Hunter predated this newly locked major W2.
    if(!SWGate_UP_IsOpen()) return;
-   if(!SW_UP_SeedActive()) return;
-   if(w3_c1 < 0 || bodyBreakIdx < 0) return;
-   if(SW_UP_SeedTime() < SWGate_UP_W2Time()) return; // Hunter باید بعد از قفل W2 باشد
+   if(w3_c1<0 || w3_c1>=n || bodyBreakIdx<0 || bodyBreakIdx>=n) return;
 
-   if(!g_sw_seed_u_active) return;
-   if(w3_c1 < 0 || bodyBreakIdx < 0)    return;
-   if(rates[w3_c1].time < g_sw_seed_u_xtime) return; // باید بعد از Hunter باشد
+   const bool ordinary=(SW_UP_SeedActive() &&
+       SW_UP_SeedTime()>=SWGate_UP_W2Time() &&
+       rates[w3_c1].time>=SW_UP_SeedTime() &&
+       rates[bodyBreakIdx].close>SW_UP_Level());
+   const bool continued=Race_ContinuationSWEligible(DIR_UP,rates,n,
+                                                     w3_c1,bodyBreakIdx);
+   if(!ordinary && !continued) return;
 
-   // شرط SW: کندل بریکِ W3 بالاتر از High(C1_Hunter) «با بدنه» بسته شود
-   if(rates[bodyBreakIdx].close > g_sw_seed_u_level)
+   ++g_sw_counter_u;
+   const string tag=IntegerToString(g_sw_counter_u);
+   if(InpDrawMarkers)
    {
-      ++g_sw_counter_u;
-      string tag = IntegerToString(g_sw_counter_u);
-
-      if(InpDrawMarkers)
+      MarkV("SW_"+tag+"_C1",rates[w3_c1].time,clrAqua);
+      MarkV("SW_"+tag+"_B",rates[bodyBreakIdx].time,clrCyan);
+      if(continued)
       {
-         MarkV("SW_"+tag+"_C1", rates[w3_c1].time,    clrAqua);
-         MarkV("SW_"+tag+"_B" , rates[bodyBreakIdx].time, clrCyan);
+         const MqlRates b=rates[bodyBreakIdx];
+         const double pad=MathMax(_Point*5.0,(b.high-b.low)*0.30);
+         MarkCandleText("SW_PB_CONT_UP_"+IntegerToString((long)b.time),
+                        b.time,b.low-pad,"SW",clrAqua);
+         MarkV("RACE_A_SW_WIN_U_PB_"+IntegerToString((long)b.time),
+               b.time,clrAqua);
       }
-
-      if(InpDebugPrints)
-         Print("[SW-UP] OK | W3_C1=",T(rates[w3_c1].time),
-               " | BODY-BREAK=",T(rates[bodyBreakIdx].time),
-               " | > H(HW_C1)=",DoubleToString(g_sw_seed_u_level,_Digits));
-
-      g_sw_seed_u_active = false; // بذر مصرف شد
    }
-   
+   if(InpDebugPrints)
+      Print("[SW-UP] ",(continued?"PB continuation":"ordinary"),
+            " | W3_C1=",T(rates[w3_c1].time),
+            " | BODY-BREAK=",T(rates[bodyBreakIdx].time));
+
+   // Do not clear continuation until its independently tracked SR is also
+   // created (SR may be on this bar, a later bar, or a later major W2 cycle).
+   if(continued) Race_ContinuationMarkSW(DIR_UP);
+   g_sw_seed_u_active=false;
    SWGate_UP_OnPairFinalized();
 }
 

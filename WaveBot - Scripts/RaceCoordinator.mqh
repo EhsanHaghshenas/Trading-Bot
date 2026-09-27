@@ -99,6 +99,148 @@ static Direction g_race_last_mtc_dir   = DIR_UP;
 static datetime  g_race_last_mtc_time  = 0;
 static int       g_race_last_mtc_index = -1;
 
+// A first opposite pair which returned through the ORIGINAL HWBB reference
+// must not sever the main-world SW -> Strong Range chain.  Save the original
+// Hunter reference until BOTH the genuine original-direction SW and its SR
+// have been recognized. Each direction is isolated in RaceContext.
+struct RacePullbackContinuation
+{
+   bool     active;
+   Direction dir;
+   datetime pullback_time;
+   datetime ref_break_time;
+   datetime hunter_c1_time;
+   double   hunter_ref;
+   bool     sw_recorded;
+   bool     sr_recorded;
+};
+static RacePullbackContinuation g_race_cont_up;
+static RacePullbackContinuation g_race_cont_down;
+
+inline void Race_ContinuationReset(const Direction dir)
+{
+   if(dir==DIR_UP)
+   {
+      g_race_cont_up.active=false;
+      g_race_cont_up.dir=DIR_UP;
+      g_race_cont_up.pullback_time=0;
+      g_race_cont_up.ref_break_time=0;
+      g_race_cont_up.hunter_c1_time=0;
+      g_race_cont_up.hunter_ref=0.0;
+      g_race_cont_up.sw_recorded=false;
+      g_race_cont_up.sr_recorded=false;
+   }
+   else
+   {
+      g_race_cont_down.active=false;
+      g_race_cont_down.dir=DIR_DOWN;
+      g_race_cont_down.pullback_time=0;
+      g_race_cont_down.ref_break_time=0;
+      g_race_cont_down.hunter_c1_time=0;
+      g_race_cont_down.hunter_ref=0.0;
+      g_race_cont_down.sw_recorded=false;
+      g_race_cont_down.sr_recorded=false;
+   }
+}
+
+inline void Race_ContinuationArm(const Direction dir,
+                                 const datetime pb_time,
+                                 const datetime ref_break_time,
+                                 const datetime hunter_c1_time,
+                                 const double hunter_ref)
+{
+   if(pb_time<=0 || ref_break_time<=pb_time || hunter_ref<=0.0) return;
+   RacePullbackContinuation C;
+   C.active=true; C.dir=dir;
+   C.pullback_time=pb_time;
+   C.ref_break_time=ref_break_time;
+   C.hunter_c1_time=hunter_c1_time;
+   C.hunter_ref=hunter_ref;
+   C.sw_recorded=false;
+   C.sr_recorded=false;
+   if(dir==DIR_UP)
+   {
+      // A replay of the same event must not re-arm an already consumed SW/SR.
+      if(g_race_cont_up.ref_break_time==ref_break_time) return;
+      g_race_cont_up=C;
+   }
+   else
+   {
+      if(g_race_cont_down.ref_break_time==ref_break_time) return;
+      g_race_cont_down=C;
+   }
+}
+
+// Genuine W2/W3 confirmation is mandatory for the SW label.  The
+// continuation is an exception to the *timing* of the original Hunter seed,
+// NOT an exception to wave counting, body breaking or main SWGate locking.
+inline bool Race_ContinuationSWEligible(const Direction dir,
+                                        const MqlRates &rates[],const int n,
+                                        const int w3_c1,const int body_break)
+{
+   if(w3_c1<0 || w3_c1>=n || body_break<0 || body_break>=n) return false;
+   RacePullbackContinuation C;
+   if(dir==DIR_UP) C=g_race_cont_up; else C=g_race_cont_down;
+   if(!C.active || C.sw_recorded || C.hunter_ref<=0.0) return false;
+   if(rates[body_break].time<C.ref_break_time) return false;
+   if(rates[body_break].time<=C.pullback_time) return false;
+   if(rates[w3_c1].time>rates[body_break].time) return false;
+   if(C.hunter_c1_time>0 && rates[w3_c1].time<C.hunter_c1_time) return false;
+   return (dir==DIR_UP ? rates[body_break].close>C.hunter_ref :
+                         rates[body_break].close<C.hunter_ref);
+}
+
+inline bool Race_ContinuationSREligible(const Direction dir,
+                                       const datetime bar_time)
+{
+   RacePullbackContinuation C;
+   if(dir==DIR_UP) C=g_race_cont_up; else C=g_race_cont_down;
+   return (C.active && !C.sr_recorded && C.hunter_ref>0.0 &&
+           bar_time>=C.ref_break_time &&
+           C.ref_break_time>C.pullback_time);
+}
+inline double Race_ContinuationSRLevel(const Direction dir)
+{
+   return (dir==DIR_UP ? g_race_cont_up.hunter_ref : g_race_cont_down.hunter_ref);
+}
+inline datetime Race_ContinuationSRC1Time(const Direction dir)
+{
+   return (dir==DIR_UP ? g_race_cont_up.hunter_c1_time :
+                         g_race_cont_down.hunter_c1_time);
+}
+inline datetime Race_ContinuationSRBreakTime(const Direction dir)
+{
+   return (dir==DIR_UP ? g_race_cont_up.ref_break_time :
+                         g_race_cont_down.ref_break_time);
+}
+inline void Race_ContinuationMarkSW(const Direction dir)
+{
+   if(dir==DIR_UP)
+   {
+      g_race_cont_up.sw_recorded=true;
+      if(g_race_cont_up.sr_recorded) g_race_cont_up.active=false;
+   }
+   else
+   {
+      g_race_cont_down.sw_recorded=true;
+      if(g_race_cont_down.sr_recorded) g_race_cont_down.active=false;
+   }
+}
+inline void Race_ContinuationMarkSR(const Direction dir)
+{
+   if(dir==DIR_UP)
+   {
+      g_race_cont_up.sr_recorded=true;
+      if(g_race_cont_up.sw_recorded) g_race_cont_up.active=false;
+   }
+   else
+   {
+      g_race_cont_down.sr_recorded=true;
+      if(g_race_cont_down.sw_recorded) g_race_cont_down.active=false;
+   }
+}
+
+
 inline void Race_RecordMTCEvent(const Direction dir, const MqlRates &rates[], const int n, const int bodyIdx)
 {
    if(bodyIdx < 0 || bodyIdx >= n) return;
@@ -491,6 +633,8 @@ struct RaceContext
    // ????? ????? Path-B ???? Mode=UP ? Mode=DOWN
    RacePathBState pb_up;         // snapshot ?? g_pb_up
    RacePathBState pb_down;       // snapshot ?? g_pb_down
+   RacePullbackContinuation continuation_up;
+   RacePullbackContinuation continuation_down;
 };
 
 static RacePathBState g_pb_up;    // ???? Mode=UP ??? (???? B = ???? DOWN)
@@ -572,6 +716,23 @@ inline void Race_ContextReset(RaceContext &ctx)
 
    Race_ResetPathB(ctx.pb_up);
    Race_ResetPathB(ctx.pb_down);
+   // Context reset must not inherit a different symbol/world continuation.
+   ctx.continuation_up.active=false;
+   ctx.continuation_up.dir=DIR_UP;
+   ctx.continuation_up.pullback_time=0;
+   ctx.continuation_up.ref_break_time=0;
+   ctx.continuation_up.hunter_c1_time=0;
+   ctx.continuation_up.hunter_ref=0.0;
+   ctx.continuation_up.sw_recorded=false;
+   ctx.continuation_up.sr_recorded=false;
+   ctx.continuation_down.active=false;
+   ctx.continuation_down.dir=DIR_DOWN;
+   ctx.continuation_down.pullback_time=0;
+   ctx.continuation_down.ref_break_time=0;
+   ctx.continuation_down.hunter_c1_time=0;
+   ctx.continuation_down.hunter_ref=0.0;
+   ctx.continuation_down.sw_recorded=false;
+   ctx.continuation_down.sr_recorded=false;
 }
 
 // ???????? state ???? global ?? ???? ?? ??????? (Export)
@@ -610,6 +771,8 @@ inline void Race_ContextExport(RaceContext &ctx)
 
    ctx.pb_up   = g_pb_up;
    ctx.pb_down = g_pb_down;
+   ctx.continuation_up=g_race_cont_up;
+   ctx.continuation_down=g_race_cont_down;
 }
 
 // ????????? ?? snapshot ????????? ?? ???? global?? (Import)
@@ -648,6 +811,8 @@ inline void Race_ContextImport(const RaceContext &ctx)
 
    g_pb_up   = ctx.pb_up;
    g_pb_down = ctx.pb_down;
+   g_race_cont_up=ctx.continuation_up;
+   g_race_cont_down=ctx.continuation_down;
 }
 
 inline bool Race_IsLocked() { return g_race_locked; }
@@ -858,6 +1023,34 @@ inline void Race_MarkPullbackPair(const Direction pullback_dir,
                   "PB",col);
 }
 
+// Historical markers are emitted only after the SECOND opposite W3 really
+// confirms; the first pullback remains labelled PB and special MTC has no pair.
+inline void Race_LabelSecondMTCPair(const Direction new_dir,
+                                    const MqlRates &rates[], const int n,
+                                    const RacePathBState &S,
+                                    const int mtc_confirmation_idx)
+{
+   if(!InpDrawMarkers || !Markers_ShouldRender()) return;
+   if(S.c1<0 || S.c1>=n || S.w3_c1<0 || S.w3_c1>=n) return;
+   if(mtc_confirmation_idx<0 || mtc_confirmation_idx>=n) return;
+   const string id=(new_dir==DIR_UP ? "UP_" : "DN_") +
+                      IntegerToString(g_race_counter)+"_"+
+                      IntegerToString((long)rates[mtc_confirmation_idx].time);
+   const bool up=(new_dir==DIR_UP);
+   const int w2_end=(S.cend>=0 && S.cend<n ? S.cend : S.c1);
+   const int w3_end=(S.w3_end>=0 && S.w3_end<n ? S.w3_end : mtc_confirmation_idx);
+   const double m2=MathMax(_Point*5.0,
+                       (rates[w2_end].high-rates[w2_end].low)*0.30);
+   const double m3=MathMax(_Point*5.0,
+                       (rates[w3_end].high-rates[w3_end].low)*0.30);
+   MarkCandleText("MTC_PAIR_W2_"+id,rates[w2_end].time,
+          (up ? rates[w2_end].low-m2 : rates[w2_end].high+m2),
+          "MTC W2",(up ? clrLime : clrFireBrick));
+   MarkCandleText("MTC_PAIR_W3_"+id,rates[w3_end].time,
+          (up ? rates[w3_end].high+m3 : rates[w3_end].low-m3),
+          "MTC W3",(up ? clrDeepSkyBlue : clrOrangeRed));
+}
+
 inline void Race_ArmFirstPullback(RacePathBState &S,
                                    const MqlRates &rates[], const int n,
                                    const int finished_at,
@@ -922,8 +1115,18 @@ inline int Race_WatchFirstPullback(const Direction original_dir,
             MarkV((original_dir==DIR_UP?"PB_UP_REF_CONTINUE_":"PB_DN_REF_CONTINUE_")+
                   IntegerToString((long)r.time),r.time,clrAqua);
          // Never register an MTC/TC in the continuation branch.
+         // The original-direction main world must be allowed to finish its
+         // existing W2/W3. Keep the actual Hunter's ref as an inherited SW/SR
+         // candidate, even when its Hunter pre-dates a newly locked main W2.
+         const datetime original_hunter_c1=(original_dir==DIR_UP ?
+                           g_race_ref_mtc_down_anchor_time :
+                           g_race_ref_mtc_up_anchor_time);
+         const double inherited_ref=S.pullback_continuation_ref;
+         const datetime pb_time=rates[S.pullback_confirm_idx].time;
          C1W2_PB_DN_Disable(); C1W2_PB_UP_Disable();
          Race_InternalClearAll();
+         Race_ContinuationArm(original_dir,pb_time,r.time,
+                              original_hunter_c1,inherited_ref);
          if(original_dir==DIR_UP)
          {
             ExtLQ_Set(new_lq,r.time);
@@ -1016,6 +1219,7 @@ inline void Race_Start_UP(const MqlRates &rates[], const int n, const int hwbb_i
    g_race_winner     = ""; 
    g_race_winner_time= 0;
 
+   Race_ContinuationReset(DIR_UP);
    Race_ResetPathB(g_pb_up);
    g_pb_up.init=true;
    g_pb_up.state=R_SEARCH_W2;
@@ -1045,6 +1249,7 @@ inline void Race_Start_DOWN(const MqlRates &rates[], const int n, const int hwbb
    g_race_winner     = "";
    g_race_winner_time= 0;
 
+   Race_ContinuationReset(DIR_DOWN);
    Race_ResetPathB(g_pb_down);
    g_pb_down.init=true;
    g_pb_down.state=R_SEARCH_W2;
@@ -1298,6 +1503,7 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
 
                   Race_MarkWin_B(DIR_UP, bt);
                   Race_DrawW2W3_MTC_Down(rates, n, S, j);
+                  Race_LabelSecondMTCPair(DIR_DOWN,rates,n,S,j);
 
                   // Compute scan window before clearing race state
                   const int __c1=(S.c1>=0?S.c1:g_race_hwbb_idx);
@@ -1536,6 +1742,7 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
 
                   Race_MarkWin_B(DIR_DOWN, bt);
                   Race_DrawW2W3_MTC_Up(rates, n, S, j);
+                  Race_LabelSecondMTCPair(DIR_UP,rates,n,S,j);
 
                   const int __c1=(S.c1>=0?S.c1:g_race_hwbb_idx);
                   const ENUM_TIMEFRAMES runtime_tf = __Race_RuntimeTF();
