@@ -40,7 +40,9 @@ static datetime  g_race_hwbb_time    = 0;        // ???? HWBB
 static datetime  g_world_hwbb_time   = 0;        // ???? ????? HWBB ?? ??? world (???? ??????? ?? ?? HWBB)
 static string    g_race_winner       = "";       // "A" ?? "B"
 static datetime  g_race_winner_time  = 0;
-static int       g_race_counter      = 0;        // ???? ????????? ???????
+static int       g_race_counter      = 0;
+static int       g_race_pullback_sr_up_count=1000000;
+static int       g_race_pullback_sr_down_count=1000000;        // ???? ????????? ???????
 // ????? ???? ???? ????? ??? ?? MTC
 static double   g_race_ref_mtc_up   = 0.0;  // mtc_up ? Low? C1? Hunter(DOWN)
 static double   g_race_ref_mtc_down = 0.0;  // mtc_down ? High? C1? Hunter(UP)
@@ -432,6 +434,20 @@ struct RacePathBState
    // --- NEW: Guard ?? ?? body-break: ??? C1_W3
    bool     postBreak_c1_lock;   // ??? C1_W3 ??? ????
    int      postBreak_c1_ref;    // ???? C1_W3 ?? ?? body-break
+
+   // First opposite W2/W3 is a PULLBACK, not an MTC. This remains part of
+   // the SAME ordered Path-B chain: the next W2 search starts at its finish.
+   bool     pullback_ready;
+   int      pullback_confirm_idx;
+   int      pullback_w3_c1;
+   double   pullback_ext_lq;           // DOWN: H(C1 W3), UP: L(C1 W3)
+   double   pullback_continuation_ref; // UP trend: HWBB-UP C1 high; mirror DOWN
+   double   pullback_trend_extreme;    // min low/max high AFTER first pair
+   int      pullback_last_idx;
+   bool     pullback_hunter_seen;
+   double   pullback_hunter_level;    // DOWN: low of hunter C1; mirror UP
+   int      pullback_hunter_c1;
+   int      pullback_hunter_cross_idx;
 };
 // =======================[ RaceContext: snapshot ???? ????? ?????? ]=======================
 //
@@ -448,6 +464,8 @@ struct RaceContext
    datetime  winner_time;        // ????? g_race_winner_time
    
    int       race_counter;          // g_race_counter
+   int       pullback_sr_up_count;
+   int       pullback_sr_down_count;
    int       ref_hist_up_counter;   // g_ref_hist_up_counter
    int       ref_hist_down_counter; // g_ref_hist_down_counter
 
@@ -490,6 +508,17 @@ inline void Race_ResetPathB(RacePathBState &S)
    S.mtc_c1_level = 0.0;
    S.postBreak_c1_lock = false;
    S.postBreak_c1_ref  = -1;
+   S.pullback_ready=false;
+   S.pullback_confirm_idx=-1;
+   S.pullback_w3_c1=-1;
+   S.pullback_ext_lq=0.0;
+   S.pullback_continuation_ref=0.0;
+   S.pullback_trend_extreme=0.0;
+   S.pullback_last_idx=-1;
+   S.pullback_hunter_seen=false;
+   S.pullback_hunter_level=0.0;
+   S.pullback_hunter_c1=-1;
+   S.pullback_hunter_cross_idx=-1;
 }
 
 inline void Race_InternalClearAll()
@@ -519,6 +548,8 @@ inline void Race_ContextReset(RaceContext &ctx)
    ctx.winner_time = 0;
 
    ctx.race_counter          = 0;
+   ctx.pullback_sr_up_count=1000000;
+   ctx.pullback_sr_down_count=1000000;
    ctx.ref_hist_up_counter   = 0;
    ctx.ref_hist_down_counter = 0;
 
@@ -555,6 +586,8 @@ inline void Race_ContextExport(RaceContext &ctx)
    ctx.winner_time = g_race_winner_time;
    
    ctx.race_counter          = g_race_counter;
+   ctx.pullback_sr_up_count=g_race_pullback_sr_up_count;
+   ctx.pullback_sr_down_count=g_race_pullback_sr_down_count;
    ctx.ref_hist_up_counter   = g_ref_hist_up_counter;
    ctx.ref_hist_down_counter = g_ref_hist_down_counter;
 
@@ -591,6 +624,8 @@ inline void Race_ContextImport(const RaceContext &ctx)
    g_race_winner_time = ctx.winner_time;
    
    g_race_counter          = ctx.race_counter;
+   g_race_pullback_sr_up_count=ctx.pullback_sr_up_count;
+   g_race_pullback_sr_down_count=ctx.pullback_sr_down_count;
    g_ref_hist_up_counter   = ctx.ref_hist_up_counter;
    g_ref_hist_down_counter = ctx.ref_hist_down_counter;
 
@@ -749,6 +784,11 @@ inline void Race_TryUnlockOnNewLQ_Notify(const Direction lq_side, const datetime
    if(lq_time <= 0 || lq_time < g_race_hwbb_time) return;
 
    // ??? ?????? ?? Mode=UP ???? ???? ext lq ?????? ??? DOWN ??????? ????? ???? B ??? (? ??????)
+   // Once the first opposite pair exists, ONLY the ordered second pair,
+   // the pullback SR exception, or the original-trend ref continuation may
+   // resolve it. Unrelated LQ notifications must not discard that memory.
+   if(g_race_mode==DIR_UP && g_pb_up.pullback_ready) return;
+   if(g_race_mode==DIR_DOWN && g_pb_down.pullback_ready) return;
    if(g_race_mode == DIR_UP  && lq_side == DIR_DOWN){ Race_InternalClearAll(); return; }
    if(g_race_mode == DIR_DOWN&& lq_side == DIR_UP  ){ Race_InternalClearAll(); return; }
 }
@@ -788,6 +828,176 @@ inline void __Race_PrepareMTCRegimeHandoff(const Direction new_dir)
    __Race_ClearRegimeArtifacts();
    C1W2Gate_ResetGlobals();
    C1Pre_ResetGlobals();
+}
+
+
+// ------------------ ORDERED PULLBACK / SECOND PAIR ------------------
+// NO direction/TC change is made by a first opposite pair. All state is
+// inside RacePathBState so existing RaceContext export/import isolates worlds.
+inline void Race_MarkPullbackPair(const Direction pullback_dir,
+                                  const MqlRates &rates[], const int n,
+                                  const RacePathBState &S, const int finished_at)
+{
+   if(!InpDrawMarkers || finished_at<0 || finished_at>=n) return;
+   const string id=IntegerToString(g_race_counter)+"_"+
+                 IntegerToString((long)rates[finished_at].time);
+   const string prefix=(pullback_dir==DIR_DOWN ? "PULLBACK_DN_" : "PULLBACK_UP_");
+   const color col=(pullback_dir==DIR_DOWN ? clrDarkOrange : clrDeepSkyBlue);
+   if(S.c1>=0 && S.c1<n) MarkV(prefix+"W2_C1_"+id,rates[S.c1].time,col);
+   if(S.c2>=0 && S.c2<n) MarkV(prefix+"W2_C2_"+id,rates[S.c2].time,col);
+   if(S.c3>=0 && S.c3<n) MarkV(prefix+"W2_C3_"+id,rates[S.c3].time,col);
+   if(S.c4>=0 && S.c4<n) MarkV(prefix+"W2_C4_"+id,rates[S.c4].time,col);
+   if(S.w3_c1>=0 && S.w3_c1<n) MarkV(prefix+"W3_C1_"+id,rates[S.w3_c1].time,col);
+   if(S.k2>=0 && S.k2<n) MarkV(prefix+"W3_K2_"+id,rates[S.k2].time,col);
+   if(S.k3>=0 && S.k3<n) MarkV(prefix+"W3_K3_"+id,rates[S.k3].time,col);
+   if(S.k4>=0 && S.k4<n) MarkV(prefix+"W3_K4_"+id,rates[S.k4].time,col);
+   const MqlRates r=rates[finished_at];
+   const double margin=MathMax(_Point*4.0,(r.high-r.low)*0.25);
+   MarkCandleText(prefix+"LABEL_"+id,r.time,
+                  (pullback_dir==DIR_DOWN ? r.low-margin : r.high+margin),
+                  "PB",col);
+}
+
+inline void Race_ArmFirstPullback(RacePathBState &S,
+                                   const MqlRates &rates[], const int n,
+                                   const int finished_at,
+                                   const Direction pullback_dir)
+{
+   if(finished_at<0 || finished_at>=n || S.w3_c1<0 || S.w3_c1>=n) return;
+   S.pullback_ready=true;
+   S.pullback_confirm_idx=finished_at;
+   S.pullback_w3_c1=S.w3_c1;
+   S.pullback_last_idx=finished_at;
+   S.pullback_ext_lq=(pullback_dir==DIR_DOWN ? rates[S.w3_c1].high :
+                                               rates[S.w3_c1].low);
+   // Candidate reverse-MTC reference comes from the CURRENT HWBB's Hunter C1.
+   // Breaking it in the ORIGINAL trend direction ends the pullback.
+   S.pullback_continuation_ref=(pullback_dir==DIR_DOWN ?
+                   g_race_ref_mtc_down : g_race_ref_mtc_up);
+   S.pullback_trend_extreme=(pullback_dir==DIR_DOWN ?
+                             rates[finished_at].low : rates[finished_at].high);
+   S.pullback_hunter_seen=false;
+   S.pullback_hunter_level=0.0;
+   S.pullback_hunter_c1=-1;
+   S.pullback_hunter_cross_idx=-1;
+   Race_MarkPullbackPair(pullback_dir,rates,n,S,finished_at);
+   if(InpDebugPrints)
+      Print("[RACE-PB] First pair=",(pullback_dir==DIR_DOWN?"DOWN":"UP"),
+            " @ ",T(rates[finished_at].time)," | extLQ=",
+            DoubleToString(S.pullback_ext_lq,_Digits)," | continuation ref=",
+            DoubleToString(S.pullback_continuation_ref,_Digits));
+}
+
+// The pullback's Hunter is evaluated independently of the current main-world
+// ExtLQ/SW globals: touching those globals would incorrectly unlock the race.
+// Return 0: continue; 1: original trend resumes; 2: special SR MTC handoff.
+inline int Race_WatchFirstPullback(const Direction original_dir,
+                                  RacePathBState &S,
+                                  const MqlRates &rates[], const int n,
+                                  const int upto)
+{
+   if(!S.pullback_ready || S.pullback_confirm_idx<0 || upto<0) return 0;
+   const int last=MathMin(upto,n-1);
+   for(int j=MathMax(S.pullback_confirm_idx+1,S.pullback_last_idx+1);
+       j<=last;j++)
+   {
+      const MqlRates r=rates[j];
+      // Include the continuation-break bar in the new original-direction LQ.
+      if(original_dir==DIR_UP)
+         S.pullback_trend_extreme=MathMin(S.pullback_trend_extreme,r.low);
+      else
+         S.pullback_trend_extreme=MathMax(S.pullback_trend_extreme,r.high);
+      S.pullback_last_idx=j;
+
+      // Absolute priority: an original-direction BODY break of this HWBB ref
+      // ends the pending pullback BEFORE checking the ext-LQ/SR path.
+      const bool ref_continues=(S.pullback_continuation_ref>0.0 &&
+                    (original_dir==DIR_UP ?
+                      r.close>S.pullback_continuation_ref :
+                      r.close<S.pullback_continuation_ref));
+      if(ref_continues)
+      {
+         const double new_lq=S.pullback_trend_extreme;
+         if(InpDrawMarkers)
+            MarkV((original_dir==DIR_UP?"PB_UP_REF_CONTINUE_":"PB_DN_REF_CONTINUE_")+
+                  IntegerToString((long)r.time),r.time,clrAqua);
+         // Never register an MTC/TC in the continuation branch.
+         C1W2_PB_DN_Disable(); C1W2_PB_UP_Disable();
+         Race_InternalClearAll();
+         if(original_dir==DIR_UP)
+         {
+            ExtLQ_Set(new_lq,r.time);
+            Hunter_OnExtLQUpdated();
+         }
+         else
+         {
+            ExtLQ_Down_Set(new_lq,r.time);
+            Hunter_Down_OnExtLQUpdated();
+         }
+         if(InpDebugPrints)
+            Print("[RACE-PB] Original trend CONTINUES @ ",T(r.time),
+                  " | new original ExtLQ=",DoubleToString(new_lq,_Digits));
+         return 1;
+      }
+
+      // Mirror: bearish pullback crosses HIGH(C1 W3), bullish pullback
+      // crosses LOW(C1 W3), either by wick or body (standard Hunter rule).
+      if(!S.pullback_hunter_seen)
+      {
+         const bool ext_cross=(original_dir==DIR_UP ?
+                          r.high>=S.pullback_ext_lq :
+                          r.low<=S.pullback_ext_lq);
+         if(!ext_cross) continue;
+         // C1-Hunter must precede the ext-LQ crossing candle. Find its true
+         // leftmost opposite extreme since the actual first pullback's W3 C1.
+         const int from=MathMax(0,S.pullback_w3_c1);
+         int c1=-1;
+         double extreme=(original_dir==DIR_UP ? DBL_MAX : -DBL_MAX);
+         for(int k=from;k<j;k++)
+         {
+            if(original_dir==DIR_UP && rates[k].low<extreme)
+            { extreme=rates[k].low; c1=k; }
+            if(original_dir==DIR_DOWN && rates[k].high>extreme)
+            { extreme=rates[k].high; c1=k; }
+         }
+         if(c1<0 || extreme<=0.0) continue;
+         S.pullback_hunter_seen=true;
+         S.pullback_hunter_c1=c1;
+         S.pullback_hunter_cross_idx=j;
+         S.pullback_hunter_level=extreme;
+         if(InpDrawMarkers)
+         {
+            const string tag=IntegerToString((long)rates[S.pullback_confirm_idx].time);
+            MarkV("PB_HW_C1_"+tag,rates[c1].time,clrViolet);
+            MarkV("PB_HW_X_"+tag,r.time,clrMagenta);
+         }
+         continue;  // SR cannot exist until AFTER the Hunter crossing bar.
+      }
+
+      // Special Strong Range from THIS SAME first pullback W2/W3:
+      // bearish: wick Low < Low(C1-Hunter), top=High(C1 W3 of pullback).
+      // bullish mirror. Strictly no extra opposite W2/W3 is needed here.
+      if(j<=S.pullback_hunter_cross_idx) continue;
+      const bool sr_created=(original_dir==DIR_UP ?
+                      r.low<S.pullback_hunter_level :
+                      r.high>S.pullback_hunter_level);
+      if(!sr_created) continue;
+
+      const Direction new_dir=(original_dir==DIR_UP ? DIR_DOWN : DIR_UP);
+      const int anchor=S.pullback_w3_c1;
+      const double top=(new_dir==DIR_DOWN ? rates[anchor].high :
+                                            S.pullback_hunter_level);
+      const double bottom=(new_dir==DIR_DOWN ? S.pullback_hunter_level :
+                                               rates[anchor].low);
+      if(!(top>bottom)) continue;
+
+      // The special handler reads the live race state; S was a local copy.
+      if(original_dir==DIR_UP) g_pb_up=S; else g_pb_down=S;
+      Race_ConfirmPullbackStrongRange(new_dir,rates,n,j,
+                        rates[anchor].time,top,bottom);
+      return 2;
+   }
+   return 0;
 }
 
 //--------------------------- ???? ?????? ?? HWBB ------------------------------
@@ -854,6 +1064,7 @@ inline void Race_Start_DOWN(const MqlRates &rates[], const int n, const int hwbb
 inline void Race_OnSWConfirmed_UP(const MqlRates &rates[], const int n, const int w3_c1, const int bodyBreakIdx)
 {
    if(!g_race_locked || g_race_mode!=DIR_UP) return;
+   if(g_pb_up.pullback_ready) return; // ordered first pullback still pending
    if(bodyBreakIdx<0 || bodyBreakIdx>=n) return;
    const datetime t = rates[bodyBreakIdx].time;
    if(t < g_race_hwbb_time) return; // ???? ??? ?? HWBB
@@ -870,6 +1081,7 @@ inline void Race_OnSWConfirmed_UP(const MqlRates &rates[], const int n, const in
 inline void Race_OnSWConfirmed_DOWN(const MqlRates &rates[], const int n, const int w3_c1, const int bodyBreakIdx)
 {
    if(!g_race_locked || g_race_mode!=DIR_DOWN) return;
+   if(g_pb_down.pullback_ready) return;
    if(bodyBreakIdx<0 || bodyBreakIdx>=n) return;
    const datetime t = rates[bodyBreakIdx].time;
    if(t < g_race_hwbb_time) return;
@@ -889,6 +1101,8 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
    if(!g_race_locked || g_race_mode!=DIR_UP) return;
    RacePathBState S = g_pb_up;
    if(!S.init) return;
+   const int pb_action=Race_WatchFirstPullback(DIR_UP,S,rates,n,upto_j);
+   if(pb_action!=0) return;
 
    int limit = MathMin(upto_j, n-1);
    while(S.idx <= limit)
@@ -1060,10 +1274,22 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
                }
             }
 
-            // Finalize Path-B (MTC_DOWN)
-            if(S.have_w3 && S.breakAchieved)
+            // First confirmed opposite W2/W3 is PULLBACK. The second pair
+            // belongs to the continuation of THIS SAME ordered Path-B chain.
+            if(S.have_w3 && S.breakAchieved && S.w3_end>=0 && S.w3_end<=j)
             {
-               const datetime bt = rates[(S.bodyBreakIdx>=0?S.bodyBreakIdx:j)].time;
+               if(!S.pullback_ready)
+               {
+                  Race_ArmFirstPullback(S,rates,n,j,DIR_DOWN);
+                  C1W2_PB_DN_Enable();
+                  S.idx=j; S.state=R_SEARCH_W2;
+                  progressed=true;
+                  break;
+               }
+               // The second opposite pair now makes the ordinary DOWN MTC.
+               // MTC exists only after the SECOND W3 has actually finished;
+               // its earlier body-break remains a separate historical marker.
+               const datetime bt = rates[j].time;
 
                if(g_race_winner=="" || bt < g_race_winner_time)
                {
@@ -1071,7 +1297,7 @@ inline void Race_OnBar_UP(const MqlRates &rates[], const bool &insideHL[], const
                   g_race_winner_time = bt;
 
                   Race_MarkWin_B(DIR_UP, bt);
-                  Race_DrawW2W3_MTC_Down(rates, n, S);
+                  Race_DrawW2W3_MTC_Down(rates, n, S, j);
 
                   // Compute scan window before clearing race state
                   const int __c1=(S.c1>=0?S.c1:g_race_hwbb_idx);
@@ -1120,6 +1346,8 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
    if(!g_race_locked || g_race_mode!=DIR_DOWN) return;
    RacePathBState S = g_pb_down;
    if(!S.init) return;
+   const int pb_action=Race_WatchFirstPullback(DIR_DOWN,S,rates,n,upto_j);
+   if(pb_action!=0) return;
 
    int limit = MathMin(upto_j, n-1);
    while(S.idx <= limit)
@@ -1287,10 +1515,19 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
                }
             }
 
-            // Finalize Path-B (MTC_UP)
-            if(S.have_w3 && S.breakAchieved)
+            if(S.have_w3 && S.breakAchieved && S.w3_end>=0 && S.w3_end<=j)
             {
-               const datetime bt = rates[(S.bodyBreakIdx>=0?S.bodyBreakIdx:j)].time;
+               if(!S.pullback_ready)
+               {
+                  Race_ArmFirstPullback(S,rates,n,j,DIR_UP);
+                  C1W2_PB_UP_Enable();
+                  S.idx=j; S.state=R_SEARCH_W2;
+                  progressed=true;
+                  break;
+               }
+               // MTC exists only after the SECOND W3 has actually finished;
+               // its earlier body-break remains a separate historical marker.
+               const datetime bt = rates[j].time;
 
                if(g_race_winner=="" || bt < g_race_winner_time)
                {
@@ -1298,7 +1535,7 @@ inline void Race_OnBar_DOWN(const MqlRates &rates[], const bool &insideHL[], con
                   g_race_winner_time = bt;
 
                   Race_MarkWin_B(DIR_DOWN, bt);
-                  Race_DrawW2W3_MTC_Up(rates, n, S);
+                  Race_DrawW2W3_MTC_Up(rates, n, S, j);
 
                   const int __c1=(S.c1>=0?S.c1:g_race_hwbb_idx);
                   const ENUM_TIMEFRAMES runtime_tf = __Race_RuntimeTF();
@@ -1374,9 +1611,12 @@ inline datetime __Race_SpecialRefAnchor(const Direction dir,
 }
 
 // =====================[ MTC Drawing Helpers ]=====================
-inline void Race_DrawW2W3_MTC_Down(const MqlRates &rates[], const int n, const RacePathBState &S)
+inline void Race_DrawW2W3_MTC_Down(const MqlRates &rates[], const int n,
+                                    const RacePathBState &S, const int confirmation_idx=-1)
 {
    const string tag = IntegerToString(g_race_counter);
+   const int event_idx=(confirmation_idx>=0 && confirmation_idx<n ?
+                        confirmation_idx : S.bodyBreakIdx);
 
    // --- W2 (DOWN): C1..C4/Cend
    if(S.c1 >= 0 && S.c1 < n) if(InpDrawMarkers) MarkV("MTC_DN_W2_C1_"+tag, rates[S.c1].time, clrFireBrick);
@@ -1414,7 +1654,7 @@ inline void Race_DrawW2W3_MTC_Down(const MqlRates &rates[], const int n, const R
          ObjectSetInteger(0, rname, OBJPROP_STYLE, STYLE_SOLID);
       }
 
-      datetime tbb = (S.bodyBreakIdx>=0 && S.bodyBreakIdx<n ? rates[S.bodyBreakIdx].time : TimeCurrent());
+      datetime tbb = (event_idx>=0 && event_idx<n ? rates[event_idx].time : TimeCurrent());
       Race_ActivateRef_Down(g_race_ref_mtc_down,tbb,g_race_ref_mtc_down_anchor_time);
 
       SB_UP_BringToFront();
@@ -1422,7 +1662,7 @@ inline void Race_DrawW2W3_MTC_Down(const MqlRates &rates[], const int n, const R
    }
 
    // Remember this MTC candle so the next back-to-back special can rebuild its reference.
-   Race_RecordMTCEvent(DIR_DOWN, rates, n, S.bodyBreakIdx);
+   Race_RecordMTCEvent(DIR_DOWN, rates, n, event_idx);
 
    // --- IMPORTANT cleanup after MTC
    SR_AllowOnly(DIR_DOWN);
@@ -1430,9 +1670,12 @@ inline void Race_DrawW2W3_MTC_Down(const MqlRates &rates[], const int n, const R
 }
 
 
-inline void Race_DrawW2W3_MTC_Up(const MqlRates &rates[], const int n, const RacePathBState &S)
+inline void Race_DrawW2W3_MTC_Up(const MqlRates &rates[], const int n,
+                                  const RacePathBState &S, const int confirmation_idx=-1)
 {
    const string tag = IntegerToString(g_race_counter);
+   const int event_idx=(confirmation_idx>=0 && confirmation_idx<n ?
+                        confirmation_idx : S.bodyBreakIdx);
 
    // --- W2 (UP): C1..C4/Cend
    if(S.c1 >= 0 && S.c1 < n) if(InpDrawMarkers) MarkV("MTC_UP_W2_C1_"+tag, rates[S.c1].time, clrLime);
@@ -1470,7 +1713,7 @@ inline void Race_DrawW2W3_MTC_Up(const MqlRates &rates[], const int n, const Rac
          ObjectSetInteger(0, rname, OBJPROP_STYLE, STYLE_SOLID);
       }
 
-      datetime tbb = (S.bodyBreakIdx>=0 && S.bodyBreakIdx<n ? rates[S.bodyBreakIdx].time : TimeCurrent());
+      datetime tbb = (event_idx>=0 && event_idx<n ? rates[event_idx].time : TimeCurrent());
       Race_ActivateRef_Up(g_race_ref_mtc_up,tbb,g_race_ref_mtc_up_anchor_time);
 
       SB_UP_BringToFront();
@@ -1478,7 +1721,7 @@ inline void Race_DrawW2W3_MTC_Up(const MqlRates &rates[], const int n, const Rac
    }
 
    // Remember this MTC candle so the next back-to-back special can rebuild its reference.
-   Race_RecordMTCEvent(DIR_UP, rates, n, S.bodyBreakIdx);
+   Race_RecordMTCEvent(DIR_UP, rates, n, event_idx);
 
    SR_AllowOnly(DIR_UP);
    __Race_ClearRegimeArtifacts();
@@ -1502,6 +1745,64 @@ inline void __Race_LaunchSpecialDirectionScan(const Direction dir,
    else
       API_Down_RunScanSequential_W2W3_Hunter(InpSymbol, runtime_tf, __from, __to,
                                             false, 0.0, 0, "", __bump);
+}
+
+
+// A pullback SR is exceptional: it creates both the new MTC and the first
+// qualifying SR on the SAME creator candle. TC text remains on NEXT real bar.
+inline void Race_ConfirmPullbackStrongRange(const Direction dir,
+                                           const MqlRates &rates[], const int n,
+                                           const int j, const datetime origin_time,
+                                           const double top,const double bottom)
+{
+   if(j<0 || j>=n || !(top>bottom)) return;
+   const datetime when=rates[j].time;
+   const double next_ref=(dir==DIR_DOWN ?
+                       __Race_SpecialNextRefForMTCDown(rates,n,j,g_race_ref_mtc_down) :
+                       __Race_SpecialNextRefForMTCUp(rates,n,j,g_race_ref_mtc_up));
+   g_race_winner="B";
+   g_race_winner_time=when;
+   if(dir==DIR_DOWN)
+   {
+      if(next_ref>0.0) ExtLQ_Down_Set(next_ref,when);
+      Race_MarkWin_B(DIR_UP,when);
+      Race_DrawMTCOnly_Down_ByRef(rates,n,j,next_ref); // registers actual MTC
+   }
+   else
+   {
+      if(next_ref>0.0) ExtLQ_Set(next_ref,when);
+      Race_MarkWin_B(DIR_DOWN,when);
+      Race_DrawMTCOnly_Up_ByRef(rates,n,j,next_ref);
+   }
+
+   if(Markers_ShouldRender())
+   {
+      const string name=__ScanPrefix()+"PB_SR_"+
+            (dir==DIR_UP?"U_":"D_")+IntegerToString((long)when);
+      if(ObjectFind(0,name)<0)
+         ObjectCreate(0,name,OBJ_RECTANGLE,0,origin_time,top,when,bottom);
+      ObjectSetInteger(0,name,OBJPROP_COLOR,clrPowderBlue);
+      ObjectSetInteger(0,name,OBJPROP_STYLE,STYLE_SOLID);
+      ObjectSetInteger(0,name,OBJPROP_BACK,true);
+      ObjectSetInteger(0,name,OBJPROP_FILL,false);
+   }
+
+   // Preserve standard SR mitigator tracking and first-SR TC semantics.
+   if(dir==DIR_DOWN)
+      SRMIT_OnNewSR_DN(++g_race_pullback_sr_down_count,top,bottom,when,
+                       rates[j].close<bottom);
+   else
+      SRMIT_OnNewSR_UP(++g_race_pullback_sr_up_count,top,bottom,when,
+                       rates[j].close>top);
+   TC_OnMTCFirstSR_SameBar(dir,rates,n,j);
+
+   if(InpDebugPrints)
+      Print("[RACE-PB-SR] SAME-CANDLE MTC + SR ",
+            (dir==DIR_UP?"UP":"DOWN")," @ ",T(when));
+   Race_RequestAbortCurrentAPIScan();
+   Race_InternalClearAll();
+   __Race_PrepareMTCRegimeHandoff(dir);
+   __Race_LaunchSpecialDirectionScan(dir,rates,n,when);
 }
 
 inline void Race_DrawMTCOnly_Down_ByRef(const MqlRates &rates[],

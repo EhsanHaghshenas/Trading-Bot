@@ -98,6 +98,24 @@ inline void TC_OnNewStrongRange(const Direction dir,
       __TC_DrawOnCandle(rates[sr_bar_index + 1]);
 }
 
+
+// Special pullback: SR CREATES the MTC, so SR.time == MTC.time. Standard
+// TC_OnNewStrongRange intentionally rejects this equality; use this explicit
+// event to register a first SR without manufacturing a second MTC/SR.
+inline void TC_OnMTCFirstSR_SameBar(const Direction dir,
+                                    const MqlRates &rates[],const int n,
+                                    const int sr_bar_index)
+{
+   if(!g_tc_waiting_for_sr || dir!=g_tc_mtc_direction) return;
+   if(sr_bar_index<0 || sr_bar_index>=n) return;
+   if(rates[sr_bar_index].time!=g_tc_mtc_time) return;
+   g_tc_waiting_for_sr=false;
+   g_tc_first_sr_time=rates[sr_bar_index].time;
+   g_tc_waiting_for_next_bar=true;
+   if(sr_bar_index+1<n)
+      __TC_DrawOnCandle(rates[sr_bar_index+1]);
+}
+
 // Fallback for scan buffers in which the next candle was not loaded when SR
 // was first detected. Call for bars in BOTH directions' existing scan loops.
 inline void TC_OnProcessedBar(const MqlRates &rates[], const int n, const int i)
