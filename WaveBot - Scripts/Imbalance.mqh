@@ -71,16 +71,20 @@ static int           g_imb_touch_count=0;
 static int           g_imb_return_touch_count=0;
 static int           g_imb_retro_created_count=0;
 static int           g_imb_duplicate_count=0;
-// One chronological CopyRates() pass: each third-bar index uniquely identifies
-// a 3-bar formation; bit 1=UP, bit 2=DOWN. Dedupe is O(1), not O(all zones).
-static int           g_imb_seen_third[];
+static bool          g_imb_event_processed[];
+static bool          g_imb_chrono_active=false;
+static datetime      g_imb_chrono_last_bar=0;
+static datetime      g_imb_chrono_active_mtc=0;
+static datetime      g_imb_chrono_active_tc=0;
+static datetime      g_imb_chrono_active_ref=0;
+static Direction     g_imb_chrono_active_direction=DIR_UP;
 
 inline void IMB_ResetGlobals()
 {
    ArrayFree(g_imb_events);
    ArrayFree(g_imb_zones);
    ArrayFree(g_imb_active_indices);
-   ArrayFree(g_imb_seen_third);
+   ArrayFree(g_imb_event_processed);
    g_imb_event_count=0;
    g_imb_zone_count=0;
    g_imb_active_count=0;
@@ -94,6 +98,12 @@ inline void IMB_ResetGlobals()
    g_imb_return_touch_count=0;
    g_imb_retro_created_count=0;
    g_imb_duplicate_count=0;
+   g_imb_chrono_active=false;
+   g_imb_chrono_last_bar=0;
+   g_imb_chrono_active_mtc=0;
+   g_imb_chrono_active_tc=0;
+   g_imb_chrono_active_ref=0;
+   g_imb_chrono_active_direction=DIR_UP;
 }
 
 // Record REAL MTC/TC events independently of the possibly non-chronological
@@ -117,6 +127,8 @@ inline void __IMB_RecordEvent(const bool is_mtc, const Direction direction,
       ArrayResize(g_imb_events,g_imb_event_capacity);
    }
    const int pos=g_imb_event_count++;
+   ArrayResize(g_imb_event_processed,g_imb_event_count);
+   g_imb_event_processed[pos]=false;
    g_imb_events[pos].time=event_time;
    g_imb_events[pos].mtc_time=mtc_time;
    g_imb_events[pos].direction=direction;
@@ -428,6 +440,8 @@ inline void __IMB_Create(const Direction direction, const string sym,
 
 // Register a complete three-candle pattern without stealing any candle from
 // another possible pattern, and without cloning an existing historical zone.
+// The identity is direction + third-candle time, not a transient CopyRates
+// array index, because nested race scans can use different local buffers.
 inline void __IMB_TryCreate(const Direction dir, const string sym,
                             const MqlRates &rates[],const int n,
                             const int third,const int tf_seconds,
@@ -435,13 +449,17 @@ inline void __IMB_TryCreate(const Direction dir, const string sym,
                             const datetime ref_time,const bool retrospective)
 {
    if(!__IMB_ValidThreeBars(rates,n,third,dir)) return;
-   const int bit=(dir==DIR_UP ? 1 : 2);
-   if((g_imb_seen_third[third] & bit)!=0)
+   const datetime third_time=rates[third].time;
+   for(int z=0;z<g_imb_zone_count;z++)
    {
-      g_imb_duplicate_count++;
-      return;
+      if(g_imb_zones[z].symbol==sym &&
+         g_imb_zones[z].direction==dir &&
+         g_imb_zones[z].third_time==third_time)
+      {
+         g_imb_duplicate_count++;
+         return;
+      }
    }
-   g_imb_seen_third[third] |= bit;
    __IMB_Create(dir,sym,rates,n,third-2,third,tf_seconds,
                 activated_tc,ref_time,retrospective);
 }
@@ -479,136 +497,115 @@ inline void __IMB_CheckPreTCFullFill(const int z,
    }
 }
 
-// Process MTC/TC events by candle time (the market scanner itself can rewind).
-// On every TC, scan EVERY qualifying triple from its matching MTC reference
-// origin, including those completed BEFORE the TC; activate them at TC. Do
-// not backdate mitigation: by design encounters/invalidations are only
-// registered while a same-direction TC is confirmed. All old valid zones
-// remain alive through unrelated MTC/TC epochs, with immutable archive lines.
-inline void IMB_RunConfirmedTrendScan(const string sym, const ENUM_TIMEFRAMES tf,
-                                      const datetime from_time, const datetime to_time)
+// The market scanners can rewind and launch nested direction scans, but each
+// accepted bar reaches this hook after its market-structure logic. IMB state
+// therefore advances once by candle time, while TC backfill remains an event-
+// time lookup performed exactly when that TC becomes known.
+inline void IMB_BeginChronologicalScan(const string sym, const ENUM_TIMEFRAMES tf,
+                                       const datetime from_time, const datetime to_time)
 {
-   if(g_imb_event_count<=0 || to_time<from_time) return;
+   g_imb_chrono_active=(to_time>=from_time);
+   g_imb_chrono_last_bar=0;
+   g_imb_chrono_active_mtc=0;
+   g_imb_chrono_active_tc=0;
+   g_imb_chrono_active_ref=0;
+   g_imb_chrono_active_direction=DIR_UP;
+   for(int i=0;i<g_imb_event_count;i++)
+      g_imb_event_processed[i]=false;
+}
 
-   IMBTrendEvent events[];
-   ArrayResize(events,g_imb_event_count);
-   for(int i=0;i<g_imb_event_count;i++) events[i]=g_imb_events[i];
-
-   // At identical time TC comes before MTC so the newer MTC wins.
-   for(int i=1;i<g_imb_event_count;i++)
-   {
-      IMBTrendEvent temp=events[i];
-      int j=i-1;
-      while(j>=0 && (events[j].time>temp.time ||
-           (events[j].time==temp.time && events[j].is_mtc && !temp.is_mtc)))
-      {
-         events[j+1]=events[j];
-         j--;
-      }
-      events[j+1]=temp;
-   }
-
-   // The reference candle can precede the scan window; load real data for it.
-   datetime load_from=from_time;
-   for(int k=0;k<g_imb_event_count;k++)
-      if(!events[k].is_mtc && events[k].reference_time>0 &&
-         events[k].reference_time<load_from)
-         load_from=events[k].reference_time;
-
-   MqlRates rates[];
-   ArrayFree(rates);
-   const datetime extended_stop=to_time+(datetime)(7*86400);
-   const int n=CopyRates(sym,tf,load_from,extended_stop,rates);
-   if(n<=0)
-   {
-      if(InpDebugPrints) Print("[IMB] Rates unavailable for ",sym);
-      return;
-   }
-   ArraySetAsSeries(rates,false);
-   ArrayResize(g_imb_seen_third,n);
-   ArrayInitialize(g_imb_seen_third,0);
+inline void __IMB_ChronoProcessTC(const string sym, const ENUM_TIMEFRAMES tf,
+                                   const IMBTrendEvent &e)
+{
+   const datetime ref=(e.reference_time>0 && e.reference_time<=e.mtc_time ?
+                       e.reference_time : e.mtc_time);
+   MqlRates retro_rates[];
+   const int n=CopyRates(sym,tf,ref,e.time,retro_rates);
+   if(n<=0) return;
+   ArraySetAsSeries(retro_rates,false);
    const int tf_seconds=PeriodSeconds(tf);
-   int event_cursor=0;
-   datetime active_mtc=0,active_tc=0,active_ref=0;
-   Direction active_direction=DIR_UP;
-   int retro_epochs=0;
-
-   for(int i=0;i<n;i++)
+   int first=0;
+   while(first<n && retro_rates[first].time<ref) first++;
+   int before=n;
+   while(before>0 && retro_rates[before-1].time>=e.time) before--;
+   int retro_in_epoch=0;
+   for(int j=first+2;j<before;j++)
    {
-      if(rates[i].time>to_time) break;
-      while(event_cursor<g_imb_event_count && events[event_cursor].time<=rates[i].time)
+      if(retro_rates[j-2].time<ref) continue;
+      const int prior=g_imb_created_count;
+      __IMB_TryCreate(e.direction,sym,retro_rates,n,j,tf_seconds,
+                      e.time,ref,true);
+      if(g_imb_created_count>prior)
       {
-         IMBTrendEvent e=events[event_cursor++];
-         if(e.is_mtc)
-         {
-            active_mtc=e.mtc_time;
-            active_direction=e.direction;
-            active_tc=0;
-            active_ref=(e.reference_time>0 && e.reference_time<=e.mtc_time ?
-                        e.reference_time : e.mtc_time);
-         }
-         else if(e.mtc_time==active_mtc && e.direction==active_direction)
-         {
-            // TC superseded by a newer MTC on the same bar is not actionable.
-            if(event_cursor<g_imb_event_count &&
-               events[event_cursor].is_mtc &&
-               events[event_cursor].time==e.time)
-               continue;
-            active_tc=e.time;
-            if(e.reference_time>0 && e.reference_time<=active_mtc)
-               active_ref=e.reference_time;
-            if(active_ref<rates[0].time && InpDebugPrints)
-               Print("[IMB] Missing earlier anchor history for ",sym,
-                    " ref=",TimeToString(active_ref,TIME_DATE|TIME_MINUTES),
-                    " first_loaded=",TimeToString(rates[0].time,TIME_DATE|TIME_MINUTES));
-            // Backfill candidates whose FIRST candle is at/after the actual
-            // reference origin, ending strictly BEFORE the confirmation bar.
-            // No before-TC price action is silently treated as an aligned hit.
-            int retro_in_epoch=0;
-            int lo=0,hi=i-1,first=i;
-            while(lo<=hi) // binary search: first loaded candle >= reference
-            {
-               const int mid=lo+(hi-lo)/2;
-               if(rates[mid].time>=active_ref){first=mid;hi=mid-1;}
-               else lo=mid+1;
-            }
-            for(int j=first+2;j<i;j++)
-            {
-               if(rates[j-2].time<active_ref) continue;
-               if(!__IMB_ValidThreeBars(rates,n,j,active_direction)) continue;
-               const int prior=g_imb_created_count;
-               __IMB_TryCreate(active_direction,sym,rates,n,j,tf_seconds,
-                               active_tc,active_ref,true);
-               if(g_imb_created_count>prior)
-               {
-                  retro_in_epoch++;
-                  __IMB_CheckPreTCFullFill(g_imb_zone_count-1,rates,j+1,i);
-               }
-            }
-            retro_epochs++;
-            if(InpDebugPrints)
-               Print("[IMB] TC=",TimeToString(active_tc,TIME_DATE|TIME_MINUTES),
-                     " ",(active_direction==DIR_UP ? "UP" : "DOWN"),
-                     " ref_from=",TimeToString(active_ref,TIME_DATE|TIME_MINUTES),
-                     " retro_new=",retro_in_epoch);
-         }
+         retro_in_epoch++;
+         __IMB_CheckPreTCFullFill(g_imb_zone_count-1,retro_rates,j+1,before);
       }
-
-      // Global full-fill invalidations are ALWAYS checked; partial touches
-      // are only registered under the corresponding confirmed TC.
-      __IMB_UpdateExisting(rates,n,i,tf_seconds,active_direction,active_tc);
-      if(active_tc<=0) continue;
-
-      // Include triples which start at the reference BEFORE confirmation and
-      // finish later; each candle can concurrently start unrelated patterns.
-      if(i<2 || rates[i-2].time<active_ref) continue;
-      __IMB_TryCreate(active_direction,sym,rates,n,i,tf_seconds,
-                      active_tc,active_ref,false);
    }
+   if(InpDebugPrints)
+      Print("[IMB] TC=",TimeToString(e.time,TIME_DATE|TIME_MINUTES),
+            " ",(e.direction==DIR_UP ? "UP" : "DOWN"),
+            " ref_from=",TimeToString(ref,TIME_DATE|TIME_MINUTES),
+            " retro_new=",retro_in_epoch," chronological=true");
+}
+
+inline void __IMB_ChronoDrainEvents(const string sym, const ENUM_TIMEFRAMES tf,
+                                    const datetime bar_time)
+{
+   for(;;)
+   {
+      int selected=-1;
+      for(int k=0;k<g_imb_event_count;k++)
+      {
+         if(g_imb_event_processed[k] || g_imb_events[k].time>bar_time) continue;
+         if(selected<0 || g_imb_events[k].time<g_imb_events[selected].time ||
+            (g_imb_events[k].time==g_imb_events[selected].time &&
+             g_imb_events[k].is_mtc && !g_imb_events[selected].is_mtc))
+            selected=k;
+      }
+      if(selected<0) return;
+      IMBTrendEvent e=g_imb_events[selected];
+      g_imb_event_processed[selected]=true;
+      if(e.is_mtc)
+      {
+         g_imb_chrono_active_mtc=e.mtc_time;
+         g_imb_chrono_active_direction=e.direction;
+         g_imb_chrono_active_tc=0;
+         g_imb_chrono_active_ref=(e.reference_time>0 && e.reference_time<=e.mtc_time ?
+                                  e.reference_time : e.mtc_time);
+      }
+      else if(e.mtc_time==g_imb_chrono_active_mtc &&
+              e.direction==g_imb_chrono_active_direction)
+      {
+         g_imb_chrono_active_tc=e.time;
+         if(e.reference_time>0 && e.reference_time<=g_imb_chrono_active_mtc)
+            g_imb_chrono_active_ref=e.reference_time;
+         __IMB_ChronoProcessTC(sym,tf,e);
+      }
+   }
+}
+
+inline void IMB_ProcessChronologicalBar(const string sym, const ENUM_TIMEFRAMES tf,
+                                        const MqlRates &rates[], const int n, const int i)
+{
+   if(!g_imb_chrono_active || i<0 || i>=n) return;
+   const datetime bar_time=rates[i].time;
+   if(bar_time<=0 || bar_time<=g_imb_chrono_last_bar) return;
+   __IMB_ChronoDrainEvents(sym,tf,bar_time);
+   __IMB_UpdateExisting(rates,n,i,PeriodSeconds(tf),g_imb_chrono_active_direction,
+                        g_imb_chrono_active_tc);
+   if(g_imb_chrono_active_tc>0 && i>=2 &&
+      rates[i-2].time>=g_imb_chrono_active_ref)
+      __IMB_TryCreate(g_imb_chrono_active_direction,sym,rates,n,i,
+                      PeriodSeconds(tf),g_imb_chrono_active_tc,
+                      g_imb_chrono_active_ref,false);
+   g_imb_chrono_last_bar=bar_time;
+}
+
+inline void IMB_FinalizeChronologicalScan(const string sym)
+{
    if(InpDebugPrints)
       Print("[IMB] ",sym," | created=",g_imb_created_count,
             " | reference-backfilled=",g_imb_retro_created_count,
-            " | TC epochs=",retro_epochs,
             " | aligned touches=",g_imb_touch_count,
             " | return touches=",g_imb_return_touch_count,
             " | new edge levels=",g_imb_updated_count,
@@ -616,7 +613,9 @@ inline void IMB_RunConfirmedTrendScan(const string sym, const ENUM_TIMEFRAMES tf
             " | active=",g_imb_active_count,
             " | total zone records=",g_imb_zone_count,
             " | reused historical triples=",g_imb_duplicate_count,
-            " | trend events=",g_imb_event_count);
+            " | trend events=",g_imb_event_count,
+            " | chronological=true");
+   g_imb_chrono_active=false;
 }
 
 #endif // WAVEBOT_IMBALANCE_MQH
