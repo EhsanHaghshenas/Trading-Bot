@@ -287,7 +287,7 @@ inline int __SRMIT_TFSec(const MqlRates &rates[], const int n)
       int s = (int)(rates[1].time - rates[0].time);
       if(s > 0) return s;
    }
-   return PeriodSeconds(Period());
+   return PeriodSeconds(WB_RuntimeTF());
 }
 
 // محاسبه زمان انتهای «N کندل بعد از اندیس from_idx»

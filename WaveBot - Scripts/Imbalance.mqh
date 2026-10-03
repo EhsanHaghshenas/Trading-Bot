@@ -160,7 +160,7 @@ inline color __IMB_ZoneTone(const Direction direction, const int serial)
 }
 
 // Extend five ACTUAL chart candles when they exist; at the dataset's far
-// right edge use five M15 slots as the documented fallback.
+// right edge use five slots of the selected M1/M15 chart timeframe.
 inline datetime __IMB_FiveBarsForward(const MqlRates &rates[], const int n,
                                       const int origin, const int tf_seconds)
 {

@@ -20,15 +20,12 @@
 #include <WaveBot/Hunter.mqh>      // for SW_UP_ClearSeed()
 #include <WaveBot/Hunter_Down.mqh> // for SW_DOWN_ClearSeed()
 
+// Nested reverse-pair and MTC scans MUST use the same attached-chart
+// timeframe as Bootstrap, the main API scan, TC and IMB. Do not infer a
+// different timeframe in this module or share a timeframe across EAs.
 inline ENUM_TIMEFRAMES __Race_RuntimeTF()
 {
-   ENUM_TIMEFRAMES tf = InpTF;
-   ENUM_TIMEFRAMES chart_tf = (ENUM_TIMEFRAMES)Period();
-
-   if(chart_tf == PERIOD_M15)     tf = PERIOD_M15;
-   else if(chart_tf == PERIOD_M1) tf = PERIOD_M1;
-
-   return tf;
+   return WB_RuntimeTF();
 }
 
 
@@ -823,13 +820,14 @@ inline datetime Race_WorldHWBBTime()  { return g_world_hwbb_time; }
 // هدف: وقتی MTC در میانه‌ی یک API scan رخ می‌دهد و همان‌جا nested-scan جدید
 // برای روند جدید launch می‌شود، invocation فعلیِ API باید بعد از بازگشت
 // فوراً terminate شود تا دیگر منطق روند قبلی ادامه پیدا نکند.
-#define RACE_API_EXEC_MAX 64
-
-static int g_race_api_exec_stack[RACE_API_EXEC_MAX];
+// M1 histories can exceed 64 nested regime handoffs. Every invocation must
+// retain its own token, otherwise aborts target an ancestor and old scans
+// resume/replay before the final chronological Imbalance pass can run.
+static int g_race_api_exec_stack[];
 static int g_race_api_exec_size   = 0;
 static int g_race_api_exec_seq    = 0;
 
-static int g_race_api_abort_tokens[RACE_API_EXEC_MAX];
+static int g_race_api_abort_tokens[];
 static int g_race_api_abort_count = 0;
 
 inline int __Race_CurrentAPIToken()
@@ -876,8 +874,8 @@ inline int Race_EnterAPIScan()
    ++g_race_api_exec_seq;
    const int token = g_race_api_exec_seq;
 
-   if(g_race_api_exec_size < RACE_API_EXEC_MAX)
-      g_race_api_exec_stack[g_race_api_exec_size++] = token;
+   ArrayResize(g_race_api_exec_stack,g_race_api_exec_size+1,64);
+   g_race_api_exec_stack[g_race_api_exec_size++] = token;
 
    return token;
 }
@@ -897,9 +895,7 @@ inline void Race_RequestAbortCurrentAPIScan()
       if(g_race_api_abort_tokens[i] == token)
          return;
 
-   if(g_race_api_abort_count >= RACE_API_EXEC_MAX)
-      return;
-
+   ArrayResize(g_race_api_abort_tokens,g_race_api_abort_count+1,64);
    g_race_api_abort_tokens[g_race_api_abort_count++] = token;
 }
 
