@@ -195,6 +195,7 @@ inline void HW_BB_UP_OnBar(const MqlRates &r, const MqlRates &rates[], const int
    if(r.close < g_bb_level_u)
    {
       ++g_bb_counter_u;
+      WB_Coord_OnHWBB(DIR_UP,r.time);
       if(InpDrawMarkers) MarkV("HWBB_U_"+IntegerToString(g_bb_counter_u), r.time, clrRoyalBlue);
 
 
@@ -276,6 +277,7 @@ inline void HW_BB_DOWN_OnBar(const MqlRates &r, const MqlRates &rates[], const i
    if(r.close > g_bb_level_d)
    {
       ++g_bb_counter_d;
+      WB_Coord_OnHWBB(DIR_DOWN,r.time);
       if(InpDrawMarkers) MarkV("HWBB_D_"+IntegerToString(g_bb_counter_d), r.time, clrDarkOrange);
 
 

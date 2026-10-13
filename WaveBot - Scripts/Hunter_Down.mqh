@@ -182,6 +182,7 @@ inline void Hunter_Down_TryMarkIfValid(const MqlRates &rates[], const int n,
 
    // بذر SW نزولی را فعال کن (Lowِ C1 هانتر)
    SW_DOWN_ActivateSeed(rates, n, c1_index, cross_idx);
+   WB_Coord_OnHW(DIR_DOWN,rates[cross_idx].time);
 
    if(InpDebugPrints)
       Print("[Hunter-DOWN] OK | C1=",T(rates[c1_index].time),

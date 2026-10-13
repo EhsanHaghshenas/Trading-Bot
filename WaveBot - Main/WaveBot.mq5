@@ -24,7 +24,7 @@ input int              InpMaxBarsInWave            = 1000;
 input bool             InpDrawMarkers              = true;
 input bool             InpDebugPrints              = true;
 input Direction        InpDirection                = DIR_DOWN;
-input datetime         InpScanFromDate             = D'2026.01.01 00:00:00'; // adjustable start; older dates require complete MT5 history
+input datetime         InpScanFromDate             = D'2026.05.01 00:00:00'; // adjustable start; older dates require complete MT5 history
 input datetime         InpStatementCloseDate        = 0; // 0 = newest closed candle for selected timeframe
 input bool             InpRequireCloseBreakAboveW2H1 = true;
 input bool             InpDrawExtLQ                = false;
@@ -90,6 +90,7 @@ inline bool WB_RuntimeAllowMarkerRender()
 #include <WaveBot/SWGate.mqh>
 #include <WaveBot/ShadowBreaker.mqh>
 #include <WaveBot/W3ChainGuard.mqh>
+#include <WaveBot/Coordinator.mqh>
 
 inline void ResolveWindow(datetime &start, datetime &stop)
 {
@@ -137,6 +138,7 @@ inline void WB_ResetMarketWorld()
    SRMIT_ResetGlobals();
    TC_ResetGlobals();
    IMB_ResetGlobals();
+   WB_Coord_ResetScan(WB_ActiveSymbol(),WB_RuntimeTF());
 
    SR_AllowBoth();
 }
@@ -240,6 +242,13 @@ inline void WB_RunAllMarketScans()
          Markers_SetNamespace("MAJ");
          WB_ResetMarketWorld();
          Markers_SetPreviewMode(InpDrawOnlyChartSymbol && !primary);
+         if(primary && Markers_ShouldRender())
+         {
+            // A complete primary historical pass deterministically rebuilds
+            // only pipeline IMB visuals and coordinator stage labels.
+            IMB_DeletePreviousMarkers();
+            WB_Coord_DeletePipelineVisuals();
+         }
          datetime sym_stop=stop;
          if(InpStatementCloseDate<=0)
          {
@@ -278,7 +287,6 @@ inline void WB_RunAllMarketScans()
    Markers_SetPreviewMode(false);
    WB_SetActiveSymbol(WB_PrimaryInputSymbol());
    g_once=true;
-   EventKillTimer();
    if(InpDebugPrints)
       Print("[WB-ANALYSIS] Market-only historical ",WB_RuntimeTFName(),
             " pass completed. No trade or signal files.");
@@ -304,6 +312,7 @@ int OnInit()
       return INIT_PARAMETERS_INCORRECT;
    }
    InpTF=selected_tf;
+   WB_Coord_OnInstanceInit();
    if(InpDebugPrints)
       Print("[WB-ANALYSIS] Chart=",_Symbol," / ",EnumToString(chart_tf),
             " | Selected=",WB_RuntimeTFName()," | Independent analysis instance.");
@@ -332,7 +341,15 @@ void OnTick() {}
 
 void OnTimer()
 {
-   if(g_once){EventKillTimer();return;}
+   if(g_once)
+   {
+      if(WB_Coord_OnTimer())
+      {
+         g_once=false;
+         WB_RunAllMarketScans();
+      }
+      return;
+   }
    Markers_SetNamespace("MAJ");
    WB_ApplyHiddenVisualPolicies();
 
@@ -356,6 +373,7 @@ void OnTimer()
 void OnDeinit(const int reason)
 {
    EventKillTimer();
+   WB_Coord_OnInstanceDeinit();
    Markers_SetPreviewMode(false);
    WB_SetActiveSymbol(WB_PrimaryInputSymbol());
    WB_ApplyHiddenVisualPolicies();

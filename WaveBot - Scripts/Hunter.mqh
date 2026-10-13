@@ -185,6 +185,7 @@ inline void Hunter_TryMarkIfValid(const MqlRates &rates[], const int n,
 
    // --- بذر SW را فعال کن (Highِ C1 هانتر)
    SW_UP_ActivateSeed(rates, n, c1_index, cross_idx);
+   WB_Coord_OnHW(DIR_UP,rates[cross_idx].time);
 
    if(InpDebugPrints)
       Print("[Hunter-UP] OK | C1=",T(rates[c1_index].time),

@@ -37,6 +37,20 @@ inline void TC_OnMTC(const Direction dir, const datetime mtc_time,
    if(mtc_time <= 0 || mtc_time < g_tc_mtc_time) return;
    if(mtc_time == g_tc_mtc_time && dir == g_tc_mtc_direction) return;
 
+   // A confirmed TC remains valid until an OPPOSITE MTC occurs.  A later
+   // same-direction MTC must not neutralize/reactivate the already-confirmed
+   // TC or restart the M15/M1 pipeline.  After an opposite MTC invalidates
+   // TC, a later MTC back in the old direction still starts a fresh epoch and
+   // therefore requires a NEW Strong Range and NEW TC confirmation.
+   if(g_tc_confirmed && dir == g_tc_mtc_direction)
+   {
+      if(InpDebugPrints)
+         Print("[TC] Same-direction MTC ignored for TC validity @ ",
+               TimeToString(mtc_time,TIME_DATE|TIME_MINUTES),
+               " | active TC remains ",(dir==DIR_UP?"UP":"DOWN"));
+      return;
+   }
+
    g_tc_mtc_direction = dir;
    g_tc_mtc_time = mtc_time;
    g_tc_reference_start = (reference_start>0 && reference_start<=mtc_time ?
@@ -49,6 +63,7 @@ inline void TC_OnMTC(const Direction dir, const datetime mtc_time,
 
    // Record the accepted actual MTC for the later chronological IMB pass.
    IMB_RecordMTC(dir,mtc_time,g_tc_reference_start);
+   WB_Coord_OnMTC(dir,mtc_time);
 }
 
 // The label is anchored to the NEXT REAL bar, not to a calculated time:
@@ -62,6 +77,7 @@ inline void __TC_DrawOnCandle(const MqlRates &bar)
    g_tc_waiting_for_next_bar = false;
    g_tc_confirmed = true;
    IMB_RecordTC(g_tc_mtc_direction,g_tc_mtc_time,bar.time,g_tc_reference_start);
+   WB_Coord_OnTC(g_tc_mtc_direction,bar.time);
 
    const double candle_range = bar.high - bar.low;
    const double margin = MathMax(3.0 * _Point, candle_range * 0.20);

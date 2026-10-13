@@ -1057,6 +1057,7 @@ inline void Race_ArmFirstPullback(RacePathBState &S,
    S.pullback_confirm_idx=finished_at;
    S.pullback_w3_c1=S.w3_c1;
    S.pullback_last_idx=finished_at;
+
    S.pullback_ext_lq=(pullback_dir==DIR_DOWN ? rates[S.w3_c1].high :
                                                rates[S.w3_c1].low);
    // Candidate reverse-MTC reference comes from the CURRENT HWBB's Hunter C1.
@@ -1173,9 +1174,10 @@ inline int Race_WatchFirstPullback(const Direction original_dir,
          continue;  // SR cannot exist until AFTER the Hunter crossing bar.
       }
 
-      // Special Strong Range from THIS SAME first pullback W2/W3:
-      // bearish: wick Low < Low(C1-Hunter), top=High(C1 W3 of pullback).
-      // bullish mirror. Strictly no extra opposite W2/W3 is needed here.
+      // Special pullback Strong Range.  Creation still uses the standard
+      // Hunter boundary: DOWN requires a break below Low(C1-HW), UP requires
+      // a break above High(C1-HW).  Only its geometry is reconstructed here
+      // because this exceptional path does not require another formal W2/W3.
       if(j<=S.pullback_hunter_cross_idx) continue;
       const bool sr_created=(original_dir==DIR_UP ?
                       r.low<S.pullback_hunter_level :
@@ -1183,17 +1185,66 @@ inline int Race_WatchFirstPullback(const Direction original_dir,
       if(!sr_created) continue;
 
       const Direction new_dir=(original_dir==DIR_UP ? DIR_DOWN : DIR_UP);
-      const int anchor=S.pullback_w3_c1;
-      const double top=(new_dir==DIR_DOWN ? rates[anchor].high :
-                                            S.pullback_hunter_level);
-      const double bottom=(new_dir==DIR_DOWN ? S.pullback_hunter_level :
-                                               rates[anchor].low);
+
+      // Pullback Strong-Range geometry MUST mirror the standard SR engine:
+      //   UP   -> TOP    = High(C1-HW), BOTTOM = Low(C1-SW)
+      //   DOWN -> BOTTOM = Low(C1-HW), TOP    = High(C1-SW)
+      //
+      // C1-HW is already frozen when the pullback Hunter is confirmed.
+      // The special pullback path does not require a second formal W2/W3 pair,
+      // therefore its C1-SW is reconstructed exactly like the live W3 C1
+      // candidate: the lowest Low (UP) / highest High (DOWN) from the first
+      // bar AFTER the HW cross through the SR creator bar.  This prevents the
+      // HW-cross candle itself, the old pullback W2, or an arbitrary interval
+      // extreme from becoming a Strong-Range boundary.
+      const int hw_c1=S.pullback_hunter_c1;
+      const int hw_cross=S.pullback_hunter_cross_idx;
+      if(hw_c1<0 || hw_c1>=n || hw_cross<0 || hw_cross>=n || hw_cross>=j)
+         continue;
+
+      const int sw_from=hw_cross+1;
+      int sw_c1=-1;
+      if(new_dir==DIR_UP)
+      {
+         double sw_low=DBL_MAX;
+         for(int q=sw_from;q<=j;q++)
+         {
+            if(rates[q].low<sw_low)
+            {
+               sw_low=rates[q].low;
+               sw_c1=q;
+            }
+         }
+      }
+      else
+      {
+         double sw_high=-DBL_MAX;
+         for(int q=sw_from;q<=j;q++)
+         {
+            if(rates[q].high>sw_high)
+            {
+               sw_high=rates[q].high;
+               sw_c1=q;
+            }
+         }
+      }
+      if(sw_c1<0 || sw_c1>=n) continue;
+
+      const double top=(new_dir==DIR_UP ? rates[hw_c1].high : rates[sw_c1].high);
+      const double bottom=(new_dir==DIR_UP ? rates[sw_c1].low : rates[hw_c1].low);
       if(!(top>bottom)) continue;
+
+      if(InpDebugPrints)
+         Print("[RACE-PB-SR] geometry ",(new_dir==DIR_UP?"UP":"DOWN"),
+               " | HW-C1=",T(rates[hw_c1].time),
+               " | SW-C1=",T(rates[sw_c1].time),
+               " | top=",DoubleToString(top,_Digits),
+               " | bottom=",DoubleToString(bottom,_Digits));
 
       // The special handler reads the live race state; S was a local copy.
       if(original_dir==DIR_UP) g_pb_up=S; else g_pb_down=S;
       Race_ConfirmPullbackStrongRange(new_dir,rates,n,j,
-                        rates[anchor].time,top,bottom);
+                        rates[hw_c1].time,top,bottom);
       return 2;
    }
    return 0;
