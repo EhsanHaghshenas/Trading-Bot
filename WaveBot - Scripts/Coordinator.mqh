@@ -40,19 +40,6 @@ struct WBCoordRecord
    datetime hw_time;
 };
 
-struct WBCoordZone
-{
-   string id;
-   Direction direction;
-   datetime first_time;
-   datetime third_time;
-   double base;
-   double edge;
-   datetime filled_time;
-   datetime state_time;
-   bool active;
-};
-
 static bool g_wbc_instance_ready=false;
 static string g_wbc_scan_symbol="";
 static ENUM_TIMEFRAMES g_wbc_scan_tf=PERIOD_CURRENT;
@@ -75,13 +62,10 @@ static datetime g_wbc_child_handoff_time=0;
 static datetime g_wbc_child_tc_time=0;
 static datetime g_wbc_child_hw_time=0;
 static datetime g_wbc_child_last_trigger_time=0;
-static string g_wbc_child_triggered_generation="";
 
 static WBCoordRecord g_wbc_parent_records[];
 static int g_wbc_parent_record_count=0;
 static int g_wbc_parent_record_index=0;
-static WBCoordZone g_wbc_parent_zones[];
-static int g_wbc_parent_zone_count=0;
 static long g_wbc_parent_loaded_revision=-1;
 static long g_wbc_parent_loaded_size=-1;
 static long g_wbc_parent_sequence=0;
@@ -206,56 +190,6 @@ inline void WBC_DrawStage(const string stage,const datetime event_time,
    ObjectSetInteger(0,obj,OBJPROP_SELECTABLE,false);
 }
 
-inline void WBC_DrawImportedParentZone(const WBCoordZone &z,const datetime hit_time)
-{
-   if(!WBC_ShouldDrawPipeline()) return;
-   const int m15_seconds=PeriodSeconds(PERIOD_M15);
-   const datetime edge_from=(z.state_time>z.third_time ? z.state_time : z.third_time);
-   const string key="PIPEIMB_"+WBC_VisualKey(z.id)+"_"+IntegerToString((int)(long)hit_time);
-   const color tone=(z.direction==DIR_UP ? clrLimeGreen : clrTomato);
-
-   const string base_obj=__ScanPrefix()+key+"_BASE";
-   if(ObjectFind(0,base_obj)!=-1) ObjectDelete(0,base_obj);
-   if(ObjectCreate(0,base_obj,OBJ_TREND,0,z.first_time,z.base,
-                   z.first_time+(datetime)(5*m15_seconds),z.base))
-   {
-      ObjectSetInteger(0,base_obj,OBJPROP_COLOR,tone);
-      ObjectSetInteger(0,base_obj,OBJPROP_STYLE,STYLE_DASH);
-      ObjectSetInteger(0,base_obj,OBJPROP_WIDTH,1);
-      ObjectSetInteger(0,base_obj,OBJPROP_RAY_LEFT,false);
-      ObjectSetInteger(0,base_obj,OBJPROP_RAY_RIGHT,false);
-      ObjectSetInteger(0,base_obj,OBJPROP_SELECTABLE,false);
-      ObjectSetString(0,base_obj,OBJPROP_TOOLTIP,"M15 pipeline IMB "+z.id+" BASE");
-   }
-
-   const string edge_obj=__ScanPrefix()+key+"_EDGE";
-   if(ObjectFind(0,edge_obj)!=-1) ObjectDelete(0,edge_obj);
-   if(ObjectCreate(0,edge_obj,OBJ_TREND,0,edge_from,z.edge,
-                   edge_from+(datetime)(5*m15_seconds),z.edge))
-   {
-      ObjectSetInteger(0,edge_obj,OBJPROP_COLOR,tone);
-      ObjectSetInteger(0,edge_obj,OBJPROP_STYLE,STYLE_DASH);
-      ObjectSetInteger(0,edge_obj,OBJPROP_WIDTH,1);
-      ObjectSetInteger(0,edge_obj,OBJPROP_RAY_LEFT,false);
-      ObjectSetInteger(0,edge_obj,OBJPROP_RAY_RIGHT,false);
-      ObjectSetInteger(0,edge_obj,OBJPROP_SELECTABLE,false);
-      ObjectSetString(0,edge_obj,OBJPROP_TOOLTIP,"M15 pipeline IMB "+z.id+" CURRENT EDGE");
-   }
-
-   const string label_obj=__ScanPrefix()+key+"_LABEL";
-   if(ObjectFind(0,label_obj)!=-1) ObjectDelete(0,label_obj);
-   if(ObjectCreate(0,label_obj,OBJ_TEXT,0,edge_from,z.edge))
-   {
-      ObjectSetString(0,label_obj,OBJPROP_TEXT,"M15 IMB "+z.id);
-      ObjectSetString(0,label_obj,OBJPROP_TOOLTIP,"M15 pipeline IMB selected by child C4");
-      ObjectSetInteger(0,label_obj,OBJPROP_COLOR,tone);
-      ObjectSetInteger(0,label_obj,OBJPROP_FONTSIZE,8);
-      ObjectSetInteger(0,label_obj,OBJPROP_ANCHOR,ANCHOR_LEFT);
-      ObjectSetInteger(0,label_obj,OBJPROP_BACK,false);
-      ObjectSetInteger(0,label_obj,OBJPROP_SELECTABLE,false);
-   }
-}
-
 inline string WBC_ParentFile(const string sym)
 {
    return WBC_LogName(sym);
@@ -336,10 +270,8 @@ inline void WBC_AppendParentRecord(const string kind,const datetime event_time,
 inline void WBC_ResetParentTransportCache()
 {
    ArrayResize(g_wbc_parent_records,0);
-   ArrayResize(g_wbc_parent_zones,0);
    g_wbc_parent_record_count=0;
    g_wbc_parent_record_index=0;
-   g_wbc_parent_zone_count=0;
    g_wbc_parent_loaded_revision=-1;
    g_wbc_parent_loaded_size=-1;
    g_wbc_parent_transport_active=false;
@@ -417,40 +349,15 @@ inline bool WBC_LoadParentRecords(const string sym)
    return true;
 }
 
-inline int WBC_FindZone(const string zone_id)
-{
-   for(int i=0;i<g_wbc_parent_zone_count;i++)
-      if(g_wbc_parent_zones[i].id==zone_id) return i;
-   return -1;
-}
-
-inline void WBC_ApplyZoneRecord(const WBCoordRecord &r)
-{
-   if(r.zone_id=="") return;
-   int z=WBC_FindZone(r.zone_id);
-   if(z<0)
-   {
-      z=g_wbc_parent_zone_count++;
-      ArrayResize(g_wbc_parent_zones,g_wbc_parent_zone_count);
-      g_wbc_parent_zones[z].id=r.zone_id;
-   }
-   g_wbc_parent_zones[z].direction=r.direction;
-   g_wbc_parent_zones[z].first_time=r.first_time;
-   g_wbc_parent_zones[z].third_time=r.third_time;
-   g_wbc_parent_zones[z].base=r.base;
-   g_wbc_parent_zones[z].edge=r.edge;
-   g_wbc_parent_zones[z].filled_time=r.filled_time;
-   g_wbc_parent_zones[z].state_time=r.event_time;
-   g_wbc_parent_zones[z].active=r.active;
-}
-
 inline void WBC_ApplyParentRecord(const WBCoordRecord &r)
 {
+   // M15 IMB geometry is intentionally NOT imported into the M1 child.
+   // The parent still transports HANDOFF/CANCEL generation state, but C4 may
+   // be completed only by a qualifying local M1 IMB interaction.  Ignore
+   // historical ZONE records here so an M15 zone can never become a child
+   // trigger source through cross-chart transport.
    if(r.kind=="ZONE")
-   {
-      WBC_ApplyZoneRecord(r);
       return;
-   }
    if(r.kind=="CANCEL")
    {
       if(g_wbc_parent_transport_active &&
@@ -503,10 +410,7 @@ inline void WBC_ClearChildState(const bool keep_parent)
    g_wbc_child_hw_time=0;
    g_wbc_child_last_trigger_time=0;
    if(!keep_parent)
-   {
       g_wbc_child_generation="";
-      g_wbc_child_triggered_generation="";
-   }
 }
 
 inline void WBC_InitializeChildForParent(const datetime bar_time)
@@ -516,7 +420,6 @@ inline void WBC_InitializeChildForParent(const datetime bar_time)
    g_wbc_child_generation=g_wbc_parent_transport_generation;
    g_wbc_child_parent_active=true;
    g_wbc_child_last_trigger_time=0;
-   g_wbc_child_triggered_generation="";
    WBC_DrawStage("C1 PARENT READY",bar_time,g_wbc_child_direction,0,clrAqua,
                  "generation="+g_wbc_child_generation);
 
@@ -542,13 +445,18 @@ inline void WBC_InitializeChildForParent(const datetime bar_time)
 
 inline bool WBC_ChildTriggerReady(const datetime event_time,const string source)
 {
-   if(g_wbc_child_stage==WB_COORD_CHILD_TRIGGER_READY ||
-      g_wbc_child_triggered_generation==g_wbc_child_generation)
+   // One-shot belongs to the CURRENT child attempt, not to the lifetime of
+   // the M15 parent generation.  WAIT_IMB -> TRIGGER_READY is atomic.
+   // While TRIGGER_READY is active, duplicate C4 events are impossible
+   // because WB_Coord_OnIMBInteraction accepts only WAIT_IMB.  After a
+   // CHILD RESTART the same parent generation is intentionally allowed to
+   // build a fresh C2/C3/C4 sequence and activate TRIGGER_READY again.
+   if(g_wbc_child_stage!=WB_COORD_CHILD_WAIT_IMB)
       return false;
+
    g_wbc_child_stage=WB_COORD_CHILD_TRIGGER_READY;
    g_wbc_child_last_trigger_time=event_time;
-   g_wbc_child_triggered_generation=g_wbc_child_generation;
-   WBC_DrawStage("TRIGGER CHECK READY",event_time,g_wbc_child_direction,4,clrMagenta,
+   WBC_DrawStage("TRIGGER READY",event_time,g_wbc_child_direction,4,clrMagenta,
                  "source="+source+" generation="+g_wbc_child_generation);
    if(InpDebugPrints)
       Print("[WB-COORD] TRIGGER_READY generation=",g_wbc_child_generation,
@@ -557,36 +465,29 @@ inline bool WBC_ChildTriggerReady(const datetime event_time,const string source)
    return true;
 }
 
-inline void WBC_CheckParentZonesForChild(const string sym,const datetime bar_time,
-                                         const double bar_high,const double bar_low)
+// Read-only state for the future trigger engine.  No trading or trigger
+// predicate is implemented here; these helpers only expose whether the
+// analytical pipeline is currently allowed to begin trigger evaluation.
+inline bool WB_Coord_IsTriggerReady()
 {
-   if(!g_wbc_child_parent_active || g_wbc_child_stage!=WB_COORD_CHILD_WAIT_IMB)
-      return;
-   for(int i=0;i<g_wbc_parent_zone_count;i++)
-   {
-      const WBCoordZone z=g_wbc_parent_zones[i];
-      // The child may use only an M15 IMB that already existed BEFORE
-      // the accepted M1 HWX/HWBB.  Once HW is accepted, this function is
-      // called on every subsequent M1 candle (including the HW candle), so
-      // the first later valid touch can complete the child IMB stage.
-      if(!z.active || z.direction!=g_wbc_child_direction ||
-         g_wbc_child_hw_time<=0 || z.third_time>=g_wbc_child_hw_time ||
-         z.third_time>bar_time || z.state_time>bar_time)
-         continue;
-      bool touched=false;
-      if(z.direction==DIR_UP)
-         touched=(bar_low<=z.edge && bar_low>z.base);
-      else
-         touched=(bar_high>=z.edge && bar_high<z.base);
-      if(touched)
-      {
-         WBC_DrawImportedParentZone(z,bar_time);
-         WBC_DrawStage("C4 M15 IMB HIT",bar_time,g_wbc_child_direction,3,clrGold,
-                       "zone="+z.id+" generation="+g_wbc_child_generation);
-         WBC_ChildTriggerReady(bar_time,"M15_IMB_"+z.id);
-         return;
-      }
-   }
+   return (g_wbc_instance_ready && WBC_IsM1(g_wbc_scan_tf) &&
+           g_wbc_child_parent_active &&
+           g_wbc_child_stage==WB_COORD_CHILD_TRIGGER_READY);
+}
+
+inline datetime WB_Coord_TriggerReadyTime()
+{
+   return (WB_Coord_IsTriggerReady() ? g_wbc_child_last_trigger_time : 0);
+}
+
+inline Direction WB_Coord_TriggerReadyDirection()
+{
+   return g_wbc_child_direction;
+}
+
+inline string WB_Coord_TriggerReadyGeneration()
+{
+   return (WB_Coord_IsTriggerReady() ? g_wbc_child_generation : "");
 }
 
 inline void WBC_ResetChildScan()
@@ -598,7 +499,6 @@ inline void WBC_ResetChildScan()
    g_wbc_child_tc_time=0;
    g_wbc_child_hw_time=0;
    g_wbc_child_last_trigger_time=0;
-   g_wbc_child_triggered_generation="";
    g_wbc_child_seen_generation="";
    WBC_ResetParentTransportCache();
 }
@@ -656,6 +556,8 @@ inline void WB_Coord_OnMTC(const Direction dir,const datetime event_time)
                     "opposite M1 MTC; parent generation remains active");
    if(dir==g_wbc_child_direction)
    {
+      // Desired-direction MTC means the child must obtain a fresh TC before
+      // continuing.  Any prior TRIGGER_READY permission is no longer active.
       g_wbc_child_stage=WB_COORD_CHILD_WAIT_TC;
       g_wbc_child_tc_time=0;
       g_wbc_child_hw_time=0;
@@ -663,6 +565,9 @@ inline void WB_Coord_OnMTC(const Direction dir,const datetime event_time)
    }
    else
    {
+      // CHILD RESTART keeps the valid M15 parent generation but rearms the
+      // child attempt.  A later fresh C2/C3/C4 may therefore produce a new
+      // TRIGGER_READY within this same parent generation.
       WBC_ClearChildState(true);
    }
 }
@@ -772,6 +677,8 @@ inline bool WB_Coord_OnIMBInteraction(const Direction dir,const datetime event_t
                g_wbc_parent_generation," symbol=",g_wbc_scan_symbol);
       return true;
    }
+   // Child C4 is M1-local by design.  Cross-timeframe M15 IMB touches are
+   // never eligible here; only the M1 IMB engine may advance WAIT_IMB.
    if(!WBC_IsM1(g_wbc_scan_tf) || source_tf!=PERIOD_M1) return false;
    if(!g_wbc_child_parent_active || g_wbc_child_stage!=WB_COORD_CHILD_WAIT_IMB)
       return false;
@@ -788,14 +695,17 @@ inline bool WB_Coord_OnIMBInteraction(const Direction dir,const datetime event_t
       event_time<g_wbc_child_hw_time || zone_third_time<=0 ||
       zone_third_time>=g_wbc_child_hw_time)
       return false;
+   // C4 and TRIGGER_READY are one atomic state transition.  If C4 is
+   // accepted, trigger evaluation permission MUST become active immediately.
+   if(!WBC_ChildTriggerReady(event_time,"M1_IMB_"+zone_id))
+      return false;
    WBC_DrawStage("C4 M1 IMB HIT",event_time,dir,3,clrGold,
                  "zone="+zone_id+" generation="+g_wbc_child_generation);
-   return WBC_ChildTriggerReady(event_time,"M1_IMB_"+zone_id);
+   return true;
 }
 
 inline void WB_Coord_OnBarAfterIMB(const string sym,const ENUM_TIMEFRAMES tf,
-                                   const datetime bar_time,const double bar_high,
-                                   const double bar_low)
+                                   const datetime bar_time)
 {
    if(!g_wbc_instance_ready || bar_time<=0) return;
    // Historical scans run inside one serialized EA event.  Refresh the
@@ -826,7 +736,9 @@ inline void WB_Coord_OnBarAfterIMB(const string sym,const ENUM_TIMEFRAMES tf,
       g_wbc_child_seen_generation=g_wbc_child_generation;
    }
    g_wbc_child_parent_active=true;
-   WBC_CheckParentZonesForChild(sym,bar_time,bar_high,bar_low);
+   // No M15-zone price test belongs here.  After C3 HWX/HWBB, the local M1
+   // IMB engine evaluates the HW candle and every later M1 candle and calls
+   // WB_Coord_OnIMBInteraction only for M1 zones.
 }
 
 inline void WB_Coord_OnInstanceInit()

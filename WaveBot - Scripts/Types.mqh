@@ -36,8 +36,7 @@ bool WB_Coord_OnIMBInteraction(const Direction dir,const datetime event_time,
                                const ENUM_TIMEFRAMES source_tf,const string zone_id,
                                const datetime zone_third_time);
 void WB_Coord_OnBarAfterIMB(const string sym,const ENUM_TIMEFRAMES tf,
-                            const datetime bar_time,const double bar_high,
-                            const double bar_low);
+                            const datetime bar_time);
 void WB_Coord_ResetScan(const string sym,const ENUM_TIMEFRAMES tf);
 void WB_Coord_OnInstanceInit();
 void WB_Coord_OnInstanceDeinit();
