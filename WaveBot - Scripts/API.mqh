@@ -227,6 +227,7 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
             SR_Mitigator_OnBar_UP(rates, n, i);   // NEW
             IMB_ProcessChronologicalBar(sym,tf,rates,n,i);
             WB_Coord_OnBarAfterIMB(sym,tf,rates[i].time);
+            T1_ProcessBar(sym,tf,rates,n,i);
 
             if(insideHL[i]) continue;
             
@@ -320,6 +321,7 @@ int API_RunScanSequential_W2W3_Hunter(const string sym, const ENUM_TIMEFRAMES tf
             SR_Mitigator_OnBar_UP(rates, n, j);   // NEW: ???? ?????? ?? ????
             IMB_ProcessChronologicalBar(sym,tf,rates,n,j);
             WB_Coord_OnBarAfterIMB(sym,tf,rates[j].time);
+            T1_ProcessBar(sym,tf,rates,n,j);
 
             SB_UP_OnBarCtx(rates, insideHL, n, cend, j);   // ShadowBreaker + temp-c1-sw
 

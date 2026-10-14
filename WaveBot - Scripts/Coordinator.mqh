@@ -415,6 +415,7 @@ inline void WBC_ClearChildState(const bool keep_parent)
 
 inline void WBC_InitializeChildForParent(const datetime bar_time)
 {
+   T1_OnPipelineReset(bar_time,"NEW_PARENT_GENERATION");
    g_wbc_child_direction=g_wbc_parent_transport_direction;
    g_wbc_child_handoff_time=g_wbc_parent_transport_handoff;
    g_wbc_child_generation=g_wbc_parent_transport_generation;
@@ -456,6 +457,7 @@ inline bool WBC_ChildTriggerReady(const datetime event_time,const string source)
 
    g_wbc_child_stage=WB_COORD_CHILD_TRIGGER_READY;
    g_wbc_child_last_trigger_time=event_time;
+   T1_OnTriggerReady(g_wbc_child_direction,event_time,g_wbc_child_generation);
    WBC_DrawStage("TRIGGER READY",event_time,g_wbc_child_direction,4,clrMagenta,
                  "source="+source+" generation="+g_wbc_child_generation);
    if(InpDebugPrints)
@@ -492,6 +494,7 @@ inline string WB_Coord_TriggerReadyGeneration()
 
 inline void WBC_ResetChildScan()
 {
+   T1_OnPipelineReset(0,"CHILD_SCAN_RESET");
    g_wbc_child_stage=WB_COORD_CHILD_WAIT_PARENT;
    g_wbc_child_parent_active=false;
    g_wbc_child_generation="";
@@ -558,6 +561,7 @@ inline void WB_Coord_OnMTC(const Direction dir,const datetime event_time)
    {
       // Desired-direction MTC means the child must obtain a fresh TC before
       // continuing.  Any prior TRIGGER_READY permission is no longer active.
+      T1_OnPipelineReset(event_time,"CHILD_MTC_RESET");
       g_wbc_child_stage=WB_COORD_CHILD_WAIT_TC;
       g_wbc_child_tc_time=0;
       g_wbc_child_hw_time=0;
@@ -568,6 +572,7 @@ inline void WB_Coord_OnMTC(const Direction dir,const datetime event_time)
       // CHILD RESTART keeps the valid M15 parent generation but rearms the
       // child attempt.  A later fresh C2/C3/C4 may therefore produce a new
       // TRIGGER_READY within this same parent generation.
+      T1_OnPipelineReset(event_time,"CHILD_RESTART");
       WBC_ClearChildState(true);
    }
 }
@@ -723,6 +728,7 @@ inline void WB_Coord_OnBarAfterIMB(const string sym,const ENUM_TIMEFRAMES tf,
       if(had_parent_before_refresh)
          WBC_DrawStage("PARENT CANCEL / CHILD RESET",bar_time,g_wbc_child_direction,0,clrRed,
                        "M15 parent generation invalidated");
+      T1_OnPipelineReset(bar_time,"PARENT_CANCEL");
       if(g_wbc_child_parent_active)
          WBC_ClearChildState(false);
       g_wbc_child_parent_active=false;

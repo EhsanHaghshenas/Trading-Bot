@@ -80,6 +80,7 @@ inline bool WB_RuntimeAllowMarkerRender()
 #include <WaveBot/Utils.mqh>
 #include <WaveBot/Data.mqh>
 #include <WaveBot/Markers.mqh>
+#include <WaveBot/TriggerType1.mqh>
 #include <WaveBot/Wave2.mqh>
 #include <WaveBot/Wave3.mqh>
 #include <WaveBot/Wave2_Down.mqh>
@@ -138,6 +139,7 @@ inline void WB_ResetMarketWorld()
    SRMIT_ResetGlobals();
    TC_ResetGlobals();
    IMB_ResetGlobals();
+   T1_ResetGlobals();
    WB_Coord_ResetScan(WB_ActiveSymbol(),WB_RuntimeTF());
 
    SR_AllowBoth();
