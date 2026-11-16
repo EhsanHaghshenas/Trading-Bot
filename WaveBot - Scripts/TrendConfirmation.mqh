@@ -4,6 +4,7 @@
 
 #include <WaveBot/Types.mqh>
 #include <WaveBot/Markers.mqh>
+#include <WaveBot/Imbalance.mqh> // chronological MTC/TC history for IMB analysis
 
 // Analysis-only confirmation: one TC for the first standard Strong Range
 // in the direction of each actual MTC. No signal/trade side effects.
@@ -12,6 +13,7 @@ static bool      g_tc_waiting_for_next_bar = false;
 static bool      g_tc_confirmed = false;
 static Direction g_tc_mtc_direction = DIR_UP;
 static datetime  g_tc_mtc_time = 0;
+static datetime  g_tc_reference_start = 0;
 static datetime  g_tc_first_sr_time = 0;
 static datetime  g_tc_confirmation_time = 0;
 
@@ -22,24 +24,46 @@ inline void TC_ResetGlobals()
    g_tc_confirmed = false;
    g_tc_mtc_direction = DIR_UP;
    g_tc_mtc_time = 0;
+   g_tc_reference_start = 0;
    g_tc_first_sr_time = 0;
    g_tc_confirmation_time = 0;
 }
 
 // Do not erase a pending/confirmed TC on duplicate replays of the same MTC.
 // Reject older MTC events encountered in rewound/nested analysis scans.
-inline void TC_OnMTC(const Direction dir, const datetime mtc_time)
+inline void TC_OnMTC(const Direction dir, const datetime mtc_time,
+                     const datetime reference_start=0)
 {
    if(mtc_time <= 0 || mtc_time < g_tc_mtc_time) return;
    if(mtc_time == g_tc_mtc_time && dir == g_tc_mtc_direction) return;
 
+   // A confirmed TC remains valid until an OPPOSITE MTC occurs.  A later
+   // same-direction MTC must not neutralize/reactivate the already-confirmed
+   // TC or restart the M15/M1 pipeline.  After an opposite MTC invalidates
+   // TC, a later MTC back in the old direction still starts a fresh epoch and
+   // therefore requires a NEW Strong Range and NEW TC confirmation.
+   if(g_tc_confirmed && dir == g_tc_mtc_direction)
+   {
+      if(InpDebugPrints)
+         Print("[TC] Same-direction MTC ignored for TC validity @ ",
+               TimeToString(mtc_time,TIME_DATE|TIME_MINUTES),
+               " | active TC remains ",(dir==DIR_UP?"UP":"DOWN"));
+      return;
+   }
+
    g_tc_mtc_direction = dir;
    g_tc_mtc_time = mtc_time;
+   g_tc_reference_start = (reference_start>0 && reference_start<=mtc_time ?
+                           reference_start : mtc_time);
    g_tc_first_sr_time = 0;
    g_tc_confirmation_time = 0;
    g_tc_waiting_for_sr = true;
    g_tc_waiting_for_next_bar = false;
    g_tc_confirmed = false;
+
+   // Record the accepted actual MTC for the later chronological IMB pass.
+   IMB_RecordMTC(dir,mtc_time,g_tc_reference_start);
+   WB_Coord_OnMTC(dir,mtc_time);
 }
 
 // The label is anchored to the NEXT REAL bar, not to a calculated time:
@@ -52,6 +76,8 @@ inline void __TC_DrawOnCandle(const MqlRates &bar)
    g_tc_confirmation_time = bar.time;
    g_tc_waiting_for_next_bar = false;
    g_tc_confirmed = true;
+   IMB_RecordTC(g_tc_mtc_direction,g_tc_mtc_time,bar.time,g_tc_reference_start);
+   WB_Coord_OnTC(g_tc_mtc_direction,bar.time);
 
    const double candle_range = bar.high - bar.low;
    const double margin = MathMax(3.0 * _Point, candle_range * 0.20);
@@ -86,6 +112,24 @@ inline void TC_OnNewStrongRange(const Direction dir,
    // If SR is the final loaded candle, leave it pending until later data exists.
    if(sr_bar_index + 1 < n)
       __TC_DrawOnCandle(rates[sr_bar_index + 1]);
+}
+
+
+// Special pullback: SR CREATES the MTC, so SR.time == MTC.time. Standard
+// TC_OnNewStrongRange intentionally rejects this equality; use this explicit
+// event to register a first SR without manufacturing a second MTC/SR.
+inline void TC_OnMTCFirstSR_SameBar(const Direction dir,
+                                    const MqlRates &rates[],const int n,
+                                    const int sr_bar_index)
+{
+   if(!g_tc_waiting_for_sr || dir!=g_tc_mtc_direction) return;
+   if(sr_bar_index<0 || sr_bar_index>=n) return;
+   if(rates[sr_bar_index].time!=g_tc_mtc_time) return;
+   g_tc_waiting_for_sr=false;
+   g_tc_first_sr_time=rates[sr_bar_index].time;
+   g_tc_waiting_for_next_bar=true;
+   if(sr_bar_index+1<n)
+      __TC_DrawOnCandle(rates[sr_bar_index+1]);
 }
 
 // Fallback for scan buffers in which the next candle was not loaded when SR

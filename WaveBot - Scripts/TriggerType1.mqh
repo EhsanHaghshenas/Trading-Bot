@@ -21,6 +21,8 @@ struct T1Candidate
 {
    int id;
    int parent_id;
+   int validation_context_id;
+   int child_context_id;
    string generation;
    Direction direction;
    datetime creation_time;
@@ -59,9 +61,57 @@ struct T1MoveSeed
    int bars;
    datetime first_time;
    datetime last_time;
+   // Candidate validation is owned by the active Validation Context.  This
+   // cached value is informational only and mirrors that context while the
+   // move seed is active.
    double validation_level;
+   int validation_context_id;
    double last_high;
    double last_low;
+
+   // A contrary candle can START a pullback before the pullback is fully
+   // confirmed.  Keep that pending structure alive across later candles so a
+   // delayed touch of the last directional candle's opposite wick (or a later
+   // lower-high / higher-low) is still recognised as the same pullback.
+   bool pullback_pending;
+   datetime pending_start_time;
+   double pending_anchor_level;
+   double pending_start_level;
+   datetime pending_start_level_time;
+   double pending_extreme;
+   datetime pending_extreme_time;
+   double pending_last_high;
+   double pending_last_low;
+};
+
+// ------------------------------------------------------------------
+// Validation context
+// ------------------------------------------------------------------
+// The red validation line is NOT owned by every candidate.  It is a shared,
+// branch-aware context for NEW candidates.  Stage 3 pushes a nested context;
+// completion/invalidation of that context owner closes it.  Existing
+// candidates keep the context/price captured at their own creation time.
+struct T1ValidationContext
+{
+   int id;
+   int parent_id;
+   int owner_candidate_id; // 0 for the root context
+   Direction direction;
+   double level;
+   datetime level_time;
+   datetime created_time;
+   bool open;
+};
+
+// Before the first root context exists, an opposite-colour candle may own the
+// bullish/bearish validation wick.  Example UP: a red candle becomes the
+// validation source only if its HIGH is broken before its LOW is touched.
+struct T1BootstrapAnchor
+{
+   bool active;
+   datetime time;
+   double high;
+   double low;
 };
 
 static bool g_t1_ready=false;
@@ -75,6 +125,11 @@ static int g_t1_candidate_count=0;
 static T1TriggerEvent g_t1_events[];
 static int g_t1_event_count=0;
 static T1MoveSeed g_t1_seed;
+static T1ValidationContext g_t1_contexts[];
+static int g_t1_context_count=0;
+static int g_t1_next_context_id=1;
+static int g_t1_active_context_id=0;
+static T1BootstrapAnchor g_t1_bootstrap_anchor;
 
 // Per-bar tick cache.  Historical same-candle stage ordering is derived from
 // real tick sequence whenever MT5 has it; it is never guessed from OHLC.
@@ -97,8 +152,72 @@ inline void T1_ResetSeed()
    g_t1_seed.first_time=0;
    g_t1_seed.last_time=0;
    g_t1_seed.validation_level=0.0;
+   g_t1_seed.validation_context_id=0;
    g_t1_seed.last_high=0.0;
    g_t1_seed.last_low=0.0;
+   g_t1_seed.pullback_pending=false;
+   g_t1_seed.pending_start_time=0;
+   g_t1_seed.pending_anchor_level=0.0;
+   g_t1_seed.pending_start_level=0.0;
+   g_t1_seed.pending_start_level_time=0;
+   g_t1_seed.pending_extreme=0.0;
+   g_t1_seed.pending_extreme_time=0;
+   g_t1_seed.pending_last_high=0.0;
+   g_t1_seed.pending_last_low=0.0;
+}
+
+
+inline void T1_ResetBootstrapAnchor()
+{
+   g_t1_bootstrap_anchor.active=false;
+   g_t1_bootstrap_anchor.time=0;
+   g_t1_bootstrap_anchor.high=0.0;
+   g_t1_bootstrap_anchor.low=0.0;
+}
+
+inline void T1_ResetValidationContexts()
+{
+   ArrayResize(g_t1_contexts,0);
+   g_t1_context_count=0;
+   g_t1_next_context_id=1;
+   g_t1_active_context_id=0;
+   T1_ResetBootstrapAnchor();
+}
+
+inline int T1_FindContextIndexByID(const int id)
+{
+   if(id<=0) return -1;
+   for(int i=0;i<g_t1_context_count;i++)
+      if(g_t1_contexts[i].id==id) return i;
+   return -1;
+}
+
+inline int T1_ActiveContextIndex()
+{
+   return T1_FindContextIndexByID(g_t1_active_context_id);
+}
+
+inline bool T1_GetActiveValidation(double &level,datetime &level_time,int &context_id)
+{
+   const int idx=T1_ActiveContextIndex();
+   if(idx<0 || !g_t1_contexts[idx].open) return false;
+   level=g_t1_contexts[idx].level;
+   level_time=g_t1_contexts[idx].level_time;
+   context_id=g_t1_contexts[idx].id;
+   return true;
+}
+
+inline datetime T1_ActiveContextCreatedTime()
+{
+   const int idx=T1_ActiveContextIndex();
+   if(idx<0 || !g_t1_contexts[idx].open) return 0;
+   return g_t1_contexts[idx].created_time;
+}
+
+inline bool T1_ContextIsNestedValid(const Direction dir,const double child_level,
+                                    const double parent_level)
+{
+   return (dir==DIR_UP ? child_level>parent_level : child_level<parent_level);
 }
 
 inline void T1_ResetTickCache()
@@ -128,6 +247,7 @@ inline void T1_ResetGlobals()
    ArrayResize(g_t1_events,0);
    g_t1_event_count=0;
    T1_ResetSeed();
+   T1_ResetValidationContexts();
    T1_ResetTickCache();
 }
 
@@ -140,6 +260,7 @@ inline void T1_OnPipelineReset(const datetime event_time,const string reason)
    g_t1_last_bar_time=0;
    T1_ClearActiveCandidates();
    T1_ResetSeed();
+   T1_ResetValidationContexts();
    T1_ResetTickCache();
    if(was_ready && InpDebugPrints)
       Print("[T1] STOP trigger scan | reason=",reason,
@@ -159,6 +280,7 @@ inline void T1_OnTriggerReady(const Direction dir,const datetime event_time,
    g_t1_last_bar_time=0;
    T1_ClearActiveCandidates();
    T1_ResetSeed();
+   T1_ResetValidationContexts();
    T1_ResetTickCache();
    if(InpDebugPrints)
       Print("[T1] ARMED direction=",T1_DirectionText(dir),
@@ -251,7 +373,7 @@ inline int T1_Stage1ActivationTickIndex(const T1MoveSeed &seed,
    if(g_t1_tick_count<=0) return -1;
    // The user's explicit same-candle rule defines the pullback-side event as
    // touching/breaking the LAST directional candle's opposite wick while the
-   // original validation wick remains intact.  For a one-candle initial move
+   // currently captured shared validation context remains intact.  For a one-candle initial move
    // this cannot happen without touching validation, so same-candle S1->S2 is
    // naturally unavailable; for multi-candle moves it is deterministic.
    for(int i=0;i<g_t1_tick_count;i++)
@@ -353,11 +475,149 @@ inline void T1_DrawLevel(const T1Candidate &c,const string sym,
                    " | source="+TimeToString(source_time,TIME_DATE|TIME_MINUTES));
 }
 
+
+inline void T1_DrawValidationContext(const T1ValidationContext &ctx,
+                                     const string sym,const ENUM_TIMEFRAMES tf)
+{
+   // The user explicitly requested the bullish validation reference as a red
+   // dashed line.  Keep the bearish context logical/mirrored without adding
+   // extra visual noise that was not requested.
+   if(ctx.direction!=DIR_UP || !Markers_ShouldRender() ||
+      ctx.level_time<=0 || ctx.level<=0.0) return;
+   const datetime end_time=T1_LevelEndTime(sym,tf,ctx.level_time);
+   if(end_time<=ctx.level_time) return;
+
+   const string name=__ScanPrefix()+"T1_CTX_"+IntegerToString(ctx.id)+"_VALID_"+
+                     IntegerToString((int)(long)ctx.level_time);
+   if(ObjectFind(0,name)!=-1) ObjectDelete(0,name);
+   if(!ObjectCreate(0,name,OBJ_TREND,0,ctx.level_time,ctx.level,
+                    end_time,ctx.level)) return;
+   ObjectSetInteger(0,name,OBJPROP_RAY_LEFT,false);
+   ObjectSetInteger(0,name,OBJPROP_RAY_RIGHT,false);
+   ObjectSetInteger(0,name,OBJPROP_STYLE,STYLE_DASH);
+   ObjectSetInteger(0,name,OBJPROP_WIDTH,1);
+   ObjectSetInteger(0,name,OBJPROP_COLOR,clrRed);
+   ObjectSetInteger(0,name,OBJPROP_BACK,false);
+   ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+   ObjectSetString(0,name,OBJPROP_TOOLTIP,
+                   "ActiveValidationLow | Context="+IntegerToString(ctx.id)+
+                   " | OwnerCandidate="+IntegerToString(ctx.owner_candidate_id)+
+                   " | price="+DoubleToString(ctx.level,_Digits)+
+                   " | source="+TimeToString(ctx.level_time,TIME_DATE|TIME_MINUTES));
+}
+
+inline int T1_CreateValidationContext(const string sym,const ENUM_TIMEFRAMES tf,
+                                      const Direction dir,const double level,
+                                      const datetime level_time,const int parent_id,
+                                      const int owner_candidate_id,
+                                      const datetime created_time)
+{
+   if(level<=0.0 || level_time<=0) return 0;
+   if(parent_id>0)
+   {
+      const int pidx=T1_FindContextIndexByID(parent_id);
+      if(pidx<0 || !T1_ContextIsNestedValid(dir,level,g_t1_contexts[pidx].level))
+         return 0;
+   }
+
+   const int n=g_t1_context_count+1;
+   if(ArrayResize(g_t1_contexts,n)!=n) return 0;
+   const int idx=n-1;
+   g_t1_contexts[idx].id=g_t1_next_context_id++;
+   g_t1_contexts[idx].parent_id=parent_id;
+   g_t1_contexts[idx].owner_candidate_id=owner_candidate_id;
+   g_t1_contexts[idx].direction=dir;
+   g_t1_contexts[idx].level=level;
+   g_t1_contexts[idx].level_time=level_time;
+   g_t1_contexts[idx].created_time=created_time;
+   g_t1_contexts[idx].open=true;
+   g_t1_context_count=n;
+   g_t1_active_context_id=g_t1_contexts[idx].id;
+   T1_DrawValidationContext(g_t1_contexts[idx],sym,tf);
+   if(InpDebugPrints)
+      Print("[T1] VALIDATION CONTEXT PUSH id=",g_t1_contexts[idx].id,
+            " parent=",parent_id," owner=",owner_candidate_id,
+            " level=",DoubleToString(level,_Digits),
+            " source=",TimeToString(level_time,TIME_DATE|TIME_MINUTES));
+   return g_t1_contexts[idx].id;
+}
+
+inline bool T1_ContextChainIsOpen(const int context_id)
+{
+   int current=context_id;
+   int guard=0;
+   while(current>0 && guard<64)
+   {
+      const int idx=T1_FindContextIndexByID(current);
+      if(idx<0 || !g_t1_contexts[idx].open) return false;
+      current=g_t1_contexts[idx].parent_id;
+      guard++;
+   }
+   return (current==0);
+}
+
+inline void T1_ResolveActiveContext()
+{
+   // Only an open context with an entirely open ancestor chain may own NEW
+   // candidates.  Existing candidates keep their captured validation even if
+   // an ancestor context later closes.
+   int newest_id=0;
+   for(int i=0;i<g_t1_context_count;i++)
+      if(g_t1_contexts[i].open && T1_ContextChainIsOpen(g_t1_contexts[i].id) &&
+         g_t1_contexts[i].id>newest_id)
+         newest_id=g_t1_contexts[i].id;
+   g_t1_active_context_id=newest_id;
+}
+
+inline void T1_CloseContextByID(const int context_id,const string reason)
+{
+   const int idx=T1_FindContextIndexByID(context_id);
+   if(idx<0 || !g_t1_contexts[idx].open) return;
+   g_t1_contexts[idx].open=false;
+   if(InpDebugPrints)
+      Print("[T1] VALIDATION CONTEXT CLOSE id=",context_id,
+            " owner=",g_t1_contexts[idx].owner_candidate_id," | ",reason);
+   T1_ResolveActiveContext();
+}
+
+inline void T1_CloseOwnedContext(const int owner_candidate_id,const string reason)
+{
+   if(owner_candidate_id<=0) return;
+   bool changed=false;
+   for(int i=0;i<g_t1_context_count;i++)
+   {
+      if(g_t1_contexts[i].open &&
+         g_t1_contexts[i].owner_candidate_id==owner_candidate_id)
+      {
+         g_t1_contexts[i].open=false;
+         changed=true;
+         if(InpDebugPrints)
+            Print("[T1] VALIDATION CONTEXT POP id=",g_t1_contexts[i].id,
+                  " owner=",owner_candidate_id," | ",reason);
+      }
+   }
+   if(changed) T1_ResolveActiveContext();
+}
+
+inline void T1_PushStage3Context(T1Candidate &c,const string sym,
+                                 const ENUM_TIMEFRAMES tf,const datetime event_time)
+{
+   if(c.child_context_id>0) return;
+   // Stage 3 promotes this candidate's frozen PullbackLow/High into the
+   // validation reference for NEWER structures.  Existing candidates retain
+   // their own previously captured validation context.
+   const int child=T1_CreateValidationContext(sym,tf,c.direction,
+                    c.pullback_extreme,c.pullback_extreme_time,
+                    c.validation_context_id,c.id,event_time);
+   if(child>0) c.child_context_id=child;
+}
+
 inline void T1_MarkInvalid(T1Candidate &c,const string reason,
                            const datetime event_time)
 {
    c.invalidated=true;
    c.stage=T1_INVALID;
+   T1_CloseOwnedContext(c.id,"candidate invalidated");
    if(InpDebugPrints)
       Print("[T1] Candidate ",c.id," INVALID | ",reason,
             " | ",TimeToString(event_time,TIME_DATE|TIME_MINUTES));
@@ -392,6 +652,7 @@ inline void T1_MarkStage3(T1Candidate &c,const string sym,
    T1_DrawLevel(c,sym,tf,"FINAL",
                 (c.direction==DIR_UP ? "FinalTriggerHigh" : "FinalTriggerLow"),
                 c.final_trigger_time,c.final_trigger_level,clrLime);
+   T1_PushStage3Context(c,sym,tf,bar.time);
 }
 
 inline void T1_EmitTrigger(T1Candidate &c,const MqlRates &bar,const ulong trigger_msc)
@@ -415,6 +676,7 @@ inline void T1_EmitTrigger(T1Candidate &c,const MqlRates &bar,const ulong trigge
    c.triggered_time=bar.time;
    c.triggered_msc=trigger_msc;
    c.stage=T1_TRIGGERED;
+   T1_CloseOwnedContext(c.id,"trigger completed");
    // Final marker text is intentionally EXACTLY T1-1.
    T1_DrawMarker(c,bar,"T1-1","FINAL",3+(c.id%3),clrLime);
    if(InpDebugPrints)
@@ -695,10 +957,10 @@ inline int T1_FindNewestContainingParent(const double new_validation,
       const double open_boundary=T1_CandidateOpenBoundary(c);
       bool inside=false;
       if(g_t1_direction==DIR_UP)
-         inside=(new_validation>c.validation_level &&
+         inside=(new_validation>=c.validation_level &&
                  new_start<=open_boundary);
       else
-         inside=(new_validation<c.validation_level &&
+         inside=(new_validation<=c.validation_level &&
                  new_start>=open_boundary);
       if(inside && c.id>id) id=c.id;
    }
@@ -706,16 +968,33 @@ inline int T1_FindNewestContainingParent(const double new_validation,
 }
 
 inline int T1_CreateCandidateFromSeed(const string sym,const ENUM_TIMEFRAMES tf,
-                                      const MqlRates &bar)
+                                      const MqlRates &bar,
+                                      const double pullback_start_level,
+                                      const datetime pullback_start_time,
+                                      const double pullback_extreme,
+                                      const datetime pullback_extreme_time)
 {
+   double active_validation=0.0;
+   datetime active_validation_time=0;
+   int active_context_id=0;
+   if(!T1_GetActiveValidation(active_validation,active_validation_time,active_context_id))
+      return -1;
+
+   // A candidate created under the current red context must already respect
+   // that context.  Do not let an older move seed manufacture a candidate
+   // whose pullback has crossed the newly-active validation line.
+   if(g_t1_direction==DIR_UP && pullback_extreme<=active_validation) return -1;
+   if(g_t1_direction==DIR_DOWN && pullback_extreme>=active_validation) return -1;
+
    const int n=g_t1_candidate_count+1;
-   ArrayResize(g_t1_candidates,n);
+   if(ArrayResize(g_t1_candidates,n)!=n) return -1;
    const int idx=n-1;
    T1Candidate c;
    c.id=g_t1_next_candidate_id++;
-   const double new_start=(g_t1_direction==DIR_UP ?
-                           g_t1_seed.last_high : g_t1_seed.last_low);
-   c.parent_id=T1_FindNewestContainingParent(g_t1_seed.validation_level,new_start);
+   const double new_start=pullback_start_level;
+   c.parent_id=T1_FindNewestContainingParent(active_validation,new_start);
+   c.validation_context_id=active_context_id;
+   c.child_context_id=0;
    c.generation=g_t1_generation;
    c.direction=g_t1_direction;
    c.creation_time=bar.time;
@@ -725,14 +1004,14 @@ inline int T1_CreateCandidateFromSeed(const string sym,const ENUM_TIMEFRAMES tf,
    c.triggered_time=0;
    c.triggered_msc=0;
    c.stage=T1_WAIT_PULLBACK_END;
-   c.validation_level=g_t1_seed.validation_level;
-   c.pullback_start_level=new_start;
-   c.pullback_extreme=(g_t1_direction==DIR_UP ? bar.low : bar.high);
+   c.validation_level=active_validation;
+   c.pullback_start_level=pullback_start_level;
+   c.pullback_extreme=pullback_extreme;
    c.final_trigger_level=0.0;
    c.running_final_extreme=0.0;
-   c.validation_time=g_t1_seed.first_time;
-   c.pullback_start_time=g_t1_seed.last_time;
-   c.pullback_extreme_time=bar.time;
+   c.validation_time=active_validation_time;
+   c.pullback_start_time=pullback_start_time;
+   c.pullback_extreme_time=pullback_extreme_time;
    c.final_trigger_time=0;
    c.running_final_extreme_time=0;
    c.initial_move_bars=g_t1_seed.bars;
@@ -740,31 +1019,58 @@ inline int T1_CreateCandidateFromSeed(const string sym,const ENUM_TIMEFRAMES tf,
    g_t1_candidates[idx]=c;
    g_t1_candidate_count=n;
    T1_DrawMarker(g_t1_candidates[idx],bar,"T1-S1","S1",0,clrSilver);
-   // Stage 2 target: the wick High/Low of the LAST directional candle before
-   // the pullback.  The short dashed line starts on that exact source candle.
+
+   // Stage 2 target is the structural wick that must be reclaimed after the
+   // pullback.  Normal lower-high/higher-low pullbacks keep the last
+   // directional candle's wick.  An outside/pending pullback uses the actual
+   // highest/lowest wick created by the pullback-start sequence itself.
    T1_DrawLevel(g_t1_candidates[idx],sym,tf,"PB_START",
                 (g_t1_direction==DIR_UP ? "PullbackStartHigh" : "PullbackStartLow"),
                 g_t1_candidates[idx].pullback_start_time,
                 g_t1_candidates[idx].pullback_start_level,clrDeepSkyBlue);
+
+
    if(InpDebugPrints)
       Print("[T1] Stage1 candidate=",g_t1_candidates[idx].id,
             " parent=",g_t1_candidates[idx].parent_id,
             " initialBars=",g_t1_candidates[idx].initial_move_bars,
             " direction=",T1_DirectionText(g_t1_direction),
-            " time=",TimeToString(bar.time,TIME_DATE|TIME_MINUTES));
+            " time=",TimeToString(bar.time,TIME_DATE|TIME_MINUTES),
+            " pullbackStart=",DoubleToString(pullback_start_level,_Digits));
    return idx;
 }
 
-inline void T1_StartSeed(const MqlRates &bar)
+inline void T1_StartSeed(const string sym,const ENUM_TIMEFRAMES tf,const MqlRates &bar)
 {
+   if(g_t1_active_context_id<=0)
+      T1_CreateValidationContext(sym,tf,g_t1_direction,
+                                 (g_t1_direction==DIR_UP ? bar.low : bar.high),
+                                 bar.time,0,0,bar.time);
+
+   double active_validation=0.0;
+   datetime active_validation_time=0;
+   int active_context_id=0;
+   if(!T1_GetActiveValidation(active_validation,active_validation_time,active_context_id))
+      return;
+
    g_t1_seed.active=true;
    g_t1_seed.direction=g_t1_direction;
    g_t1_seed.bars=1;
    g_t1_seed.first_time=bar.time;
    g_t1_seed.last_time=bar.time;
-   g_t1_seed.validation_level=(g_t1_direction==DIR_UP ? bar.low : bar.high);
+   g_t1_seed.validation_level=active_validation;
+   g_t1_seed.validation_context_id=active_context_id;
    g_t1_seed.last_high=bar.high;
    g_t1_seed.last_low=bar.low;
+   g_t1_seed.pullback_pending=false;
+   g_t1_seed.pending_start_time=0;
+   g_t1_seed.pending_anchor_level=0.0;
+   g_t1_seed.pending_start_level=0.0;
+   g_t1_seed.pending_start_level_time=0;
+   g_t1_seed.pending_extreme=0.0;
+   g_t1_seed.pending_extreme_time=0;
+   g_t1_seed.pending_last_high=0.0;
+   g_t1_seed.pending_last_low=0.0;
 }
 
 inline bool T1_IsDirectionalCandle(const MqlRates &bar)
@@ -772,56 +1078,329 @@ inline bool T1_IsDirectionalCandle(const MqlRates &bar)
    return (g_t1_direction==DIR_UP ? bar.close>bar.open : bar.close<bar.open);
 }
 
+inline void T1_BeginPendingPullback(const MqlRates &bar)
+{
+   g_t1_seed.pullback_pending=true;
+   g_t1_seed.pending_start_time=bar.time;
+   g_t1_seed.pending_anchor_level=(g_t1_direction==DIR_UP ?
+                                   g_t1_seed.last_low : g_t1_seed.last_high);
+   g_t1_seed.pending_start_level=(g_t1_direction==DIR_UP ? bar.high : bar.low);
+   g_t1_seed.pending_start_level_time=bar.time;
+   g_t1_seed.pending_extreme=(g_t1_direction==DIR_UP ? bar.low : bar.high);
+   g_t1_seed.pending_extreme_time=bar.time;
+   g_t1_seed.pending_last_high=bar.high;
+   g_t1_seed.pending_last_low=bar.low;
+}
+
+inline void T1_UpdatePendingPullback(const MqlRates &bar)
+{
+   if(!g_t1_seed.pullback_pending) return;
+   if(g_t1_direction==DIR_UP)
+   {
+      if(bar.high>g_t1_seed.pending_start_level)
+      {
+         g_t1_seed.pending_start_level=bar.high;
+         g_t1_seed.pending_start_level_time=bar.time;
+      }
+      if(bar.low<g_t1_seed.pending_extreme)
+      {
+         g_t1_seed.pending_extreme=bar.low;
+         g_t1_seed.pending_extreme_time=bar.time;
+      }
+   }
+   else
+   {
+      if(bar.low<g_t1_seed.pending_start_level)
+      {
+         g_t1_seed.pending_start_level=bar.low;
+         g_t1_seed.pending_start_level_time=bar.time;
+      }
+      if(bar.high>g_t1_seed.pending_extreme)
+      {
+         g_t1_seed.pending_extreme=bar.high;
+         g_t1_seed.pending_extreme_time=bar.time;
+      }
+   }
+}
+
+inline void T1_ProcessNewCandidateSameBar(const string sym,const ENUM_TIMEFRAMES tf,
+                                          const MqlRates &bar,const int ci,
+                                          const bool activation_by_anchor,
+                                          const double prior_extreme,
+                                          const datetime prior_extreme_time)
+{
+   const int ticks=T1_LoadTicks(sym,tf,bar.time);
+   if(ticks>0 && activation_by_anchor)
+   {
+      const int activation=T1_Stage1ActivationTickIndex(g_t1_seed,g_t1_direction);
+      if(activation>=0)
+      {
+         // Rebuild the PullbackLow/High only from information that actually
+         // existed AT the activation tick.  Never seed it with this candle's
+         // final OHLC extreme, because that could occur later in the bar.
+         const double p=T1_TickPrice(g_t1_ticks[activation]);
+         if(prior_extreme>0.0)
+         {
+            if(g_t1_direction==DIR_UP)
+            {
+               if(prior_extreme<p)
+               {
+                  g_t1_candidates[ci].pullback_extreme=prior_extreme;
+                  g_t1_candidates[ci].pullback_extreme_time=prior_extreme_time;
+               }
+               else
+               {
+                  g_t1_candidates[ci].pullback_extreme=p;
+                  g_t1_candidates[ci].pullback_extreme_time=bar.time;
+               }
+            }
+            else
+            {
+               if(prior_extreme>p)
+               {
+                  g_t1_candidates[ci].pullback_extreme=prior_extreme;
+                  g_t1_candidates[ci].pullback_extreme_time=prior_extreme_time;
+               }
+               else
+               {
+                  g_t1_candidates[ci].pullback_extreme=p;
+                  g_t1_candidates[ci].pullback_extreme_time=bar.time;
+               }
+            }
+         }
+         else
+         {
+            g_t1_candidates[ci].pullback_extreme=p;
+            g_t1_candidates[ci].pullback_extreme_time=bar.time;
+         }
+
+         // If the Stage-2 reference High/Low itself belongs to THIS pullback
+         // candle (e.g. the bearish outside candle requested by the user), its
+         // final wick is only known at candle close.  Therefore it may be
+         // reclaimed only from the NEXT candle onward; do not look ahead.
+         if(g_t1_candidates[ci].pullback_start_time<bar.time)
+            T1_ProcessCandidateTicks(g_t1_candidates[ci],sym,tf,bar,activation+1);
+      }
+      return;
+   }
+
+   // A lower-high / higher-low is only knowable after the candle is complete.
+   // Do not invent an intrabar activation time for it.  OHLC fallback keeps
+   // same-candle S1->S2 fail-closed in exactly that case.
+   if(ticks<=0)
+      T1_ProcessCandidateOHLCFallback(g_t1_candidates[ci],sym,tf,bar,true);
+}
+
+
+inline void T1_SetBootstrapAnchor(const MqlRates &bar)
+{
+   g_t1_bootstrap_anchor.active=true;
+   g_t1_bootstrap_anchor.time=bar.time;
+   g_t1_bootstrap_anchor.high=bar.high;
+   g_t1_bootstrap_anchor.low=bar.low;
+}
+
+inline bool T1_BootstrapAnchorBreaksTrendSideFirst(const string sym,
+                                                   const ENUM_TIMEFRAMES tf,
+                                                   const MqlRates &bar)
+{
+   if(!g_t1_bootstrap_anchor.active) return false;
+   const int ticks=T1_LoadTicks(sym,tf,bar.time);
+   if(ticks>0)
+   {
+      for(int k=0;k<ticks;k++)
+      {
+         const double p=T1_TickPrice(g_t1_ticks[k]);
+         if(p<=0.0) continue;
+         if(g_t1_direction==DIR_UP)
+         {
+            if(p<=g_t1_bootstrap_anchor.low) return false;
+            if(p>=g_t1_bootstrap_anchor.high) return true;
+         }
+         else
+         {
+            if(p>=g_t1_bootstrap_anchor.high) return false;
+            if(p<=g_t1_bootstrap_anchor.low) return true;
+         }
+      }
+      return false;
+   }
+
+   // OHLC can prove the order only when the invalidation side was untouched.
+   if(g_t1_direction==DIR_UP)
+      return (bar.high>=g_t1_bootstrap_anchor.high &&
+              bar.low>g_t1_bootstrap_anchor.low);
+   return (bar.low<=g_t1_bootstrap_anchor.low &&
+           bar.high<g_t1_bootstrap_anchor.high);
+}
+
+inline bool T1_TryCreateRootContextFromOppositeAnchor(const string sym,
+                                                       const ENUM_TIMEFRAMES tf,
+                                                       const MqlRates &bar)
+{
+   if(g_t1_active_context_id>0 || !g_t1_bootstrap_anchor.active) return false;
+   if(!T1_BootstrapAnchorBreaksTrendSideFirst(sym,tf,bar)) return false;
+
+   const double level=(g_t1_direction==DIR_UP ?
+                       g_t1_bootstrap_anchor.low : g_t1_bootstrap_anchor.high);
+   const datetime source_time=g_t1_bootstrap_anchor.time;
+   const int ctx=T1_CreateValidationContext(sym,tf,g_t1_direction,level,
+                                            source_time,0,0,bar.time);
+   if(ctx<=0) return false;
+   T1_ResetBootstrapAnchor();
+   return true;
+}
+
 inline void T1_AdvanceSeedAndDetect(const string sym,const ENUM_TIMEFRAMES tf,
                                     const MqlRates &bar)
 {
    const bool directional=T1_IsDirectionalCandle(bar);
+
+   // Before the root validation context exists, an opposite-colour candle may
+   // own it.  UP example: preserve the red candle Low only when its High is
+   // broken first; touching its Low first invalidates that anchor.
+   if(g_t1_active_context_id<=0)
+   {
+      const bool opposite=(g_t1_direction==DIR_UP ? bar.close<bar.open :
+                                                    bar.close>bar.open);
+      const bool activated=T1_TryCreateRootContextFromOppositeAnchor(sym,tf,bar);
+      if(!activated && g_t1_bootstrap_anchor.active)
+      {
+         const bool invalidated=(g_t1_direction==DIR_UP ?
+                                 bar.low<=g_t1_bootstrap_anchor.low :
+                                 bar.high>=g_t1_bootstrap_anchor.high);
+         if(invalidated) T1_ResetBootstrapAnchor();
+      }
+      if(g_t1_active_context_id<=0 && opposite)
+         T1_SetBootstrapAnchor(bar);
+   }
+
    if(!g_t1_seed.active)
    {
-      if(directional) T1_StartSeed(bar);
+      if(directional) T1_StartSeed(sym,tf,bar);
       return;
    }
 
-   // The main validation level belongs to the FIRST candle of the directional
-   // move.  A later bar touching it kills this seed before a candidate exists.
-   const bool seed_invalid=(g_t1_direction==DIR_UP ?
-                            bar.low<=g_t1_seed.validation_level :
-                            bar.high>=g_t1_seed.validation_level);
+   // A Stage-3 push / Trigger pop changes the validation context for NEW
+   // structures.  Rebind an unfinished move seed to that current context, but
+   // never rewrite validation on candidates that already exist.
+   double active_validation=0.0;
+   datetime active_validation_time=0;
+   int active_context_id=0;
+   if(T1_GetActiveValidation(active_validation,active_validation_time,active_context_id) &&
+      active_context_id!=g_t1_seed.validation_context_id)
+   {
+      g_t1_seed.validation_level=active_validation;
+      g_t1_seed.validation_context_id=active_context_id;
+   }
+
+   // If the new context was created on THIS exact bar by Stage 3, the touch
+   // that created it must not retroactively invalidate a seed earlier in the
+   // same candle.  The new line governs subsequent price action/candidates.
+   const bool context_created_this_bar=(T1_ActiveContextCreatedTime()==bar.time);
+   const bool seed_invalid=(!context_created_this_bar &&
+                            (g_t1_direction==DIR_UP ?
+                             bar.low<=g_t1_seed.validation_level :
+                             bar.high>=g_t1_seed.validation_level));
    if(seed_invalid)
    {
       T1_ResetSeed();
-      if(directional) T1_StartSeed(bar);
+      if(directional) T1_StartSeed(sym,tf,bar);
       return;
    }
 
-   bool continuation=false;
-   bool valid_pullback=false;
-   if(g_t1_direction==DIR_UP)
+   // ---------------------------------------------------------------
+   // Pending pullback
+   // ---------------------------------------------------------------
+   // A contrary candle is allowed to begin the pullback even when it first
+   // extends the trend-side wick and has not yet touched the previous
+   // directional candle's opposite wick.  The same pullback stays pending
+   // across any number/colour of candles until either:
+   //   1) that frozen opposite wick is touched, or
+   //   2) a later candle prints a lower high (UP) / higher low (DOWN).
+   // This directly covers the user's delayed red/green pullback sequences.
+   if(g_t1_seed.pullback_pending)
    {
-      if(g_t1_seed.bars==1)
-         valid_pullback=(bar.high<g_t1_seed.last_high &&
-                         bar.low>g_t1_seed.validation_level);
-      else
-         valid_pullback=(bar.high<=g_t1_seed.last_high &&
-                         bar.low>g_t1_seed.validation_level);
-      // Consecutive bullish candles remain the initial move unless the
-      // current candle already satisfies the explicit pullback range.  This
-      // preserves an equal-high second bullish candle as part of the move.
-      continuation=(directional && !valid_pullback);
-   }
-   else
-   {
-      if(g_t1_seed.bars==1)
-         valid_pullback=(bar.low>g_t1_seed.last_low &&
-                         bar.high<g_t1_seed.validation_level);
-      else
-         valid_pullback=(bar.low>=g_t1_seed.last_low &&
-                         bar.high<g_t1_seed.validation_level);
-      continuation=(directional && !valid_pullback);
+      const double prev_pending_high=g_t1_seed.pending_last_high;
+      const double prev_pending_low =g_t1_seed.pending_last_low;
+      const bool structure_turn=(g_t1_direction==DIR_UP ?
+                                 bar.high<prev_pending_high :
+                                 bar.low>prev_pending_low);
+      const bool anchor_touch=(g_t1_direction==DIR_UP ?
+                               bar.low<=g_t1_seed.pending_anchor_level :
+                               bar.high>=g_t1_seed.pending_anchor_level);
+      const double prior_pending_extreme=g_t1_seed.pending_extreme;
+      const datetime prior_pending_extreme_time=g_t1_seed.pending_extreme_time;
+
+      T1_UpdatePendingPullback(bar);
+
+      if(structure_turn || anchor_touch)
+      {
+         const int ci=T1_CreateCandidateFromSeed(sym,tf,bar,
+                        g_t1_seed.pending_start_level,
+                        g_t1_seed.pending_start_level_time,
+                        g_t1_seed.pending_extreme,
+                        g_t1_seed.pending_extreme_time);
+         if(ci>=0)
+            T1_ProcessNewCandidateSameBar(sym,tf,bar,ci,anchor_touch,
+                                       prior_pending_extreme,
+                                       prior_pending_extreme_time);
+
+         // Candidate creation never locks later/nested detection.  A
+         // directional confirmation candle can seed a fresh move immediately.
+         T1_ResetSeed();
+         if(directional) T1_StartSeed(sym,tf,bar);
+         return;
+      }
+
+      g_t1_seed.pending_last_high=bar.high;
+      g_t1_seed.pending_last_low=bar.low;
+      return;
    }
 
-   if(continuation)
+   // ---------------------------------------------------------------
+   // Fresh pullback decision from the active initial move
+   // ---------------------------------------------------------------
+   if(g_t1_direction==DIR_UP)
    {
+      const bool lower_high=(bar.high<g_t1_seed.last_high);
+      const bool last_low_touch=(bar.low<=g_t1_seed.last_low);
+
+      if(lower_high || last_low_touch)
+      {
+         // Normal lower-high pullback reclaims the LAST bullish candle High.
+         // If a contrary (red) outside candle makes a Higher High AND sweeps
+         // the prior bullish Low, that red candle's own wick High becomes the
+         // Stage-2 reclaim level exactly as specified by the user.
+         double start_level=g_t1_seed.last_high;
+         datetime start_time=g_t1_seed.last_time;
+         if(!directional && bar.high>g_t1_seed.last_high)
+         {
+            start_level=bar.high;
+            start_time=bar.time;
+         }
+
+         const int ci=T1_CreateCandidateFromSeed(sym,tf,bar,
+                        start_level,start_time,bar.low,bar.time);
+         if(ci>=0)
+            T1_ProcessNewCandidateSameBar(sym,tf,bar,ci,last_low_touch,0.0,0);
+         T1_ResetSeed();
+         if(directional) T1_StartSeed(sym,tf,bar);
+         return;
+      }
+
+      if(!directional)
+      {
+         // Red candle made/held a Higher High but did not yet touch the last
+         // bullish Low.  It starts a pending pullback; later red OR green bars
+         // can confirm it without losing this starting structure.
+         T1_BeginPendingPullback(bar);
+         return;
+      }
+
+      // A bullish candle with a non-lower High and intact last Low continues
+      // the initial move.  Equal/high extension is therefore not mistaken for
+      // a pullback.
       g_t1_seed.bars++;
       g_t1_seed.last_time=bar.time;
       g_t1_seed.last_high=bar.high;
@@ -829,41 +1408,39 @@ inline void T1_AdvanceSeedAndDetect(const string sym,const ENUM_TIMEFRAMES tf,
       return;
    }
 
-   if(valid_pullback)
-   {
-      const int ci=T1_CreateCandidateFromSeed(sym,tf,bar);
-      const int ticks=T1_LoadTicks(sym,tf,bar.time);
-      if(ticks>0)
-      {
-         const int activation=T1_Stage1ActivationTickIndex(g_t1_seed,g_t1_direction);
-         if(activation>=0)
-         {
-            // PullbackLow/High begins at the actual low-side/high-side Stage-1
-            // event, not at a later global candle extreme.  The tick replay
-            // then freezes the pullback extreme exactly when Stage 2 occurs.
-            g_t1_candidates[ci].pullback_extreme=T1_TickPrice(g_t1_ticks[activation]);
-            g_t1_candidates[ci].pullback_extreme_time=bar.time;
-            T1_ProcessCandidateTicks(g_t1_candidates[ci],sym,tf,bar,activation+1);
-         }
-         // If the full candle satisfies the pullback range but never touched
-         // the prior candle-side wick, Stage 1 is valid at candle level; no
-         // same-candle Stage 2 is inferred because its order is unprovable.
-      }
-      else
-         T1_ProcessCandidateOHLCFallback(g_t1_candidates[ci],sym,tf,bar,true);
+   // Bearish is the exact mirror of the bullish rules above.
+   const bool higher_low=(bar.low>g_t1_seed.last_low);
+   const bool last_high_touch=(bar.high>=g_t1_seed.last_high);
 
-      // Candidate creation must never lock detection of newer/nested moves.
-      // A directional Stage-1 candle may simultaneously become the first
-      // candle of a new directional move for a later nested candidate.
+   if(higher_low || last_high_touch)
+   {
+      double start_level=g_t1_seed.last_low;
+      datetime start_time=g_t1_seed.last_time;
+      if(!directional && bar.low<g_t1_seed.last_low)
+      {
+         start_level=bar.low;
+         start_time=bar.time;
+      }
+
+      const int ci=T1_CreateCandidateFromSeed(sym,tf,bar,
+                     start_level,start_time,bar.high,bar.time);
+      if(ci>=0)
+         T1_ProcessNewCandidateSameBar(sym,tf,bar,ci,last_high_touch,0.0,0);
       T1_ResetSeed();
-      if(directional) T1_StartSeed(bar);
+      if(directional) T1_StartSeed(sym,tf,bar);
       return;
    }
 
-   // The prior consecutive directional move can no longer seed a valid
-   // pullback.  A directional current candle starts a fresh move immediately.
-   T1_ResetSeed();
-   if(directional) T1_StartSeed(bar);
+   if(!directional)
+   {
+      T1_BeginPendingPullback(bar);
+      return;
+   }
+
+   g_t1_seed.bars++;
+   g_t1_seed.last_time=bar.time;
+   g_t1_seed.last_high=bar.high;
+   g_t1_seed.last_low=bar.low;
 }
 
 inline bool T1_EventBefore(const T1TriggerEvent &a,const T1TriggerEvent &b)
@@ -919,6 +1496,26 @@ inline void T1_CompactCandidates()
    }
 }
 
+inline void T1_InvalidateActiveContextByBar(const MqlRates &bar)
+{
+   const int idx=T1_ActiveContextIndex();
+   if(idx<0 || !g_t1_contexts[idx].open) return;
+
+   // The Stage-3 touch itself creates a nested context, so it is never allowed
+   // to invalidate that brand-new line retroactively on the same OHLC bar.
+   if(g_t1_contexts[idx].created_time>=bar.time) return;
+
+   const bool touched=(g_t1_contexts[idx].direction==DIR_UP ?
+                       bar.low<=g_t1_contexts[idx].level :
+                       bar.high>=g_t1_contexts[idx].level);
+   if(!touched) return;
+
+   const int closing_id=g_t1_contexts[idx].id;
+   T1_CloseContextByID(closing_id,"validation level touched");
+   if(g_t1_seed.active && g_t1_seed.validation_context_id==closing_id)
+      T1_ResetSeed();
+}
+
 inline void T1_ProcessBar(const string sym,const ENUM_TIMEFRAMES tf,
                           const MqlRates &rates[],const int n,const int i)
 {
@@ -956,6 +1553,12 @@ inline void T1_ProcessBar(const string sym,const ENUM_TIMEFRAMES tf,
          T1_ProcessCandidateOHLCFallback(g_t1_candidates[c],sym,tf,bar,false);
    }
    T1_CompactCandidates();
+
+   // The shared red context itself expires when its validation wick is
+   // touched.  This is separate from any one Candidate: existing candidates
+   // already processed their own validation above, while NEW structures must
+   // now fall back to the previous still-open context (or bootstrap a root).
+   T1_InvalidateActiveContextByBar(bar);
 
    // Pullback/new-candidate detection always continues even while other
    // candidates wait in later stages, enabling nested structures.  A newly

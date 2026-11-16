@@ -5,7 +5,6 @@
 #include <WaveBot/ExtLQ.mqh>
 #include <WaveBot/Utils.mqh>
 #include <WaveBot/RaceCoordinator.mqh>
-#include <WaveBot/FSMS_Lifecycle.mqh>
 #include <WaveBot/SWGate.mqh>
 
 // ---------------- Hunter (UP) state ----------------
@@ -19,7 +18,6 @@ static int      g_sw_seed_u_c1     = -1;     // اندیس C1 هانتر
 static datetime g_sw_seed_u_xtime  = 0;      // زمان شکست ext lq
 static double   g_sw_seed_u_level  = 0.0;    // High(C1 هانتر)
 static int      g_sw_counter_u     = 0;      // شمارندهٔ مارکرهای SW
-// ---------------- Hunter-UP Context (for major/minor worlds) ----------------
 struct HunterUpContext
 {
    int      hw_counter;      // همان g_hw_counter_u
@@ -156,6 +154,8 @@ inline void     SW_UP_ClearSeed()
    g_sw_seed_u_c1     = -1;
    g_sw_seed_u_xtime  = 0;
    g_sw_seed_u_level  = 0.0;
+   // A true regime cleanup or invalidator discards stale PB continuation.
+   Race_ContinuationReset(DIR_UP);
 }
 
 // تلاش برای نمایش Hunter فقط هنگام وقوع «کراس» و در صورت اعتبار
@@ -180,18 +180,12 @@ inline void Hunter_TryMarkIfValid(const MqlRates &rates[], const int n,
       MarkV("HW_"+tag+"_C1", rates[c1_index].time, clrViolet);
       MarkV("HW_"+tag+"_X",  rates[cross_idx].time, clrMagenta);
    }
-   bool __m15new_hwx_up_ok = M15NewMarker_OnTarget(DIR_UP, WB_M15NEW_TARGET_HWX, rates, n, cross_idx);
-   Trigger_M1LocalGateRegister(DIR_UP, WB15_KIND_START_HWX, rates, n, cross_idx, c1_index);
    g_marked_for_lq_u = true;
 
-   FSMSLC_RequestTerminal(FSMSLC_TERM_HWX, rates[cross_idx].time);
-
-   // M15->M1 Stage-1 is now exclusive to FSMS/HWX/HWBB candles tagged "new".
-   if(__m15new_hwx_up_ok)
-      WB15_PublishStartHWX(InpSymbol, DIR_UP, rates[cross_idx].time, ExtLQ_Get());
 
    // --- بذر SW را فعال کن (Highِ C1 هانتر)
    SW_UP_ActivateSeed(rates, n, c1_index, cross_idx);
+   WB_Coord_OnHW(DIR_UP,rates[cross_idx].time);
 
    if(InpDebugPrints)
       Print("[Hunter-UP] OK | C1=",T(rates[c1_index].time),
@@ -205,38 +199,46 @@ inline void SW_UP_TryMarkOnConfirmedW3(const MqlRates &rates[], const int n,
                                        const int w3_c1, const int bodyBreakIdx)
 {
    Race_OnSWConfirmed_UP(rates, n, w3_c1, bodyBreakIdx);
-   
-   // --- HARD GATE: SW فقط زمانی مجاز است که چرخهٔ W2 قفل شده باشد
-   // و زمان Hunter (seed) بعد از زمان قفل W2 همین چرخه باشد.
+
+   // No artificial SW: the real major W2 cycle must be locked and the W3
+   // actually confirmed. A resolved PB can inherit the HWBB's original Hunter
+   // reference even if that Hunter predated this newly locked major W2.
    if(!SWGate_UP_IsOpen()) return;
-   if(!SW_UP_SeedActive()) return;
-   if(w3_c1 < 0 || bodyBreakIdx < 0) return;
-   if(SW_UP_SeedTime() < SWGate_UP_W2Time()) return; // Hunter باید بعد از قفل W2 باشد
+   if(w3_c1<0 || w3_c1>=n || bodyBreakIdx<0 || bodyBreakIdx>=n) return;
 
-   if(!g_sw_seed_u_active) return;
-   if(w3_c1 < 0 || bodyBreakIdx < 0)    return;
-   if(rates[w3_c1].time < g_sw_seed_u_xtime) return; // باید بعد از Hunter باشد
+   const bool ordinary=(SW_UP_SeedActive() &&
+       SW_UP_SeedTime()>=SWGate_UP_W2Time() &&
+       rates[w3_c1].time>=SW_UP_SeedTime() &&
+       rates[bodyBreakIdx].close>SW_UP_Level());
+   const bool continued=Race_ContinuationSWEligible(DIR_UP,rates,n,
+                                                     w3_c1,bodyBreakIdx);
+   if(!ordinary && !continued) return;
 
-   // شرط SW: کندل بریکِ W3 بالاتر از High(C1_Hunter) «با بدنه» بسته شود
-   if(rates[bodyBreakIdx].close > g_sw_seed_u_level)
+   ++g_sw_counter_u;
+   const string tag=IntegerToString(g_sw_counter_u);
+   if(InpDrawMarkers)
    {
-      ++g_sw_counter_u;
-      string tag = IntegerToString(g_sw_counter_u);
-
-      if(InpDrawMarkers)
+      MarkV("SW_"+tag+"_C1",rates[w3_c1].time,clrAqua);
+      MarkV("SW_"+tag+"_B",rates[bodyBreakIdx].time,clrCyan);
+      if(continued)
       {
-         MarkV("SW_"+tag+"_C1", rates[w3_c1].time,    clrAqua);
-         MarkV("SW_"+tag+"_B" , rates[bodyBreakIdx].time, clrCyan);
+         const MqlRates b=rates[bodyBreakIdx];
+         const double pad=MathMax(_Point*5.0,(b.high-b.low)*0.30);
+         MarkCandleText("SW_PB_CONT_UP_"+IntegerToString((long)b.time),
+                        b.time,b.low-pad,"SW",clrAqua);
+         MarkV("RACE_A_SW_WIN_U_PB_"+IntegerToString((long)b.time),
+               b.time,clrAqua);
       }
-
-      if(InpDebugPrints)
-         Print("[SW-UP] OK | W3_C1=",T(rates[w3_c1].time),
-               " | BODY-BREAK=",T(rates[bodyBreakIdx].time),
-               " | > H(HW_C1)=",DoubleToString(g_sw_seed_u_level,_Digits));
-
-      g_sw_seed_u_active = false; // بذر مصرف شد
    }
-   
+   if(InpDebugPrints)
+      Print("[SW-UP] ",(continued?"PB continuation":"ordinary"),
+            " | W3_C1=",T(rates[w3_c1].time),
+            " | BODY-BREAK=",T(rates[bodyBreakIdx].time));
+
+   // Do not clear continuation until its independently tracked SR is also
+   // created (SR may be on this bar, a later bar, or a later major W2 cycle).
+   if(continued) Race_ContinuationMarkSW(DIR_UP);
+   g_sw_seed_u_active=false;
    SWGate_UP_OnPairFinalized();
 }
 

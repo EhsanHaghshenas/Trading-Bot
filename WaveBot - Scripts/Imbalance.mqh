@@ -46,7 +46,12 @@ struct IMBZone
    datetime  third_time;
    datetime  filled_time;    // 0 while active; historical archive otherwise
    double    base;           // immutable: first LOW (UP) or first HIGH (DOWN)
+   double    initial_edge;   // immutable original third-candle boundary (visual replay)
    double    edge;           // latest partial-fill boundary
+   datetime  edge_time;      // candle that established the current edge
+   datetime  base_to;        // exact original five-chart-bar endpoint
+   datetime  initial_edge_to;// exact original five-chart-bar endpoint
+   bool      pipeline_visible; // only IMB zones that advance coordinator are rendered
    int       edge_count;     // 1 initial segment + one per partial update
    int       touch_count;    // every aligned-TC encounter (even without new low/high)
    datetime  first_tc_time;  // distinguishes later TC returns from initial touches
@@ -198,7 +203,10 @@ inline void __IMB_DrawText(const IMBZone &zone, const string suffix,
                             const string message, const string tooltip,
                             const bool archival=false)
 {
-   if(!Markers_ShouldRender()) return;
+   // Analytical IMB tracking is always active.  Visuals are intentionally
+   // pipeline-only: a zone becomes visible only if its interaction actually
+   // advances the central M15->M1 coordinator.
+   if(!zone.pipeline_visible || !Markers_ShouldRender()) return;
    const string obj=__ScanPrefix()+zone.id+suffix;
    if(ObjectFind(0,obj)!=-1) ObjectDelete(0,obj);
    if(!ObjectCreate(0,obj,OBJ_TEXT,0,when,level))
@@ -221,7 +229,7 @@ inline void __IMB_DrawLevel(const IMBZone &zone, const string suffix,
                              const string visible_label, const bool is_base,
                              const int revision)
 {
-   if(!Markers_ShouldRender()) return;
+   if(!zone.pipeline_visible || !Markers_ShouldRender()) return;
    const string obj=__ScanPrefix()+zone.id+suffix;
    if(ObjectFind(0,obj)!=-1) ObjectDelete(0,obj);
    if(!ObjectCreate(0,obj,OBJ_TREND,0,from,price,to,price))
@@ -253,6 +261,58 @@ inline void __IMB_DrawLevel(const IMBZone &zone, const string suffix,
       y+=(up ? offset : -offset)+(up ? 1.0 : -1.0)*
          ((revision%3)*4.0*point);
    __IMB_DrawText(zone,suffix+"_LABEL",from,y,visible_label,tip);
+}
+
+// Reveal exactly one analytically-existing zone when it is the zone that
+// advances the coordinator.  No strategy predicate is duplicated here.
+// Historical non-pipeline IMBs stay fully tracked but visually silent.
+inline void __IMB_RevealForPipeline(const int z,const MqlRates &rates[],const int n,
+                                    const int bar_index,const int tf_seconds,
+                                    const string pipeline_role)
+{
+   if(z<0 || z>=g_imb_zone_count) return;
+   const bool was_visible=g_imb_zones[z].pipeline_visible;
+   g_imb_zones[z].pipeline_visible=true;
+
+   if(!was_visible)
+   {
+      const bool up=(g_imb_zones[z].direction==DIR_UP);
+      __IMB_DrawLevel(g_imb_zones[z],"_BASE",g_imb_zones[z].first_time,
+                      g_imb_zones[z].base_to,g_imb_zones[z].base,
+                      (up ? "PIPELINE ORIGINAL FIRST-CANDLE LOW" :
+                            "PIPELINE ORIGINAL FIRST-CANDLE HIGH"),
+                      g_imb_zones[z].tag+" PIPE BASE",true,0);
+      __IMB_DrawLevel(g_imb_zones[z],"_EDGE_0",g_imb_zones[z].third_time,
+                      g_imb_zones[z].initial_edge_to,g_imb_zones[z].initial_edge,
+                      (up ? "PIPELINE INITIAL TOP" : "PIPELINE INITIAL BOTTOM"),
+                      g_imb_zones[z].tag+" PIPE "+(up ? "TOP" : "BOT"),false,0);
+      // If this zone had already been partially updated before it became
+      // pipeline-relevant, expose its current live boundary as well.
+      if(g_imb_zones[z].edge_time>g_imb_zones[z].third_time &&
+         g_imb_zones[z].edge!=g_imb_zones[z].initial_edge)
+      {
+         __IMB_DrawLevel(g_imb_zones[z],"_EDGE_PIPE_CURRENT",g_imb_zones[z].edge_time,
+                         g_imb_zones[z].edge_time+(datetime)(5*tf_seconds),
+                         g_imb_zones[z].edge,
+                         (up ? "PIPELINE CURRENT TOP" : "PIPELINE CURRENT BOTTOM"),
+                         g_imb_zones[z].tag+" PIPE CURRENT",false,
+                         g_imb_zones[z].edge_count);
+      }
+   }
+
+   if(bar_index>=0 && bar_index<n)
+   {
+      double point=SymbolInfoDouble(g_imb_zones[z].symbol,SYMBOL_POINT);
+      if(point<=0.0) point=_Point;
+      const double hit_price=(g_imb_zones[z].direction==DIR_UP ? rates[bar_index].low
+                                                              : rates[bar_index].high);
+      const double y=hit_price+(g_imb_zones[z].direction==DIR_UP ? -14.0 : 14.0)*point;
+      __IMB_DrawText(g_imb_zones[z],"_PIPE_STAGE_"+(string)(long)rates[bar_index].time,
+                     rates[bar_index].time,y,
+                     g_imb_zones[z].tag+" "+pipeline_role,
+                     __IMB_Tooltip(g_imb_zones[z],pipeline_role,
+                                   rates[bar_index].time,hit_price));
+   }
 }
 
 // Only stale WaveBot IMB visuals are removed during a *full historical*
@@ -303,6 +363,11 @@ inline void __IMB_UpdateExisting(const MqlRates &rates[], const int n,
          g_imb_zones[z].active=false;
          g_imb_zones[z].filled_time=rates[bar_index].time;
          g_imb_filled_count++;
+         WB_Coord_OnIMBZoneState(g_imb_zones[z].id,g_imb_zones[z].direction,
+                                 rates[bar_index].time,g_imb_zones[z].first_time,
+                                 g_imb_zones[z].third_time,g_imb_zones[z].base,
+                                 g_imb_zones[z].edge,g_imb_zones[z].filled_time,
+                                 g_imb_zones[z].active);
          __IMB_DrawText(g_imb_zones[z],"_FILLED_LABEL",rates[bar_index].time,
                         g_imb_zones[z].base,g_imb_zones[z].tag+" FILLED",
                         __IMB_Tooltip(g_imb_zones[z],
@@ -319,6 +384,18 @@ inline void __IMB_UpdateExisting(const MqlRates &rates[], const int n,
       g_imb_zones[z].last_touch_time=rates[bar_index].time;
       g_imb_touch_count++;
       if(is_return) g_imb_return_touch_count++;
+      // A full fill archives the zone and is intentionally not a qualifying
+      // interaction.  Partial aligned touches are the existing IMB predicate
+      // consumed by the coordinator, before any optional edge update.
+      bool pipeline_accepted=false;
+      if(!fully_filled)
+         pipeline_accepted=WB_Coord_OnIMBInteraction(g_imb_zones[z].direction,
+                                   rates[bar_index].time,WB_RuntimeTF(),
+                                   g_imb_zones[z].id,g_imb_zones[z].third_time);
+      if(pipeline_accepted)
+         __IMB_RevealForPipeline(z,rates,n,bar_index,tf_seconds,
+                                 (WB_RuntimeTF()==PERIOD_M15 ?
+                                  "P3 IMB HIT" : "C4 M1 IMB HIT"));
       const string encounter_role=(is_return ? "RETURN TOUCH #" : "TOUCH #")+
                                   IntegerToString(encounter);
       const string encounter_label=g_imb_zones[z].tag+" "+
@@ -338,6 +415,11 @@ inline void __IMB_UpdateExisting(const MqlRates &rates[], const int n,
          g_imb_zones[z].active=false;
          g_imb_zones[z].filled_time=rates[bar_index].time;
          g_imb_filled_count++;
+         WB_Coord_OnIMBZoneState(g_imb_zones[z].id,g_imb_zones[z].direction,
+                                rates[bar_index].time,g_imb_zones[z].first_time,
+                                g_imb_zones[z].third_time,g_imb_zones[z].base,
+                                g_imb_zones[z].edge,g_imb_zones[z].filled_time,
+                                g_imb_zones[z].active);
          __IMB_DrawText(g_imb_zones[z],"_FILLED_LABEL",rates[bar_index].time,
                         g_imb_zones[z].base,g_imb_zones[z].tag+" FILLED",
                         __IMB_Tooltip(g_imb_zones[z],
@@ -354,6 +436,7 @@ inline void __IMB_UpdateExisting(const MqlRates &rates[], const int n,
                             : price>g_imb_zones[z].edge);
       if(!deeper) continue;
       g_imb_zones[z].edge=price;
+      g_imb_zones[z].edge_time=rates[bar_index].time;
       const int ordinal=g_imb_zones[z].edge_count;
       const string segment="_EDGE_"+IntegerToString(ordinal);
       const string role=(up ? "UPDATED TOP #" : "UPDATED BOTTOM #")+
@@ -365,6 +448,11 @@ inline void __IMB_UpdateExisting(const MqlRates &rates[], const int n,
                       " UPD"+IntegerToString(ordinal),false,ordinal);
       g_imb_zones[z].edge_count++;
       g_imb_updated_count++;
+      WB_Coord_OnIMBZoneState(g_imb_zones[z].id,g_imb_zones[z].direction,
+                              rates[bar_index].time,g_imb_zones[z].first_time,
+                              g_imb_zones[z].third_time,g_imb_zones[z].base,
+                              g_imb_zones[z].edge,g_imb_zones[z].filled_time,
+                              g_imb_zones[z].active);
    }
 }
 
@@ -412,7 +500,12 @@ inline void __IMB_Create(const Direction direction, const string sym,
    g_imb_zones[z].third_time=rates[third_index].time;
    g_imb_zones[z].filled_time=0;
    g_imb_zones[z].base=(up ? rates[first_index].low : rates[first_index].high);
-   g_imb_zones[z].edge=(up ? rates[third_index].low : rates[third_index].high);
+   g_imb_zones[z].initial_edge=(up ? rates[third_index].low : rates[third_index].high);
+   g_imb_zones[z].edge=g_imb_zones[z].initial_edge;
+   g_imb_zones[z].edge_time=rates[third_index].time;
+   g_imb_zones[z].base_to=__IMB_FiveBarsForward(rates,n,first_index,tf_seconds);
+   g_imb_zones[z].initial_edge_to=__IMB_FiveBarsForward(rates,n,third_index,tf_seconds);
+   g_imb_zones[z].pipeline_visible=false;
    g_imb_zones[z].edge_count=1;
    g_imb_zones[z].touch_count=0;
    g_imb_zones[z].last_touch_time=0;
@@ -420,20 +513,14 @@ inline void __IMB_Create(const Direction direction, const string sym,
    g_imb_zones[z].source_ref_time=ref_time;
    g_imb_zones[z].active=true;
    g_imb_active_indices[g_imb_active_count++]=z;
+   WB_Coord_OnIMBZoneState(g_imb_zones[z].id,g_imb_zones[z].direction,
+                           rates[third_index].time,g_imb_zones[z].first_time,
+                           g_imb_zones[z].third_time,g_imb_zones[z].base,
+                           g_imb_zones[z].edge,g_imb_zones[z].filled_time,
+                           g_imb_zones[z].active);
 
-   __IMB_DrawLevel(g_imb_zones[z],"_BASE",rates[first_index].time,
-                   __IMB_FiveBarsForward(rates,n,first_index,tf_seconds),
-                   g_imb_zones[z].base,
-                   (up ? "ORIGINAL FIRST-CANDLE LOW" : "ORIGINAL FIRST-CANDLE HIGH"),
-                   g_imb_zones[z].tag+" "+(up ? "START LOW" : "START HIGH"),
-                   true,0);
-   __IMB_DrawLevel(g_imb_zones[z],"_EDGE_0",rates[third_index].time,
-                   __IMB_FiveBarsForward(rates,n,third_index,tf_seconds),
-                   g_imb_zones[z].edge,
-                   (up ? "INITIAL TOP" : "INITIAL BOTTOM"),
-                   g_imb_zones[z].tag+" "+(retrospective ? "RETRO " : "NEW ")+
-                   (up ? "TOP" : "BOT"),
-                   false,0);
+   // Do not draw ordinary IMBs.  The coordinator will reveal only the zone
+   // that actually completes P3/C4.  Analytical tracking remains unchanged.
    g_imb_created_count++;
    if(retrospective) g_imb_retro_created_count++;
 }
@@ -483,6 +570,11 @@ inline void __IMB_CheckPreTCFullFill(const int z,
       g_imb_zones[z].active=false;
       g_imb_zones[z].filled_time=rates[b].time;
       g_imb_filled_count++;
+       WB_Coord_OnIMBZoneState(g_imb_zones[z].id,g_imb_zones[z].direction,
+                               rates[b].time,g_imb_zones[z].first_time,
+                               g_imb_zones[z].third_time,g_imb_zones[z].base,
+                               g_imb_zones[z].edge,g_imb_zones[z].filled_time,
+                               g_imb_zones[z].active);
       __IMB_DrawText(g_imb_zones[z],"_FILLED_LABEL",rates[b].time,
                      g_imb_zones[z].base,g_imb_zones[z].tag+" FILLED",
                      __IMB_Tooltip(g_imb_zones[z],
