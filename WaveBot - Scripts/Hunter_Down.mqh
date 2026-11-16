@@ -5,6 +5,7 @@
 #include <WaveBot/ExtLQ_Down.mqh>
 #include <WaveBot/Utils.mqh>
 #include <WaveBot/RaceCoordinator.mqh>
+#include <WaveBot/FSMS_Lifecycle.mqh>
 #include <WaveBot/SWGate.mqh>
 
 // ---------------- Hunter (DOWN) state ----------------
@@ -18,6 +19,7 @@ static int      g_sw_seed_d_c1     = -1;     // اندیس C1 هانتر
 static datetime g_sw_seed_d_xtime  = 0;      // زمان کراس ext lq
 static double   g_sw_seed_d_level  = 0.0;    // Low(C1 هانتر)
 static int      g_sw_counter_d     = 0;
+// ---------------- Hunter-DOWN Context (for major/minor worlds) ----------------
 struct HunterDownContext
 {
    int      hw_counter;      // همان g_hw_counter_d
@@ -153,7 +155,6 @@ inline void     SW_DOWN_ClearSeed()
    g_sw_seed_d_c1     = -1;
    g_sw_seed_d_xtime  = 0;
    g_sw_seed_d_level  = 0.0;
-   Race_ContinuationReset(DIR_DOWN);
 }
 
 // ثبت Hunter در لحظه‌ی «کراس»
@@ -177,12 +178,18 @@ inline void Hunter_Down_TryMarkIfValid(const MqlRates &rates[], const int n,
       MarkV("HW_"+tag+"_C1", rates[c1_index].time, clrViolet);
       MarkV("HW_"+tag+"_X",  rates[cross_idx].time, clrMagenta);
    }
+   bool __m15new_hwx_dn_ok = M15NewMarker_OnTarget(DIR_DOWN, WB_M15NEW_TARGET_HWX, rates, n, cross_idx);
+   Trigger_M1LocalGateRegister(DIR_DOWN, WB15_KIND_START_HWX, rates, n, cross_idx, c1_index);
    g_marked_for_lq_d = true;
 
+   FSMSLC_RequestTerminal(FSMSLC_TERM_HWX, rates[cross_idx].time);
+
+   // M15->M1 Stage-1 is now exclusive to FSMS/HWX/HWBB candles tagged "new".
+   if(__m15new_hwx_dn_ok)
+      WB15_PublishStartHWX(InpSymbol, DIR_DOWN, rates[cross_idx].time, ExtLQ_Down_Get());
 
    // بذر SW نزولی را فعال کن (Lowِ C1 هانتر)
    SW_DOWN_ActivateSeed(rates, n, c1_index, cross_idx);
-   WB_Coord_OnHW(DIR_DOWN,rates[cross_idx].time);
 
    if(InpDebugPrints)
       Print("[Hunter-DOWN] OK | C1=",T(rates[c1_index].time),
@@ -196,41 +203,36 @@ inline void SW_DOWN_TryMarkOnConfirmedW3(const MqlRates &rates[], const int n,
                                          const int w3_c1, const int bodyBreakIdx)
 {
    Race_OnSWConfirmed_DOWN(rates, n, w3_c1, bodyBreakIdx);
-
+   
    if(!SWGate_DN_IsOpen()) return;
-   if(w3_c1<0 || w3_c1>=n || bodyBreakIdx<0 || bodyBreakIdx>=n) return;
+   if(!SW_DOWN_SeedActive()) return;
+   if(w3_c1 < 0 || bodyBreakIdx < 0) return;
+   if(SW_DOWN_SeedTime() < SWGate_DN_W2Time()) return;
 
-   const bool ordinary=(SW_DOWN_SeedActive() &&
-       SW_DOWN_SeedTime()>=SWGate_DN_W2Time() &&
-       rates[w3_c1].time>=SW_DOWN_SeedTime() &&
-       rates[bodyBreakIdx].close<SW_DOWN_Level());
-   const bool continued=Race_ContinuationSWEligible(DIR_DOWN,rates,n,
-                                                     w3_c1,bodyBreakIdx);
-   if(!ordinary && !continued) return;
+   if(!g_sw_seed_d_active) return;
+   if(w3_c1 < 0 || bodyBreakIdx < 0)     return;
+   if(rates[w3_c1].time < g_sw_seed_d_xtime) return;
 
-   ++g_sw_counter_d;
-   const string tag=IntegerToString(g_sw_counter_d);
-   if(InpDrawMarkers)
+   // شرط SW: کندل بریکِ W3 پایین‌تر از Low(C1_Hunter) «با بدنه» بسته شود
+   if(rates[bodyBreakIdx].close < g_sw_seed_d_level)
    {
-      MarkV("SW_"+tag+"_C1",rates[w3_c1].time,clrOrangeRed);
-      MarkV("SW_"+tag+"_B",rates[bodyBreakIdx].time,clrDarkOrange);
-      if(continued)
-      {
-         const MqlRates b=rates[bodyBreakIdx];
-         const double pad=MathMax(_Point*5.0,(b.high-b.low)*0.30);
-         MarkCandleText("SW_PB_CONT_DN_"+IntegerToString((long)b.time),
-                        b.time,b.high+pad,"SW",clrOrangeRed);
-         MarkV("RACE_A_SW_WIN_D_PB_"+IntegerToString((long)b.time),
-               b.time,clrDarkOrange);
-      }
-   }
-   if(InpDebugPrints)
-      Print("[SW-DOWN] ",(continued?"PB continuation":"ordinary"),
-            " | W3_C1=",T(rates[w3_c1].time),
-            " | BODY-BREAK=",T(rates[bodyBreakIdx].time));
+      ++g_sw_counter_d;
+      string tag = IntegerToString(g_sw_counter_d);
 
-   if(continued) Race_ContinuationMarkSW(DIR_DOWN);
-   g_sw_seed_d_active=false;
+      if(InpDrawMarkers)
+      {
+         MarkV("SW_"+tag+"_C1", rates[w3_c1].time,    clrOrangeRed);
+         MarkV("SW_"+tag+"_B" , rates[bodyBreakIdx].time, clrDarkOrange);
+      }
+
+      if(InpDebugPrints)
+         Print("[SW-DOWN] OK | W3_C1=",T(rates[w3_c1].time),
+               " | BODY-BREAK=",T(rates[bodyBreakIdx].time),
+               " | < L(HW_C1)=",DoubleToString(g_sw_seed_d_level,_Digits));
+
+      g_sw_seed_d_active = false; // بذر مصرف شد
+   }
+   
    SWGate_DN_OnPairFinalized();
 }
 

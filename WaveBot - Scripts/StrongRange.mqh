@@ -8,14 +8,16 @@
 #include <WaveBot/SWGate.mqh>
 #include <WaveBot/Hunter.mqh>        // SW_UP_* و سطح High(C1-HW)
 #include <WaveBot/Hunter_Down.mqh>   // SW_DOWN_* و سطح Low(C1-HW)
-#include <WaveBot/SR_Mitigator.mqh>  // مدیریت first SR mitigator
-#include <WaveBot/TrendConfirmation.mqh> // marker on next bar after first post-MTC SR
+#include <WaveBot/FSMS_SW.mqh>       // FSMS_SW_* دسترسی به C1-W2 و SeedTime
+#include <WaveBot/SR_Mitigator.mqh>  // NEW: مدیریت first SR mitigator
 
 // شمارنده‌ها و جلوگیری از رسم تکراری در هر Seed
 static int      g_sr_up_counter = 0;
 static int      g_sr_dn_counter = 0;
 static datetime g_sr_sw_up_drawn_seed   = 0;
+static datetime g_sr_fsms_up_drawn_seed = 0;
 static datetime g_sr_sw_dn_drawn_seed   = 0;
+static datetime g_sr_fsms_dn_drawn_seed = 0;
 // ------------------------------
 // Context snapshot for StrongRange (UP/DOWN)
 // ------------------------------
@@ -24,16 +26,20 @@ struct StrongRangeContext
    int      sr_up_counter;
    int      sr_dn_counter;
    datetime sr_sw_up_drawn_seed;
+   datetime sr_fsms_up_drawn_seed;
    datetime sr_sw_dn_drawn_seed;
+   datetime sr_fsms_dn_drawn_seed;
 };
 
-// مقداردهی اولیهٔ کانتکست ساختار بازار
+// مقداردهی اولیهٔ یک کانتکست خالی (برای ساخت world جدید: ماژور/مینور)
 inline void SR_ContextInit(StrongRangeContext &ctx)
 {
    ctx.sr_up_counter         = 0;
    ctx.sr_dn_counter         = 0;
    ctx.sr_sw_up_drawn_seed   = 0;
+   ctx.sr_fsms_up_drawn_seed = 0;
    ctx.sr_sw_dn_drawn_seed   = 0;
+   ctx.sr_fsms_dn_drawn_seed = 0;
 }
 
 // Export: کپی وضعیت فعلی globalها به داخل کانتکست
@@ -42,7 +48,9 @@ inline void SR_ContextExport(StrongRangeContext &ctx)
    ctx.sr_up_counter         = g_sr_up_counter;
    ctx.sr_dn_counter         = g_sr_dn_counter;
    ctx.sr_sw_up_drawn_seed   = g_sr_sw_up_drawn_seed;
+   ctx.sr_fsms_up_drawn_seed = g_sr_fsms_up_drawn_seed;
    ctx.sr_sw_dn_drawn_seed   = g_sr_sw_dn_drawn_seed;
+   ctx.sr_fsms_dn_drawn_seed = g_sr_fsms_dn_drawn_seed;
 }
 
 // Import: برگرداندن وضعیت ذخیره‌شدهٔ کانتکست به متغیرهای global
@@ -51,7 +59,9 @@ inline void SR_ContextImport(const StrongRangeContext &ctx)
    g_sr_up_counter         = ctx.sr_up_counter;
    g_sr_dn_counter         = ctx.sr_dn_counter;
    g_sr_sw_up_drawn_seed   = ctx.sr_sw_up_drawn_seed;
+   g_sr_fsms_up_drawn_seed = ctx.sr_fsms_up_drawn_seed;
    g_sr_sw_dn_drawn_seed   = ctx.sr_sw_dn_drawn_seed;
+   g_sr_fsms_dn_drawn_seed = ctx.sr_fsms_dn_drawn_seed;
 }
 
 // ریست کامل وضعیت StrongRange در world فعلی
@@ -60,7 +70,9 @@ inline void SR_ResetGlobals()
    g_sr_up_counter         = 0;
    g_sr_dn_counter         = 0;
    g_sr_sw_up_drawn_seed   = 0;
+   g_sr_fsms_up_drawn_seed = 0;
    g_sr_sw_dn_drawn_seed   = 0;
+   g_sr_fsms_dn_drawn_seed = 0;
 }
 
 // رسم مستطیل SR
@@ -83,13 +95,47 @@ inline void __SR_DrawRect(const string base, const datetime t1, const double p_t
    ObjectSetInteger(0, full, OBJPROP_FILL,  false);
 }
 
+// --- سناریوی صعودی: هنگام شکل‌گیری SW یا FSMS-SW ---
 inline void SR_OnBar_UP(const MqlRates &rates[], const int n, const int j, const int w3_start_idx)
 {
    if(j<0 || j>=n) return;
    if(w3_start_idx < 0 || w3_start_idx >= n) return;
 
-   bool standard_created=false;
-   // Standard Hunter/SW strong range only (Hunter) — فقط وقتی Seed پس از قفل W2 است
+   // 1) ابتدا اگر FSMS–SW فعال است (اولویت بالاتر)
+   if(FSMS_SW_UP_SeedActive())
+   {
+      const datetime seed_t = FSMS_SW_UP_SeedTime();
+      if(rates[j].time >= seed_t && g_sr_fsms_up_drawn_seed != seed_t)
+      {
+         const double level_top = FSMS_SW_UP_Level();       // High(C1-W2 هم‌جهت FSMS)
+         if(rates[j].high > level_top)                      // شکست با شدو یا بدنه
+         {
+            const int    c1_top_idx = FSMS_SW_UP_C1Index();   // اندیس همان C1-W2
+            const int    t_idx      = (c1_top_idx>=0 && c1_top_idx<n ? c1_top_idx : w3_start_idx);
+            const double p_top      = level_top;
+            const double p_bottom   = rates[w3_start_idx].low; // Low(C1-FSMS-SW)
+            ++g_sr_up_counter;
+
+            __SR_DrawRect("SR_U_"+IntegerToString(g_sr_up_counter),
+                          rates[t_idx].time, p_top,
+                          rates[j].time,    p_bottom);
+            g_sr_fsms_up_drawn_seed = seed_t;
+
+            // NEW: ثبت وضعیت SR برای first SR mitigator + ناحیه unmitigated SR
+            const bool created_by_body = (rates[j].close > level_top);
+            SRMIT_OnNewSR_UP(g_sr_up_counter,
+                             p_top,
+                             p_bottom,
+                             rates[j].time,            // زمان کندل سازنده SR
+                             created_by_body,
+                             rates[w3_start_idx].time  // زمان C1-FSMS-SW = لبه چپ ناحیه SR و unmit
+                             );
+         }
+      }
+      return; // اگر FSMS‑SW فعال است، دیگر به حالت SW معمولی نمی‌رویم
+   }
+
+   // 2) SW معمولی (Hunter) — فقط وقتی Seed پس از قفل W2 است
    if(SWGate_UP_IsOpen() && SW_UP_SeedActive() && SW_UP_SeedTime() >= SWGate_UP_W2Time())
    {
       const datetime seed_t = SW_UP_SeedTime();
@@ -108,64 +154,62 @@ inline void SR_OnBar_UP(const MqlRates &rates[], const int n, const int j, const
                           rates[t_idx].time, p_top,
                           rates[j].time,    p_bottom);
             g_sr_sw_up_drawn_seed = seed_t;
-            standard_created=true;
-            // A normal Hunter path can already have fulfilled the pending
-            // PB continuation; never draw the same SR twice on this candle.
-            if(Race_ContinuationSREligible(DIR_UP,rates[j].time))
-               Race_ContinuationMarkSR(DIR_UP);
 
-            // Analysis-only: confirm an UP MTC on its FIRST later UP SR.
-            TC_OnNewStrongRange(DIR_UP, rates, n, j);
-
-            // NEW: ثبت وضعیت SR برای first SR mitigator
+            // NEW: ثبت وضعیت SR برای first SR mitigator + ناحیه unmitigated SR
             const bool created_by_body = (rates[j].close > level_top);
             SRMIT_OnNewSR_UP(g_sr_up_counter,
                              p_top,
                              p_bottom,
                              rates[j].time,            // زمان کندل سازنده SR
-                             created_by_body);
-         }
-      }
-   }
-   // Original-trend ref won after the first opposite pair. A new main W2
-   // can have locked AFTER the Hunter which created the HWBB; retain that
-   // original Hunter's ref for exactly one legitimate original-direction SR.
-   // This does NOT bypass an open main W2 cycle or standard SR geometry.
-   if(!standard_created && SWGate_UP_IsOpen() &&
-      Race_ContinuationSREligible(DIR_UP,rates[j].time))
-   {
-      const double level=Race_ContinuationSRLevel(DIR_UP);
-      if(level>0.0 && rates[j].high>level)
-      {
-         const double top=level;
-         const double bottom=rates[w3_start_idx].low;
-         if(top>bottom)
-         {
-            const datetime c1t=Race_ContinuationSRC1Time(DIR_UP);
-            const datetime anchor_time=(c1t>0 && c1t<=rates[j].time ?
-                                        c1t : rates[w3_start_idx].time);
-            ++g_sr_up_counter;
-            __SR_DrawRect("SR_U_"+IntegerToString(g_sr_up_counter),
-                          anchor_time,top,rates[j].time,bottom);
-            Race_ContinuationMarkSR(DIR_UP);
-            TC_OnNewStrongRange(DIR_UP,rates,n,j);
-            SRMIT_OnNewSR_UP(g_sr_up_counter,top,bottom,rates[j].time,
-                             rates[j].close>top);
-            if(InpDebugPrints)
-               Print("[SR-UP] Original-trend PB continuation @ ",
-                     T(rates[j].time));
+                             created_by_body,
+                             rates[w3_start_idx].time  // زمان C1-SW = لبه چپ ناحیه SR و unmit
+                             );
          }
       }
    }
 }
 
+// --- سناریوی نزولی (آینه‌ای): هنگام شکل‌گیری SW یا FSMS-SW ---
 inline void SR_OnBar_DOWN(const MqlRates &rates[], const int n, const int j, const int w3_start_idx)
 {
    if(j<0 || j>=n) return;
    if(w3_start_idx < 0 || w3_start_idx >= n) return;
 
-   bool standard_created=false;
-   // Standard Hunter/SW strong range only (DOWN)
+   // 1) اولویت: FSMS–SW نزولی
+   if(FSMS_SW_DN_SeedActive())
+   {
+      const datetime seed_t = FSMS_SW_DN_SeedTime();
+      if(rates[j].time >= seed_t && g_sr_fsms_dn_drawn_seed != seed_t)
+      {
+         const double level_bottom = FSMS_SW_DN_Level();    // Low(C1-W2 هم‌جهت FSMS)
+         if(rates[j].low < level_bottom)                    // شکست با شدو یا بدنه
+         {
+            const int    c1_bot_idx = FSMS_SW_DN_C1Index();
+            const int    t_idx      = (c1_bot_idx>=0 && c1_bot_idx<n ? c1_bot_idx : w3_start_idx);
+            const double p_top      = rates[w3_start_idx].high; // High(C1-FSMS-SW)
+            const double p_bottom   = level_bottom;             // Low(C1-W2 یا C1-HW)
+            ++g_sr_dn_counter;
+
+            __SR_DrawRect("SR_D_"+IntegerToString(g_sr_dn_counter),
+                          rates[t_idx].time, p_top,
+                          rates[j].time,    p_bottom);
+            g_sr_fsms_dn_drawn_seed = seed_t;
+
+            // NEW: ثبت وضعیت SR برای first SR mitigator + ناحیه unmitigated SR
+            const bool created_by_body = (rates[j].close < level_bottom);
+            SRMIT_OnNewSR_DN(g_sr_dn_counter,
+                             p_top,
+                             p_bottom,
+                             rates[j].time,            // زمان کندل سازنده SR
+                             created_by_body,
+                             rates[w3_start_idx].time  // زمان C1-FSMS-SW = لبه چپ ناحیه SR و unmit (DOWN)
+                             );
+         }
+      }
+      return;
+   }
+
+   // 2) SW معمولی نزولی
    if(SWGate_DN_IsOpen() && SW_DOWN_SeedActive() && SW_DOWN_SeedTime() >= SWGate_DN_W2Time())
    {
       const datetime seed_t = SW_DOWN_SeedTime();
@@ -184,46 +228,16 @@ inline void SR_OnBar_DOWN(const MqlRates &rates[], const int n, const int j, con
                           rates[t_idx].time, p_top,
                           rates[j].time,    p_bottom);
             g_sr_sw_dn_drawn_seed = seed_t;
-            standard_created=true;
-            if(Race_ContinuationSREligible(DIR_DOWN,rates[j].time))
-               Race_ContinuationMarkSR(DIR_DOWN);
 
-            // Analysis-only: confirm a DOWN MTC on its FIRST later DOWN SR.
-            TC_OnNewStrongRange(DIR_DOWN, rates, n, j);
-
-            // NEW: ثبت وضعیت SR برای first SR mitigator
+            // NEW: ثبت وضعیت SR برای first SR mitigator + ناحیه unmitigated SR
             const bool created_by_body = (rates[j].close < level_bottom);
             SRMIT_OnNewSR_DN(g_sr_dn_counter,
                              p_top,
                              p_bottom,
                              rates[j].time,            // زمان کندل سازنده SR
-                             created_by_body);
-         }
-      }
-   }
-   if(!standard_created && SWGate_DN_IsOpen() &&
-      Race_ContinuationSREligible(DIR_DOWN,rates[j].time))
-   {
-      const double level=Race_ContinuationSRLevel(DIR_DOWN);
-      if(level>0.0 && rates[j].low<level)
-      {
-         const double top=rates[w3_start_idx].high;
-         const double bottom=level;
-         if(top>bottom)
-         {
-            const datetime c1t=Race_ContinuationSRC1Time(DIR_DOWN);
-            const datetime anchor_time=(c1t>0 && c1t<=rates[j].time ?
-                                        c1t : rates[w3_start_idx].time);
-            ++g_sr_dn_counter;
-            __SR_DrawRect("SR_D_"+IntegerToString(g_sr_dn_counter),
-                          anchor_time,top,rates[j].time,bottom);
-            Race_ContinuationMarkSR(DIR_DOWN);
-            TC_OnNewStrongRange(DIR_DOWN,rates,n,j);
-            SRMIT_OnNewSR_DN(g_sr_dn_counter,top,bottom,rates[j].time,
-                             rates[j].close<bottom);
-            if(InpDebugPrints)
-               Print("[SR-DOWN] Original-trend PB continuation @ ",
-                     T(rates[j].time));
+                             created_by_body,
+                             rates[w3_start_idx].time  // زمان C1-SW = لبه چپ ناحیه SR و unmit (DOWN)
+                             );
          }
       }
    }

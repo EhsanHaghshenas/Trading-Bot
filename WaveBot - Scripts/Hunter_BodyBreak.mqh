@@ -7,6 +7,7 @@
 #include <WaveBot/Hunter.mqh>       // برای دسترسی به SW_UP_Seed* (بذرهانتر معتبر)
 #include <WaveBot/Hunter_Down.mqh>  // برای دسترسی به SW_DOWN_Seed*
 #include <WaveBot/RaceCoordinator.mqh>
+#include <WaveBot/FSMS_Lifecycle.mqh>
 #include <WaveBot/ShadowBreaker.mqh>   // brings SB_*_BinaryPhaseActive definitions
 
 // -------------------- UP state --------------------
@@ -195,12 +196,18 @@ inline void HW_BB_UP_OnBar(const MqlRates &r, const MqlRates &rates[], const int
    if(r.close < g_bb_level_u)
    {
       ++g_bb_counter_u;
-      WB_Coord_OnHWBB(DIR_UP,r.time);
       if(InpDrawMarkers) MarkV("HWBB_U_"+IntegerToString(g_bb_counter_u), r.time, clrRoyalBlue);
+      bool __m15new_hwbb_up_ok = M15NewMarker_OnTarget(DIR_UP, WB_M15NEW_TARGET_HWBB, rates, n, j);
+      Trigger_M1LocalGateRegister(DIR_UP, WB15_KIND_START_HWBB, rates, n, j, SW_UP_C1Index());
 
+      FSMSLC_RequestTerminal(FSMSLC_TERM_HWBB, r.time);
+
+      // M15->M1 Stage-1 is now exclusive to FSMS/HWX/HWBB candles tagged "new".
+      if(__m15new_hwbb_up_ok)
+         WB15_PublishStartHWBB(InpSymbol, DIR_UP, r.time, g_bb_level_u, g_bb_cross_time_u);
 
       // set ref for POSSIBLE MTC_DOWN (High of Hunter-UP C1) + draw ref history now
-      Race_SetRefLevelForMTC_Down(SW_UP_Level(),SW_UP_C1Time(rates,n));
+      Race_SetRefLevelForMTC_Down(SW_UP_Level());
       //Race_DrawRefHistory_Down(SW_UP_Level(), r.time);
 
       // start race from this bar (Mode=UP)
@@ -277,12 +284,18 @@ inline void HW_BB_DOWN_OnBar(const MqlRates &r, const MqlRates &rates[], const i
    if(r.close > g_bb_level_d)
    {
       ++g_bb_counter_d;
-      WB_Coord_OnHWBB(DIR_DOWN,r.time);
       if(InpDrawMarkers) MarkV("HWBB_D_"+IntegerToString(g_bb_counter_d), r.time, clrDarkOrange);
+      bool __m15new_hwbb_dn_ok = M15NewMarker_OnTarget(DIR_DOWN, WB_M15NEW_TARGET_HWBB, rates, n, j);
+      Trigger_M1LocalGateRegister(DIR_DOWN, WB15_KIND_START_HWBB, rates, n, j, SW_DOWN_C1Index());
 
+      FSMSLC_RequestTerminal(FSMSLC_TERM_HWBB, r.time);
+
+      // M15->M1 Stage-1 is now exclusive to FSMS/HWX/HWBB candles tagged "new".
+      if(__m15new_hwbb_dn_ok)
+         WB15_PublishStartHWBB(InpSymbol, DIR_DOWN, r.time, g_bb_level_d, g_bb_cross_time_d);
 
       // set ref for POSSIBLE MTC_UP (Low of Hunter-DOWN C1) + draw ref history now
-      Race_SetRefLevelForMTC_Up(SW_DOWN_Level(),SW_DOWN_C1Time(rates,n));
+      Race_SetRefLevelForMTC_Up(SW_DOWN_Level());
       //Race_DrawRefHistory_Up(SW_DOWN_Level(), r.time);
 
       // start race from this bar (Mode=DOWN)
